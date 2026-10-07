@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Taskboard</title>
+<link rel="icon" href="data:,">
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f5f5f3; --card: #fff; --line: #dcdcd6; --muted: #6b6b66; --text: #1d1d1b;
+    --accent: #2f6fde; --red: #c62828; --amber: #a86400;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #1b1b1a; --card: #262625; --line: #3a3a38; --muted: #9a9a94; --text: #ececea;
+            --accent: #7aa7ff; --red: #ff6b6b; --amber: #f0b35a; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.4 -apple-system, system-ui, sans-serif; background: var(--bg); color: var(--text); }
+  header { padding: 16px 20px 6px; }
+  #focusLabel { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+  #focusText { font-size: 20px; font-weight: 600; }
+  #sched { margin-top: 6px; color: var(--muted); font-size: 13px; }
+  #sched b { color: var(--text); font-weight: 500; }
+  form { display: flex; gap: 8px; padding: 8px 20px; max-width: 720px; }
+  form input { flex: 1; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px;
+               background: var(--card); color: var(--text); font: inherit; }
+  form button { padding: 8px 14px; border: 0; border-radius: 6px; background: var(--accent); color: #fff; font: inherit; cursor: pointer; }
+  #msg { padding: 0 20px; color: var(--red); font-size: 13px; min-height: 18px; }
+  main { display: grid; grid-template-columns: repeat(5, minmax(210px, 1fr)); gap: 12px; padding: 4px 20px 24px; overflow-x: auto; }
+  .col { border: 1px solid var(--line); border-radius: 8px; padding: 8px; min-height: 240px; }
+  .col.drop { outline: 2px dashed var(--accent); outline-offset: -2px; }
+  .col h2 { margin: 0 0 8px; font-size: 12px; text-transform: uppercase; letter-spacing: .05em;
+            color: var(--muted); display: flex; justify-content: space-between; }
+  .col.over h2 { color: var(--red); }
+  .list { min-height: 200px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 8px;
+          margin-bottom: 6px; cursor: grab; display: flex; gap: 8px; align-items: flex-start; }
+  .card.dragging { opacity: .4; }
+  .card input { margin-top: 3px; cursor: pointer; }
+  .card .body { flex: 1; min-width: 0; }
+  .card .title { overflow-wrap: anywhere; }
+  .card.done .title { text-decoration: line-through; color: var(--muted); }
+  .meta { font-size: 12px; color: var(--muted); margin-top: 3px; display: flex; gap: 8px; flex-wrap: wrap; }
+  .tag { font-weight: 600; color: hsl(var(--h) 60% 36%); }
+  @media (prefers-color-scheme: dark) { .tag { color: hsl(var(--h) 65% 70%); } }
+  .due.today { color: var(--amber); font-weight: 600; }
+  .due.late { color: var(--red); font-weight: 600; }
+  .x { border: 0; background: none; color: var(--muted); cursor: pointer; font-size: 16px; line-height: 1; padding: 0 2px; visibility: hidden; }
+  .card:hover .x { visibility: visible; }
+  .ph { height: 3px; background: var(--accent); border-radius: 2px; margin: -2px 0 4px; }
+</style>
+</head>
+<body>
+<header>
+  <div id="focusLabel">Do this now</div>
+  <div id="focusText">…</div>
+  <div id="sched"></div>
+</header>
+<form id="add">
+  <input id="newTitle" placeholder="Add a task — lands in Inbox, ask Claude to sort it" autocomplete="off">
+  <button>Add</button>
+</form>
+<div id="msg"></div>
+<main id="board"></main>
+
+<script>
+const COLS = [['inbox', 'Inbox'], ['now', 'Now'], ['next', 'Next'], ['later', 'Later'], ['done', 'Done']];
+const NOW_LIMIT = 3, DONE_SHOWN = 15;
+let state = { mtime: null, tasks: [] };
+let dragId = null, saving = false, again = false;
+
+const $ = s => document.querySelector(s);
+const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+const pad = n => String(n).padStart(2, '0');
+const today = () => { const d = new Date(); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; };
+const hhmm = iso => { const d = new Date(iso); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+const hue = s => [...s].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 360, 7);
+const uid = () => 't_' + Math.random().toString(36).slice(2, 8);
+let flashTimer;
+const flash = m => {
+  $('#msg').textContent = m;
+  clearTimeout(flashTimer);
+  if (m && !m.startsWith('Server')) flashTimer = setTimeout(() => { $('#msg').textContent = ''; }, 8000);
+};
+
+// ---------- render ----------
+function render() {
+  const board = $('#board');
+  board.innerHTML = '';
+  const t0 = today();
+  for (const [key, label] of COLS) {
+    let items = state.tasks.filter(t => t.status === key);
+    const total = items.length;
+    if (key === 'done') items = items.slice(0, DONE_SHOWN);
+    const col = el('section', 'col' + (key === 'now' && total > NOW_LIMIT ? ' over' : ''));
+    const h = el('h2');
+    h.append(el('span', null, label), el('span', null, key === 'now' ? `${total} / ${NOW_LIMIT}` : String(total)));
+    const list = el('div', 'list');
+    for (const t of items) list.appendChild(card(t, t0));
+    col.append(h, list);
+    dropTarget(col, list, key);
+    board.appendChild(col);
+  }
+  const top = state.tasks.find(t => t.status === 'now');
+  $('#focusText').textContent = top ? top.title : 'Nothing in Now — drag something from Next';
+}
+
+function card(t, t0) {
+  const c = el('div', 'card' + (t.status === 'done' ? ' done' : ''));
+  c.draggable = true;
+  c.dataset.id = t.id;
+
+  const cb = el('input');
+  cb.type = 'checkbox';
+  cb.checked = t.status === 'done';
+  cb.title = 'Done';
+  cb.onchange = () => setDone(t.id, cb.checked);
+
+  const body = el('div', 'body');
+  const title = el('div', 'title', t.title);
+  title.title = (t.note ? t.note + '\n' : '') + 'Double-click to edit';
+  title.ondblclick = () => editTitle(t.id);
+  body.append(title);
+
+  const meta = el('div', 'meta');
+  if (t.project) {
+    const p = el('span', 'tag', t.project);
+    p.style.setProperty('--h', hue(t.project));
+    meta.append(p);
+  }
+  if (t.due && t.status !== 'done') {
+    const late = t.due < t0, isToday = t.due === t0;
+    meta.append(el('span', 'due' + (late ? ' late' : isToday ? ' today' : ''),
+      late ? `overdue · ${t.due}` : isToday ? 'due today' : `due ${t.due}`));
+  }
+  if (t.note) meta.append(el('span', null, '✎ note'));
+  if (meta.childNodes.length) body.append(meta);
+
+  const x = el('button', 'x', '×');
+  x.title = 'Delete';
+  x.onclick = () => remove(t.id);
+
+  c.append(cb, body, x);
+  c.ondragstart = e => {
+    dragId = t.id;
+    c.classList.add('dragging');
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', t.id);
+  };
+  c.ondragend = () => { dragId = null; c.classList.remove('dragging'); clearDrop(); };
+  return c;
+}
+
+// ---------- drag & drop ----------
+function cardBelow(list, y) {
+  return [...list.querySelectorAll('.card:not(.dragging)')]
+    .find(c => { const r = c.getBoundingClientRect(); return y < r.top + r.height / 2; }) || null;
+}
+function clearDrop() {
+  document.querySelectorAll('.ph').forEach(p => p.remove());
+  document.querySelectorAll('.col.drop').forEach(c => c.classList.remove('drop'));
+}
+function dropTarget(col, list, status) {
+  col.ondragover = e => {
+    if (!dragId) return;
+    e.preventDefault();
+    clearDrop();
+    col.classList.add('drop');
+    const below = cardBelow(list, e.clientY);
+    const ph = el('div', 'ph');
+    below ? list.insertBefore(ph, below) : list.appendChild(ph);
+  };
+  col.ondragleave = e => { if (!col.contains(e.relatedTarget)) clearDrop(); };
+  col.ondrop = e => {
+    e.preventDefault();
+    const id = dragId || e.dataTransfer.getData('text/plain');
+    const below = cardBelow(list, e.clientY);
+    clearDrop();
+    move(id, status, below ? below.dataset.id : null);
+  };
+}
+
+// ---------- changes ----------
+function take(id) {
+  const i = state.tasks.findIndex(t => t.id === id);
+  return i < 0 ? null : state.tasks.splice(i, 1)[0];
+}
+function setStatus(t, status) {
+  if (t.status === status) return;
+  t.status = status;
+  if (status === 'done') t.done_at = today(); else delete t.done_at;
+}
+function insertBefore(t, beforeId) {
+  const j = beforeId ? state.tasks.findIndex(x => x.id === beforeId) : -1;
+  j >= 0 ? state.tasks.splice(j, 0, t) : state.tasks.push(t);
+}
+function placeAtTop(t, status) {
+  const first = state.tasks.find(x => x.status === status);
+  insertBefore(t, first ? first.id : null);
+}
+
+function move(id, status, beforeId) {
+  if (id === beforeId) return;
+  const t = take(id); if (!t) return;
+  setStatus(t, status);
+  insertBefore(t, beforeId);
+  save();
+}
+function setDone(id, done) {
+  const t = take(id); if (!t) return;
+  setStatus(t, done ? 'done' : 'next');
+  placeAtTop(t, t.status);
+  save();
+}
+function editTitle(id) {
+  const t = state.tasks.find(x => x.id === id); if (!t) return;
+  const v = prompt('Edit task', t.title);
+  if (v && v.trim() && v.trim() !== t.title) { t.title = v.trim(); save(); }
+}
+function remove(id) {
+  const t = state.tasks.find(x => x.id === id);
+  if (t && confirm(`Delete "${t.title}"?`)) { take(id); save(); }
+}
+$('#add').onsubmit = e => {
+  e.preventDefault();
+  const v = $('#newTitle').value.trim();
+  if (!v) return;
+  placeAtTop({ id: uid(), title: v, status: 'inbox', created: today() }, 'inbox');
+  $('#newTitle').value = '';
+  save();
+};
+
+// ---------- sync with server ----------
+async function put() {
+  try {
+    const r = await fetch('/api/tasks', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mtime: state.mtime, tasks: state.tasks }),
+    });
+    const j = await r.json();
+    if (r.status === 409) {
+      state = { mtime: j.mtime, tasks: j.tasks };
+      again = false;
+      render();
+      flash('The list changed outside this page (Claude?). Reloaded it — please redo your last change.');
+    } else if (!r.ok) {
+      flash('Save failed: ' + (j.error || r.status));
+    } else {
+      state.mtime = j.mtime;
+      flash('');
+    }
+  } catch {
+    flash('Server not reachable. Is taskboard running?');
+  }
+}
+async function save() {
+  render();
+  if (saving) { again = true; return; }
+  saving = true;
+  do { again = false; await put(); } while (again);
+  saving = false;
+}
+async function load() {
+  if (dragId || saving) return;
+  try {
+    const j = await (await fetch('/api/tasks')).json();
+    if (j.mtime !== state.mtime) { state = j; render(); }
+    if ($('#msg').textContent.startsWith('Server')) flash('');
+  } catch {
+    flash('Server not reachable. Is taskboard running?');
+  }
+}
+async function loadCal() {
+  const s = $('#sched');
+  try {
+    const j = await (await fetch('/api/calendar')).json();
+    s.textContent = '';
+    if (!j.updated) { s.textContent = 'Calendar not synced yet. Ask Claude to "sync calendar".'; return; }
+    const upd = new Date(j.updated), now = new Date();
+    if (upd.toDateString() !== now.toDateString()) {
+      s.textContent = `Calendar last synced ${upd.toDateString()}. Ask Claude to "sync calendar".`;
+      return;
+    }
+    const left = (j.events || []).filter(e =>
+      !e.allDay && new Date(e.end) > now && new Date(e.start).toDateString() === now.toDateString());
+    if (!left.length) {
+      s.textContent = `No more meetings today · synced ${hhmm(j.updated)}`;
+      return;
+    }
+    s.append('Today: ');
+    left.forEach((e, i) => {
+      if (i) s.append(' · ');
+      const mins = Math.round((new Date(e.start) - now) / 60000);
+      const when = i === 0 && mins > 0 && mins <= 120 ? ` (in ${mins} min)` : i === 0 && mins <= 0 ? ' (now)' : '';
+      s.append(`${hhmm(e.start)} `, el('b', null, e.title), when);
+    });
+    s.append(` · synced ${hhmm(j.updated)}`);
+  } catch { /* server down: task loader already shows the message */ }
+}
+
+load(); loadCal();
+setInterval(() => { if (document.visibilityState === 'visible') load(); }, 4000);
+setInterval(() => { if (document.visibilityState === 'visible') loadCal(); }, 60000);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') { load(); loadCal(); } });
+</script>
+</body>
+</html>

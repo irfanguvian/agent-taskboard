@@ -1,0 +1,354 @@
+#!/usr/bin/env node
+// taskboard-axi: agent bridge to ~/taskboard/tasks.json (list, grep, get, add, set, done, rm).
+// Zero dependencies. TOON output on stdout. Exit codes: 0 ok (incl. no-op), 1 error, 2 usage.
+// Writes are atomic (temp file + rename) and serialized by a lock file, so many sessions can
+// use it at once. The board page (localhost:7777) picks up every write within 4 seconds.
+'use strict';
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+
+const DIR = process.env.TASKBOARD_DIR || path.join(os.homedir(), 'taskboard');
+const TASKS = path.join(DIR, 'tasks.json');
+const LOCK = TASKS + '.lock';
+const STATUSES = ['inbox', 'now', 'next', 'later', 'done'];
+const SHOW_ORDER = ['now', 'next', 'inbox', 'later', 'done'];
+const NOW_LIMIT = 3;
+const ROW = ['id', 'status', 'pos', 'project', 'due', 'title'];
+const BIN = 'taskboard-axi';
+
+const today = () => new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Jakarta' });
+const tilde = p => p.replace(os.homedir(), '~');
+
+class Exit extends Error {
+  constructor(code, lines) { super(lines[0]); this.code = code; this.lines = lines; }
+}
+const usage = (msg, help) => new Exit(2, [`error: ${msg}`, ...(help ? [`help: ${help}`] : [])]);
+const fail = (msg, help) => new Exit(1, [`error: ${msg}`, ...(help ? [`help: ${help}`] : [])]);
+
+// ---- TOON output ------------------------------------------------------------
+function cell(v) {
+  if (typeof v === 'number') return String(v);
+  const s = v == null ? '' : String(v);
+  const quote = s === '' || /^\s|\s$/.test(s) || /[,:"\\[\]{}#\n\r\t]/.test(s) || s.startsWith('-') ||
+    /^(true|false|null)$/.test(s) || /^\d+(\.\d+)?(e[+-]?\d+)?$/i.test(s);
+  return quote ? JSON.stringify(s) : s;
+}
+
+function table(name, rows, fields = ROW) {
+  if (!rows.length) return [`${name}[0]: none`];
+  return [`${name}[${rows.length}]{${fields.join(',')}}:`,
+    ...rows.map(r => '  ' + fields.map(f => cell(r[f])).join(','))];
+}
+
+// Adds pos (1-based place inside its status column) and returns rows grouped in SHOW_ORDER.
+function withPos(tasks) {
+  const n = {};
+  const rows = tasks.map(t => ({ ...t, pos: (n[t.status] = (n[t.status] || 0) + 1) }));
+  return rows.sort((a, b) => SHOW_ORDER.indexOf(a.status) - SHOW_ORDER.indexOf(b.status) || a.pos - b.pos);
+}
+
+function line(verb, t, tasks) {
+  const pos = tasks.filter(x => x.status === t.status).indexOf(t) + 1;
+  return [`${verb}: ${t.id} → ${t.status} #${pos}`, t.project, t.due && `due ${t.due}`, t.title]
+    .filter(Boolean).join(' · ');
+}
+
+function warnings(tasks) {
+  const now = tasks.filter(t => t.status === 'now').length;
+  return now > NOW_LIMIT ? [`warn: now has ${now} tasks (limit ${NOW_LIMIT}); move the lowest to next`] : [];
+}
+
+// ---- storage ----------------------------------------------------------------
+function load() {
+  let data;
+  try { data = JSON.parse(fs.readFileSync(TASKS, 'utf8')); }
+  catch (e) { throw fail(`cannot read ${tilde(TASKS)} (${e.code || 'invalid JSON'})`); }
+  if (!Array.isArray(data.tasks)) throw fail(`${tilde(TASKS)} has no "tasks" array`);
+  return data;
+}
+
+function sleep(ms) { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); }
+
+function lock() {
+  const until = Date.now() + 3000;
+  for (;;) {
+    try { return fs.writeFileSync(LOCK, String(process.pid), { flag: 'wx' }); }
+    catch (e) {
+      if (e.code !== 'EEXIST') throw e;
+      try { if (Date.now() - fs.statSync(LOCK).mtimeMs > 10000) { fs.unlinkSync(LOCK); continue; } } catch {}
+      if (Date.now() > until) throw fail('tasks.json is locked by another writer', `retry; if stuck, delete ${tilde(LOCK)}`);
+      sleep(50);
+    }
+  }
+}
+
+// Runs fn on fresh data and saves. The board server writes without our lock, so if the file
+// changed under us we redo fn on the new data instead of overwriting the board's edit.
+function mutate(fn) {
+  lock();
+  try {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const mtime = fs.statSync(TASKS).mtimeMs;
+      const data = load();
+      const out = fn(data.tasks);
+      if (!out.changed) return out.lines;
+      if (fs.statSync(TASKS).mtimeMs !== mtime) continue;
+      const tmp = `${TASKS}.${process.pid}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify(data, null, 2) + '\n');
+      fs.renameSync(tmp, TASKS);
+      return [...out.lines, ...warnings(data.tasks)];
+    }
+    throw fail('tasks.json kept changing during write', 'retry the command');
+  } finally {
+    try { fs.unlinkSync(LOCK); } catch {}
+  }
+}
+
+// ---- helpers ----------------------------------------------------------------
+function uid(tasks) {
+  for (;;) {
+    const id = 't_' + Math.random().toString(36).slice(2, 8).padEnd(6, '0');
+    if (!tasks.some(t => t.id === id)) return id;
+  }
+}
+
+// ref = exact id, exact title, or a title substring that matches one task (open tasks win).
+function find(tasks, ref) {
+  const q = ref.toLowerCase();
+  const exact = tasks.find(t => t.id === ref) || tasks.find(t => t.title.toLowerCase() === q);
+  if (exact) return exact;
+  let hits = tasks.filter(t => t.title.toLowerCase().includes(q));
+  if (hits.length > 1) {
+    const open = hits.filter(t => t.status !== 'done');
+    if (open.length === 1) hits = open;
+  }
+  if (hits.length === 1) return hits[0];
+  if (!hits.length) throw fail(`no task matches "${ref}"`, `${BIN} grep "<words>"`);
+  const ids = new Set(hits.map(t => t.id));
+  throw new Exit(1, [`error: "${ref}" matches ${hits.length} tasks; use an id`,
+    ...table('matches', withPos(tasks).filter(r => ids.has(r.id)))]);
+}
+
+function setStatus(t, status) {
+  if (t.status === status) return;
+  t.status = status;
+  if (status === 'done') t.done_at = today(); else delete t.done_at;
+}
+
+// Moves t to place pos ('top' | 'bottom' | 1-based number) inside its status column.
+function place(tasks, t, pos) {
+  const i = tasks.indexOf(t);
+  if (i >= 0) tasks.splice(i, 1);
+  const col = tasks.filter(x => x.status === t.status);
+  const k = pos === 'top' ? 0 : pos === 'bottom' ? col.length : Math.min(pos - 1, col.length);
+  const at = k < col.length ? tasks.indexOf(col[k])
+    : col.length ? tasks.indexOf(col[col.length - 1]) + 1 : tasks.length;
+  tasks.splice(at, 0, t);
+}
+
+const CHECK = {
+  status: v => STATUSES.includes(v) || `--status must be one of ${STATUSES.join(', ')}`,
+  due: v => v === 'none' || (/^\d{4}-\d{2}-\d{2}$/.test(v) && !isNaN(Date.parse(v))) || '--due must be YYYY-MM-DD or none',
+  pos: v => /^(top|bottom|[1-9]\d*)$/.test(v) || '--pos must be top, bottom or a number from 1',
+  limit: v => /^[1-9]\d*$/.test(v) || '--limit must be a number from 1',
+  title: v => v.trim() !== '' || '--title cannot be empty',
+};
+const posValue = v => (v === 'top' || v === 'bottom' ? v : Number(v));
+
+// Applies --title/--project/--due/--note. "none" clears an optional field.
+function applyFields(t, f) {
+  if (f.title !== undefined) t.title = f.title.trim();
+  for (const k of ['project', 'due', 'note']) {
+    if (f[k] === undefined) continue;
+    if (f[k] === 'none' || f[k] === '') delete t[k]; else t[k] = f[k];
+  }
+}
+
+function statusFilter(v) {
+  if (v === undefined) return s => s !== 'done';
+  if (v === 'all') return () => true;
+  const want = v.split(',');
+  const bad = want.find(s => !STATUSES.includes(s));
+  if (bad) throw usage(`unknown status "${bad}"`, `use ${STATUSES.join(', ')}, a comma list, or all`);
+  return s => want.includes(s);
+}
+
+function listOut(name, tasks, pred, f, total) {
+  const limit = Number(f.limit || 100);
+  const rows = withPos(tasks).filter(pred);
+  const out = rows.length > limit ? [`count: ${limit} of ${rows.length}`] : [];
+  out.push(...table(name, rows.slice(0, limit)));
+  if (rows.length > limit) out.push(`help: add --limit ${rows.length} to see all`);
+  if (!rows.length && total) out.push(`help: ${total}`);
+  return out;
+}
+
+// ---- commands ---------------------------------------------------------------
+const HELP = {
+  list: [`usage: ${BIN} list [--status now|next|later|inbox|done|all|a,b] [--project <p>] [--limit 100]`,
+    'default: every status except done', 'examples:', `  ${BIN} list --status now,next`, `  ${BIN} list --project Acme --status all`],
+  grep: [`usage: ${BIN} grep "<regex>" [--status ...] [--project <p>] [--limit 100]`,
+    'case-insensitive; searches title, note, project and id; default: all statuses incl. done', 'examples:',
+    `  ${BIN} grep invoice`, `  ${BIN} grep "api|workflow" --status later`],
+  get: [`usage: ${BIN} get <id|title words>`, 'shows every field of one task', 'example:', `  ${BIN} get t_k3x9qa`],
+  add: [`usage: ${BIN} add "<title>" [--project <p>] [--status inbox] [--due YYYY-MM-DD] [--note "<text>"] [--pos bottom]`,
+    'defaults: status inbox, pos bottom (top for done); same open title twice = no-op', 'examples:',
+    `  ${BIN} add "Review billing PR" --project Acme --status now --pos 1 --due 2026-09-25`,
+    `  ${BIN} add "Read DDIA ch.5" --project Learning --status later`],
+  set: [`usage: ${BIN} set <id|title words> [--title] [--project] [--status] [--due] [--note] [--pos top|bottom|N]`,
+    '"none" clears project, due or note; a status change without --pos goes to the bottom (top for done)', 'examples:',
+    `  ${BIN} set t_k3x9qa --status now --pos 1`, `  ${BIN} set invoice --due 2026-09-30 --note "waiting on keys"`],
+  done: [`usage: ${BIN} done <id|title words> [...more]`, 'sets done + done_at today, moves to top of done', 'example:', `  ${BIN} done 649`],
+  rm: [`usage: ${BIN} rm <id|title words> [...more]`, 'deletes tasks for good; prints them so they can be re-added', 'example:', `  ${BIN} rm t_k3x9qa`],
+};
+const FLAGS = {
+  list: ['status', 'project', 'limit'], grep: ['status', 'project', 'limit'], get: [],
+  add: ['project', 'status', 'due', 'note', 'pos'], set: ['title', 'project', 'status', 'due', 'note', 'pos'],
+  done: [], rm: [],
+};
+
+const projectIs = p => t => p === undefined || (t.project || '').toLowerCase() === p.toLowerCase();
+
+const CMDS = {
+  list(args, f) {
+    if (args.length) throw usage(`list takes no arguments, got "${args[0]}"`, `${BIN} grep "${args[0]}"`);
+    const st = statusFilter(f.status), pr = projectIs(f.project);
+    return listOut('tasks', load().tasks, t => st(t.status) && pr(t), f, `${BIN} add "<title>" --status <s>`);
+  },
+  grep(args, f) {
+    if (!args.length) throw usage('grep needs a pattern', HELP.grep[0]);
+    const src = args.join(' ');
+    let re;
+    try { re = new RegExp(src, 'i'); } catch { re = new RegExp(src.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i'); }
+    const st = statusFilter(f.status || 'all'), pr = projectIs(f.project);
+    const hit = t => st(t.status) && pr(t) && [t.title, t.note, t.project, t.id].some(v => v && re.test(v));
+    return listOut('matches', load().tasks, hit, f, `nothing matches /${src}/i; try ${BIN} list --status all`);
+  },
+  get(args) {
+    if (args.length !== 1) throw usage('get needs one id or title', HELP.get[0]);
+    const tasks = load().tasks;
+    const t = find(tasks, args[0]);
+    const col = tasks.filter(x => x.status === t.status);
+    return ['task:', ...['id', 'title', 'status', 'project', 'due', 'note', 'created', 'done_at']
+      .filter(k => t[k] !== undefined)
+      .map(k => `  ${k}: ${k === 'status' ? `${t.status} (#${col.indexOf(t) + 1} of ${col.length})` : cell(t[k])}`)];
+  },
+  add(args, f) {
+    const title = args.join(' ').trim();
+    if (!title) throw usage('add needs a title', HELP.add[0]);
+    return mutate(tasks => {
+      const dup = tasks.find(t => t.status !== 'done' && t.title.toLowerCase() === title.toLowerCase());
+      if (dup) return { lines: [line('noop (already exists)', dup, tasks)] };
+      const t = { id: uid(tasks), title, status: 'inbox', created: today() };
+      applyFields(t, f);
+      setStatus(t, f.status || 'inbox');
+      place(tasks, t, f.pos ? posValue(f.pos) : t.status === 'done' ? 'top' : 'bottom');
+      return { changed: true, lines: [line('added', t, tasks)] };
+    });
+  },
+  set(args, f) {
+    if (args.length !== 1) throw usage('set needs one id or title (quote multi-word titles)', HELP.set[0]);
+    if (!Object.keys(f).length) throw usage('set needs at least one flag', HELP.set[0]);
+    return mutate(tasks => {
+      const t = find(tasks, args[0]);
+      const before = JSON.stringify(tasks);
+      const moved = f.status !== undefined && f.status !== t.status;
+      applyFields(t, f);
+      if (f.status) setStatus(t, f.status);
+      if (f.pos || moved) place(tasks, t, f.pos ? posValue(f.pos) : t.status === 'done' ? 'top' : 'bottom');
+      const changed = JSON.stringify(tasks) !== before;
+      return { changed, lines: [line(changed ? 'updated' : 'noop (no change)', t, tasks)] };
+    });
+  },
+  done(args) {
+    if (!args.length) throw usage('done needs an id or title', HELP.done[0]);
+    return mutate(tasks => {
+      const lines = [];
+      let changed = false;
+      for (const ref of args) {
+        const t = find(tasks, ref);
+        if (t.status === 'done') { lines.push(line('noop (already done)', t, tasks)); continue; }
+        setStatus(t, 'done');
+        place(tasks, t, 'top');
+        changed = true;
+        lines.push(line('done', t, tasks));
+      }
+      const next = tasks.find(t => t.status === 'now');
+      lines.push(next ? `next up: ${next.id} · ${next.title}` : `next up: nothing in now; ${BIN} list --status next`);
+      return { changed, lines };
+    });
+  },
+  rm(args) {
+    if (!args.length) throw usage('rm needs an id or title', HELP.rm[0]);
+    return mutate(tasks => {
+      const gone = args.map(ref => find(tasks, ref));
+      const ids = new Set(gone.map(t => t.id));
+      const rows = withPos(tasks).filter(r => ids.has(r.id));
+      for (const t of gone) tasks.splice(tasks.indexOf(t), 1);
+      return { changed: true, lines: table('removed', rows) };
+    });
+  },
+};
+
+function home() {
+  const tasks = load().tasks;
+  const d = today();
+  const count = s => tasks.filter(t => t.status === s).length;
+  const overdue = tasks.filter(t => t.status !== 'done' && t.due && t.due < d);
+  const rows = withPos(tasks);
+  const out = [
+    `bin: ${tilde(process.argv[1])}`,
+    `description: Bridge to Irfan's task board (${tilde(TASKS)}; board http://localhost:7777)`,
+    `today: ${d}`,
+    `counts: ${STATUSES.map(s => `${s} ${count(s)}`).join(' · ')} · overdue ${overdue.length}`,
+    ...table('now', rows.filter(r => r.status === 'now')),
+    ...table('next', rows.filter(r => r.status === 'next')),
+  ];
+  const ids = new Set(overdue.filter(t => t.status !== 'now' && t.status !== 'next').map(t => t.id));
+  if (ids.size) out.push(...table('overdue', rows.filter(r => ids.has(r.id))));
+  out.push('help[4]:',
+    `  Run \`${BIN} grep "<words>"\` to search every task`,
+    `  Run \`${BIN} list --status later\` to see later / inbox / done`,
+    `  Run \`${BIN} add "<title>" --project <p> --status <s>\` to add`,
+    `  Run \`${BIN} done <id|words>\` or \`${BIN} set <id> --status <s>\` to update`);
+  return out;
+}
+
+function main(argv) {
+  const [cmd, ...rest] = argv;
+  if (!cmd) return home();
+  if (cmd === 'help' || cmd === '--help' || cmd === '-h') {
+    return [`usage: ${BIN} [command]  (no command = dashboard)`, `commands: ${Object.keys(CMDS).join(', ')}`,
+      `run \`${BIN} <command> --help\` for flags and examples`];
+  }
+  if (!CMDS[cmd]) throw usage(`unknown command "${cmd}"`, `commands: ${Object.keys(CMDS).join(', ')}`);
+  const args = [], f = {};
+  for (let i = 0; i < rest.length; i++) {
+    const a = rest[i];
+    if (a === '--help' || a === '-h') return HELP[cmd];
+    if (!a.startsWith('--')) { args.push(a); continue; }
+    let [k, v] = a.slice(2).split(/=(.*)/s);
+    if (!FLAGS[cmd].includes(k)) {
+      throw usage(`unknown flag --${k} for \`${cmd}\``,
+        FLAGS[cmd].length ? `valid flags: ${FLAGS[cmd].map(x => '--' + x).join(', ')}` : `\`${cmd}\` takes no flags`);
+    }
+    if (v === undefined) {
+      v = rest[++i];
+      if (v === undefined) throw usage(`--${k} needs a value`, HELP[cmd][0]);
+    }
+    // list/grep --status also takes "all" and comma lists; statusFilter checks those.
+    const ok = CHECK[k] && !(k === 'status' && (cmd === 'list' || cmd === 'grep')) ? CHECK[k](v) : true;
+    if (ok !== true) throw usage(ok, HELP[cmd][0]);
+    f[k] = v;
+  }
+  return CMDS[cmd](args, f);
+}
+
+try {
+  console.log(main(process.argv.slice(2)).join('\n'));
+} catch (e) {
+  if (!(e instanceof Exit)) e = new Exit(1, [`error: ${e.message}`]);
+  console.log(e.lines.join('\n'));
+  process.exitCode = e.code;
+}
