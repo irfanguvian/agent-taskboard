@@ -1,0 +1,51 @@
+#!/bin/sh
+# Point the live worktree (~/taskboard-live) at a verified sha and restart tbd (D25).
+# Usage: deploy <sha> [--no-restart] [--check] [--yes]    --check: validate only, change nothing
+# Rollback = deploy the previous sha (printed at the end, also in ~/.taskboard/deploy.log).
+# Dev repo = the repo holding this script, or $TB_DEV.
+set -eu
+# shellcheck source=live-lib.sh
+. "$(dirname "$0")/live-lib.sh"
+
+main() {
+  sha='' restart=1 check=0
+  for a in "$@"; do
+    case $a in
+      --no-restart) restart=0 ;;
+      --check) check=1 ;;
+      --yes) ;;
+      -*) die "unknown flag $a" ;;
+      *) sha=$a ;;
+    esac
+  done
+  [ -n "$sha" ] || die "usage: deploy <sha> [--no-restart] [--check] [--yes]"
+  guard_home "$@"
+  dev=${TB_DEV:-$(cd "$(dirname "$0")/.." && pwd)}
+  full=$(git -C "$dev" rev-parse --verify --quiet "$sha^{commit}") || die "unknown commit: $sha"
+  prev=none
+  if [ -e "$LIVE" ]; then
+    [ -z "$(git -C "$LIVE" status --porcelain)" ] || die "$LIVE has uncommitted changes; inspect it, then retry"
+    prev=$(git -C "$LIVE" rev-parse HEAD)
+  fi
+  if [ "$check" = 1 ]; then
+    # $LIVE was deleted by hand but git still lists it: a plain `worktree add` would refuse; the real run prunes first.
+    live_abs=$(cd "$(dirname "$LIVE")" && pwd -P)/$(basename "$LIVE")
+    [ -e "$LIVE" ] || ! git -C "$dev" worktree list --porcelain | grep -qxF "worktree $live_abs" || echo "deploy: $LIVE is registered but missing; a real deploy prunes it first" >&2
+    exit 0
+  fi
+
+  if [ "$prev" = none ]; then
+    git -C "$dev" worktree prune
+    git -C "$dev" worktree add -q --detach "$LIVE" "$full"
+  else
+    git -C "$LIVE" checkout -q --detach "$full"
+  fi
+  mkdir -p "$TBHOME"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) $prev -> $full" >> "$TBHOME/deploy.log"
+  echo "deployed $full (was $prev)"
+  [ "$prev" = none ] || echo "rollback: scripts/deploy $prev"
+  [ "$restart" = 0 ] || launchctl kickstart -k "$DOMAIN/$LABEL"
+}
+
+# One line on purpose: this script can live in the tree it checks out, and sh reads a script as it runs.
+main "$@"; exit

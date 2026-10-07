@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>local.taskboard</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>@NODE@</string>
+    <string>@LIVE@/tbd.js</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>@PATH@</string>
+    <key>TB_HOME</key><string>@TBHOME@</string>
+    <key>TB_PORT</key><string>@PORT@</string>
+  </dict>
+  <key>WorkingDirectory</key><string>@LIVE@</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>AbandonProcessGroup</key><true/>
+  <key>StandardOutPath</key><string>@TBHOME@/tbd.log</string>
+  <key>StandardErrorPath</key><string>@TBHOME@/tbd.log</string>
+</dict>
+</plist>

@@ -1,16 +1,20 @@
 'use strict';
 // P0 AC2: build sound hook plays sound + notification by day, stays silent 22:00-07:00 (D13, D28).
-const { test } = require('node:test');
+const { test, after } = require('node:test');
 const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
+const tmpDirs = [];
+after(() => { for (const d of tmpDirs) fs.rmSync(d, { recursive: true, force: true }); });
+
 const SCRIPT = path.join(__dirname, '..', 'scripts', 'ask-sound.sh');
 
 function run(hhmm) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ask-sound-'));
+  tmpDirs.push(dir);
   const log = path.join(dir, 'calls.log');
   const stub = path.join(dir, 'stub');
   fs.writeFileSync(stub, `#!/bin/sh\necho "$(basename "$0") $*" >> "${log}"\n`, { mode: 0o755 });

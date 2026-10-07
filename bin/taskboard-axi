@@ -1,0 +1,3 @@
+#!/usr/bin/env node
+// v1 compatibility shim: every v1 verb and flag is a tb verb and flag; help and hints say taskboard-axi.
+require('../lib/cli').main(process.argv.slice(2), 'taskboard-axi');

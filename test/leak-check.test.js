@@ -1,21 +1,27 @@
 'use strict';
 // P0 AC4: leak gate refuses fake AWS key and denylist words (file, commit message, branch name); clean range passes (D18).
 // Every case runs the real scripts in a temp git repo with temp HOME and temp denylist. Pushes go to a local bare repo only.
-const { test } = require('node:test');
+const { test, after } = require('node:test');
 const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
+const tmpDirs = [];
+after(() => { for (const d of tmpDirs) fs.rmSync(d, { recursive: true, force: true }); });
+
 const SCRIPTS = path.join(__dirname, '..', 'scripts');
 const WORD = 'zebracorp';
 // split so this file itself never trips the gate; gitleaks aws-access-token shape, not an AWS doc example
 const FAKE_KEY = 'AK' + 'IAZ7FXQ3JDPW2KLM4N';
+// same trick; gitleaks github-pat shape
+const FAKE_PAT = 'gh' + 'p_' + 'aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6';
 
 // Temp world: HOME, denylist, one git repo on main with a clean first commit.
 function world() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'leak-check-'));
+  tmpDirs.push(root);
   const home = path.join(root, 'home');
   const repo = path.join(root, 'repo');
   fs.mkdirSync(home);
@@ -27,7 +33,7 @@ function world() {
     TB_DENYLIST: path.join(root, 'denylist.txt'),
   };
   fs.writeFileSync(env.TB_DENYLIST, `# made-up word\n${WORD}\n`);
-  const run = (cmd, args) => spawnSync(cmd, args, { cwd: repo, env, encoding: 'utf8' });
+  const run = (cmd, args, extraEnv = {}) => spawnSync(cmd, args, { cwd: repo, env: { ...env, ...extraEnv }, encoding: 'utf8' });
   const git = (...args) => {
     const r = run('git', args);
     assert.equal(r.status, 0, `git ${args.join(' ')}: ${r.stderr}`);
@@ -44,7 +50,8 @@ function world() {
   git('config', 'commit.gpgsign', 'false');
   commit('README.md', 'hello\n', 'init');
   const check = (...args) => run(path.join(SCRIPTS, 'leak-check'), args);
-  return { root, home, repo, env, run, git, commit, check };
+  const checkWith = (extraEnv, ...args) => run(path.join(SCRIPTS, 'leak-check'), args, extraEnv);
+  return { root, home, repo, env, run, git, commit, check, checkWith };
 }
 
 const out = (r) => r.stdout + r.stderr;
@@ -71,6 +78,15 @@ test('denylist word in a file is refused, case-insensitive, word not printed', (
   const r = w.check('HEAD~1..HEAD');
   assert.equal(r.status, 1);
   assert.match(out(r), /notes\.txt:1: denylist entry #1/);
+  assert.ok(!out(r).toLowerCase().includes(WORD));
+});
+
+test('text file whose path holds a denylist word: hit reported, path word masked, never printed', () => {
+  const w = world();
+  w.commit(`${WORD}-notes.txt`, `client is ${WORD}\n`);
+  const r = w.check('HEAD~1..HEAD');
+  assert.equal(r.status, 1);
+  assert.match(out(r), /\*\*\*-notes\.txt:1: denylist entry #1/);
   assert.ok(!out(r).toLowerCase().includes(WORD));
 });
 
@@ -117,6 +133,81 @@ test('missing denylist fails closed with exit 2', () => {
   const r = w.check('HEAD~0..HEAD');
   assert.equal(r.status, 2);
   assert.match(out(r), /denylist missing/);
+});
+
+// ---- P1 fix-C: the gate must not be blindable (SR2 SR3 SR4 SR5) ----
+
+test('a non-UTF-8 byte before a denylist word does not blind the scan (UTF-8 locale)', () => {
+  const w = world();
+  w.commit('latin1.txt', Buffer.concat([Buffer.from('caf'), Buffer.from([0xe9]), Buffer.from(`\n${WORD}\n`)]));
+  const r = w.checkWith({ LC_ALL: 'en_US.UTF-8' }, 'HEAD~1..HEAD');
+  assert.equal(r.status, 1, out(r));
+  assert.match(out(r), /latin1\.txt:2: denylist entry #1/);
+  assert.doesNotMatch(out(r), /towc/);
+});
+
+test('a scanner stage that crashes fails closed with exit 2, never 0', () => {
+  const w = world();
+  w.commit('a.txt', 'clean\n');
+  const stub = path.join(w.root, 'stub');
+  fs.mkdirSync(stub);
+  fs.writeFileSync(path.join(stub, 'awk'), '#!/bin/sh\ncat > /dev/null\nexit 2\n', { mode: 0o755 });
+  const r = w.checkWith({ PATH: `${stub}:${process.env.PATH}` }, 'HEAD~1..HEAD');
+  assert.equal(r.status, 2, out(r));
+  assert.match(out(r), /scan failed/);
+});
+
+test('a repo .gitleaksignore cannot hide a secret', () => {
+  const w = world();
+  w.commit('pat.txt', `token=${FAKE_PAT}\n`);
+  const sha = w.git('rev-parse', 'HEAD').stdout.trim();
+  fs.writeFileSync(path.join(w.repo, '.gitleaksignore'), `${sha}:pat.txt:github-pat:1\npat.txt:github-pat:1\n`);
+  const r = w.check('HEAD~1..HEAD');
+  assert.equal(r.status, 1, out(r));
+  assert.match(out(r), /gitleaks github-pat pat\.txt:1/);
+  assert.ok(!out(r).includes(FAKE_PAT));
+});
+
+test('.gitattributes -diff / binary cannot blind the denylist scan or gitleaks', () => {
+  const w = world();
+  w.commit('.gitattributes', '*.dat -diff\n*.bin binary\n');
+  w.commit('word.dat', `${WORD}\n`); // only the denylist scan can see this one
+  let r = w.check('HEAD~1..HEAD');
+  assert.equal(r.status, 1, out(r));
+  assert.match(out(r), /word\.dat:1: denylist entry #1/);
+  // gitleaks runs on the git dir, where work-tree attributes do not apply; info/attributes does, so --text must hold it
+  fs.appendFileSync(path.join(w.repo, '.git', 'info', 'attributes'), '*.dat -diff\n');
+  w.commit('key.dat', `token=${FAKE_PAT}\n`); // only gitleaks can see this one
+  r = w.check('HEAD~1..HEAD');
+  assert.equal(r.status, 1, out(r));
+  assert.match(out(r), /gitleaks github-pat key\.dat:1/);
+});
+
+test('denylist word in a binary file path or a pure rename is refused, path not printed', () => {
+  const w = world();
+  w.commit('plain.txt', 'x\n');
+  w.git('mv', 'plain.txt', `${WORD}.txt`); // 100% rename: no hunk, no "+++" line
+  w.git('commit', '-q', '-m', 'rename');
+  let r = w.check('HEAD~1..HEAD');
+  assert.equal(r.status, 1, out(r));
+  assert.match(out(r), /[0-9a-f]+ path: denylist entry #1/);
+  assert.ok(!out(r).includes(WORD));
+  w.commit(`${WORD}.bin`, Buffer.from([0, 1, 2, 0, 255]));
+  r = w.check('HEAD~1..HEAD');
+  assert.equal(r.status, 1, out(r));
+  assert.ok(!out(r).includes(WORD));
+});
+
+test('annotated tag message in the range is refused; a clean one passes', () => {
+  const w = world();
+  w.commit('a.txt', 'clean\n');
+  w.git('tag', '-a', 'v1', '-m', 'fine release');
+  assert.equal(w.check('HEAD~1..HEAD').status, 0);
+  w.git('tag', '-a', 'v2', '-m', `release for ${WORD}`);
+  const r = w.check('HEAD~1..HEAD');
+  assert.equal(r.status, 1, out(r));
+  assert.match(out(r), /tag message [0-9a-f]+: denylist entry #1/);
+  assert.ok(!out(r).includes(WORD));
 });
 
 test('pre-push hook blocks leaks and lets clean pushes through (local bare remote)', () => {

@@ -11,7 +11,7 @@ import EventKit
 import Foundation
 
 let MARKER = "[taskboard]"
-let boardDir = ProcessInfo.processInfo.environment["TASKBOARD_DIR"] ?? (NSHomeDirectory() + "/taskboard")
+let boardDir = ProcessInfo.processInfo.environment["TASKBOARD_DIR"] ?? (NSHomeDirectory() + "/.taskboard")
 
 func fail(_ msg: String) -> Never {
   FileHandle.standardError.write((msg + "\n").data(using: .utf8)!)

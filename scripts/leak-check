@@ -3,6 +3,10 @@
 # Scans the repo in cwd. Exit 0 clean, 1 hit, 2 usage/config error.
 # Prints WHERE only, never the matched word or secret.
 PATH=/opt/homebrew/bin:/usr/local/bin:$PATH
+# Byte-wise matching: awk in a UTF-8 locale dies on a non-UTF-8 byte (towc) and would skip the rest of the input.
+export LC_ALL=C
+# A failing stage must fail the whole pipeline; every scan below ends in "|| die" (fail closed, exit 2).
+set -o pipefail
 DENY=${TB_DENYLIST:-$HOME/.taskboard/leak-denylist.txt}
 
 die() { echo "leak-check: $*" >&2; exit 2; }
@@ -10,57 +14,82 @@ die() { echo "leak-check: $*" >&2; exit 2; }
 range=$1; shift
 [ -r "$DENY" ] || die "denylist missing: $DENY"
 command -v gitleaks >/dev/null || die "gitleaks not installed"
-# $range is unquoted on purpose: the pre-push hook passes "<sha> --not --remotes".
-# shellcheck disable=SC2086
-git rev-list $range >/dev/null 2>&1 || die "bad git range: $range"
 
 tmp=$(mktemp -d) && trap 'rm -rf "$tmp"' EXIT
+# $range is unquoted on purpose: the pre-push hook passes "<sha> --not --remotes".
+# shellcheck disable=SC2086
+git rev-list $range > "$tmp/revs" 2>/dev/null || die "bad git range: $range"
 grep -v -e '^#' -e '^$' "$DENY" > "$tmp/deny"
 [ -s "$tmp/deny" ] || die "denylist has no entries: $DENY"
 : > "$tmp/hits"
 
 # stdin: "WHERE<TAB>text" lines. Prints "WHERE: denylist entry #N" per hit.
+# WHERE itself (a file path) may contain a denylist word: it is masked as *** before printing.
 match() {
   awk -v deny="$tmp/deny" '
     BEGIN { while ((getline l < deny) > 0) d[++n] = tolower(l) }
-    { i = index($0, "\t"); t = tolower(substr($0, i + 1))
-      for (k = 1; k <= n; k++) if (index(t, d[k])) print substr($0, 1, i - 1) ": denylist entry #" k }'
+    function mask(w,   k, lw, p) {
+      for (k = 1; k <= n; k++) {
+        lw = tolower(w)
+        while ((p = index(lw, d[k])) > 0) {
+          w = substr(w, 1, p - 1) "***" substr(w, p + length(d[k])); lw = tolower(w)
+        }
+      }
+      return w
+    }
+    { i = index($0, "\t"); t = tolower(substr($0, i + 1)); w = ""
+      for (k = 1; k <= n; k++) if (index(t, d[k])) { if (w == "") w = mask(substr($0, 1, i - 1)); print w ": denylist entry #" k } }'
 }
 scan() { match | tee -a "$tmp/hits"; }
 
 # gitleaks: fixed default rules; repo-local config, ignore file and inline allow comments cannot weaken it.
+# Source = the git dir, not the work tree: gitleaks also reads <source>/.gitleaksignore. --text: .gitattributes cannot blind it.
 printf '[extend]\nuseDefault = true\n' > "$tmp/gitleaks.toml"
 mkdir "$tmp/noignore"
-# shellcheck disable=SC2086
-gitleaks git --log-opts="$range" --redact --no-banner --no-color -v --exit-code 99 \
+gitdir=$(git rev-parse --absolute-git-dir) || die "not a git repo"
+gitleaks git "$gitdir" --log-opts="--text $range" --redact --no-banner --no-color -v --exit-code 99 \
   -c "$tmp/gitleaks.toml" -i "$tmp/noignore" --ignore-gitleaks-allow > "$tmp/gl.out" 2>&1
 case $? in
   0) ;;
   99) awk '{ v = $0; sub(/^[A-Za-z]+: +/, "", v) }
            /^RuleID:/ { r = v } /^File:/ { f = v } /^Line:/ { l = v }
-           /^Commit:/ { print "gitleaks " r " " f ":" l " commit " substr(v, 1, 12) }' "$tmp/gl.out" | tee -a "$tmp/hits" ;;
+           /^Commit:/ { print "gitleaks " r " " f ":" l " commit " substr(v, 1, 12) }' "$tmp/gl.out" | tee -a "$tmp/hits" || die "cannot read gitleaks output" ;;
   *) die "gitleaks failed: $(tail -n 3 "$tmp/gl.out")" ;;
 esac
 
 # Per-commit patches, not the net diff: a word added then removed inside the range is still pushed.
+# --text: a .gitattributes "-diff"/"binary" must not turn a patch into "Binary files differ".
 # shellcheck disable=SC2086
-git log -p -m --unified=0 --no-color --format='commit %H' $range | awk '
+git log -p --text -m --unified=0 --no-color --format='commit %H' $range | awk '
   /^commit [0-9a-f]+$/ { sha = substr($2, 1, 12); inh = 0; next }
   /^diff --git / { inh = 0; next }
-  !inh && /^\+\+\+ / { f = substr($0, 7); print sha " path " f "\t" f; next }
+  !inh && /^\+\+\+ / { f = substr($0, 7); next }
   /^@@ / { inh = 1; split($3, a, ","); ln = substr(a[1], 2) + 0; next }
-  inh && /^\+/ { print sha " " f ":" ln "\t" substr($0, 2); ln++ }' | scan
+  inh && /^\+/ { print sha " " f ":" ln "\t" substr($0, 2); ln++ }' | scan || die "patch scan failed"
+# Every path a commit touches (binary files, renames and empty files have no "+++" line). WHERE has no path: it may hold the word.
+# shellcheck disable=SC2086
+git -c core.quotepath=false log -m --name-only --no-color --format='commit %H' $range | awk '
+  /^commit [0-9a-f]+$/ { sha = substr($2, 1, 12); next }
+  length { print sha " path\t" $0 }' | scan || die "path scan failed"
 # shellcheck disable=SC2086
 git log --format='commit %H%n%B' $range | awk '
   /^commit [0-9a-f]+$/ { sha = substr($2, 1, 12); next }
-  { print "commit message " sha "\t" $0 }' | scan
+  { print "commit message " sha "\t" $0 }' | scan || die "message scan failed"
+# Annotated tags on a commit in the range travel with the push; their message is text nobody else scans.
+# After the header block (object/type/tag/tagger: the tagger email is not scanned, D34) comes the message.
+git for-each-ref --format='%(objecttype) %(refname)' refs/tags | while read -r kind ref; do
+  [ "$kind" = tag ] || continue
+  c=$(git rev-parse --verify -q "$ref^{commit}") || continue
+  grep -qx "$c" "$tmp/revs" || continue
+  git cat-file tag "$ref" | awk -v w="tag message ${c:0:12}" 'body { print w "\t" $0 } !length { body = 1 }' || exit 1
+done | scan || die "tag scan failed"
 
 while [ $# -gt 0 ]; do
   [ $# -ge 2 ] || die "$1 needs a value"
   case $1 in
-    --branch) printf 'branch name\t%s\n' "$2" | scan ;;
+    --branch) printf 'branch name\t%s\n' "$2" | scan || die "branch scan failed" ;;
     --file) [ -r "$2" ] || die "cannot read file: $2"
-            awk -v p="$2" '{ print "file " p ":" FNR "\t" $0 }' "$2" | scan ;;
+            awk -v p="$2" '{ print "file " p ":" FNR "\t" $0 }' "$2" | scan || die "file scan failed" ;;
     *) die "unknown option: $1" ;;
   esac
   shift 2

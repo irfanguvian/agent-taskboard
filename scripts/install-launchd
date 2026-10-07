@@ -1,0 +1,39 @@
+#!/bin/sh
+# Render scripts/local.taskboard.plist.template into ~/Library/LaunchAgents/local.taskboard.plist (D25, D30).
+# Does not load it. An existing plist is kept once as ~/.taskboard/backup/local.taskboard.plist.v1 (the v1 job, for rollback).
+# Usage: install-launchd [--check] [--yes]    --check: render + lint to a temp file only
+# Env: TB_NODE (default nvm v24.13.0, must be absolute + executable), TB_PORT (default 7777).
+set -eu
+# shellcheck source=live-lib.sh
+. "$(dirname "$0")/live-lib.sh"
+
+check=0
+for a in "$@"; do
+  case $a in
+    --check) check=1 ;;
+    --yes) ;;
+    *) die "unknown argument $a" ;;
+  esac
+done
+guard_home "$@"
+
+case $NODE in /*) ;; *) die "node must be an absolute path: $NODE" ;; esac
+[ -x "$NODE" ] || die "node not executable: $NODE (set TB_NODE)"
+tpl=$(dirname "$0")/local.taskboard.plist.template
+[ -r "$tpl" ] || die "template missing: $tpl"
+
+esc() { printf %s "$1" | sed 's/[&|\\]/\\&/g'; }
+path=/opt/homebrew/bin:$(dirname "$NODE"):/usr/local/bin:/usr/bin:/bin
+mkdir -p "$(dirname "$PLIST")"
+tmp=$PLIST.tmp.$$
+trap 'rm -f "$tmp"' EXIT
+sed -e "s|@NODE@|$(esc "$NODE")|g" -e "s|@LIVE@|$(esc "$LIVE")|g" -e "s|@PATH@|$(esc "$path")|g" \
+  -e "s|@TBHOME@|$(esc "$TBHOME")|g" -e "s|@PORT@|$(esc "${TB_PORT:-7777}")|g" "$tpl" > "$tmp"
+! grep -q '@[A-Z]*@' "$tmp" || die "unfilled placeholder in the rendered plist"
+plutil -lint "$tmp" > /dev/null || die "rendered plist failed plutil -lint"
+[ "$check" = 0 ] || exit 0
+
+mkdir -p "$TBHOME/backup"
+[ ! -e "$PLIST" ] || [ -e "$V1PLIST" ] || cp "$PLIST" "$V1PLIST"
+mv "$tmp" "$PLIST"
+echo "installed $PLIST (node $NODE)"

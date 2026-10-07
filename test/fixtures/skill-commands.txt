@@ -1,0 +1,69 @@
+# P1 AC1: every command example from the taskboard + taskboard-axi skills, rewritten to tb syntax.
+# Run top to bottom by test/tb.test.js against one seeded tbd (temp HOME + TB_HOME + TB_PORT). Order matters.
+# Format: <expected exit> | <sh command> [=> <regex the stdout must match>]. The test puts bin/tb on PATH as `tb` and sets TB_HOME.
+# Left out on purpose: tcal (Mac Calendar, not tbd) and launchctl lines (host service).
+# Seed: t_k3x9qa now, t_m4n5p6 now, t_u1v2w3 next, t_q7r8s9 later, t_x4y5z6 inbox, t_d1d2d3 done.
+
+# dashboard + reads
+0 | tb
+0 | tb list
+0 | tb list --status all
+0 | tb list --status now,next
+0 | tb list --project Acme --status all
+0 | tb list --reminders
+0 | tb list --flows
+0 | tb grep billing
+0 | tb grep "api|workflow" --status later
+0 | tb grep review --project Acme
+0 | tb list --limit 2
+0 | tb get t_k3x9qa
+0 | tb show t_k3x9qa
+0 | tb get "Review billing"
+
+# writes: add / set / move / done / rm
+0 | tb add "Review invoice PR" --project Acme --status now --pos 1 --due 2026-09-25
+0 | tb add "Read DDIA ch.6" --project Learning --status later
+0 | tb add "Water the plants" --status later --pos bottom
+0 | tb add "Call the bank" --status next --pos top --note "ask about the limit"
+0 | tb set t_k3x9qa --status now --pos 1
+0 | tb set keys --due 2026-09-30 --note "waiting on keys"
+0 | tb set "Read DDIA ch.6" --title "Read DDIA ch.7" --project Reading
+0 | tb set "Inbox idea" --due none --note none --project none
+0 | tb set t_x4y5z6 --status next --pos 1
+0 | tb move "Read DDIA ch.5" now --pos 1
+0 | tb move t_q7r8s9 later
+0 | tb done "Call the bank"
+0 | tb done t_k3x9qa t_m4n5p6
+0 | tb rm t_d1d2d3
+0 | tb rm "Water the plants" "Read DDIA ch.7"
+
+# flows, tags, notifications
+0 | tb tag list
+0 | tb tag add acme/api --type folder --path "$TB_HOME"
+0 | tb tag add acme/web --type git --path "$TB_HOME" --base main => ^added: tag acme/web · git ·
+0 | tb tag list
+# exit 1: kind not built yet (nothing is built in P1)
+1 | tb new "Add retry to the sync job" -f code -t acme/api => kind code not built yet
+1 | tb promote t_u1v2w3 -f code -t acme/api => kind code not built yet
+0 | tb new "Call the dentist" --status later
+0 | tb new "Plan the offsite" --status later --tag acme/api
+0 | tb set "Plan the offsite" --tag none => ^updated:
+0 | tb show t_u1v2w3 --full => id: t_u1v2w3
+0 | tb notify-test => ^notify: not sent
+
+# --help of every verb
+0 | tb --help
+0 | tb list --help
+0 | tb grep --help
+0 | tb get --help
+0 | tb add --help
+0 | tb new --help
+0 | tb set --help
+0 | tb move --help
+0 | tb done --help
+0 | tb rm --help
+0 | tb promote --help
+0 | tb tag add --help
+0 | tb tag list --help
+0 | tb notify-test --help
+0 | tb eval fake --help

@@ -1,0 +1,34 @@
+#!/bin/sh
+# launchctl test double (cutover.test.js). Appends "<args>|<filesystem state now>" to $FAKE_LC_DIR/log.
+# bootstrap starts the plist's tbd the way launchd would; bootout stops only the pid it recorded.
+# FAKE_LC_FAIL=<verb> makes that verb exit 1 (after logging it).
+set -u
+dir=$FAKE_LC_DIR
+printf '%s|axi=%s v1=%s data=%s live=%s tb=%s\n' "$*" \
+  "$(readlink "$HOME/bin/taskboard-axi")" \
+  "$([ -e "$HOME/taskboard/tasks.json" ] && echo 1 || echo 0)" \
+  "$([ -e "$HOME/.taskboard/tasks.json" ] && echo 1 || echo 0)" \
+  "$([ -e "$HOME/taskboard-live/tbd.js" ] && echo 1 || echo 0)" \
+  "$(readlink "$HOME/bin/tb")" >> "$dir/log"
+
+[ "${FAKE_LC_FAIL:-}" != "$1" ] || exit 1
+case $1 in
+  bootout)
+    [ -f "$dir/pid" ] || exit 3 # launchctl: not loaded
+    pid=$(cat "$dir/pid")
+    rm "$dir/pid"
+    kill "$pid" 2> /dev/null
+    i=0
+    while kill -0 "$pid" 2> /dev/null && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+    ;;
+  bootstrap)
+    plist=$3
+    tbhome=$(plutil -extract EnvironmentVariables.TB_HOME raw -o - "$plist" 2> /dev/null) || exit 0 # v1 plist: nothing to run
+    node=$(plutil -extract ProgramArguments.0 raw -o - "$plist")
+    tbd=$(plutil -extract ProgramArguments.1 raw -o - "$plist")
+    port=$(plutil -extract EnvironmentVariables.TB_PORT raw -o - "$plist")
+    TB_HOME=$tbhome TB_PORT=$port TB_NOTIFY=0 "$node" "$tbd" < /dev/null > "$dir/tbd.out" 2>&1 &
+    echo $! > "$dir/pid"
+    ;;
+  print) echo "	state = running" ;;
+esac

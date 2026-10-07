@@ -5,6 +5,7 @@
 # Test overrides: TB_NOW_HHMM=2230, AFPLAY_BIN, OSASCRIPT_BIN.
 cat >/dev/null 2>&1
 now=${TB_NOW_HHMM:-$(TZ=Asia/Jakarta date +%H%M)}
+# shellcheck disable=SC2003 # expr strips leading zeros portably (no bash 10#)
 now=$(expr "$now" + 0)
 if [ "$now" -ge 2200 ] || [ "$now" -lt 700 ]; then exit 0; fi
 "${AFPLAY_BIN:-afplay}" /System/Library/Sounds/Glass.aiff >/dev/null 2>&1 &

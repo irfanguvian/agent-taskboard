@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Taskboard</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<a class="skip" href="#board">Skip to reminders</a>
+
+<header class="topbar">
+  <h1 class="brand"><i class="mark" aria-hidden="true"></i>Taskboard</h1>
+  <p id="live" class="live" role="status" data-live="connecting"><i class="dot" aria-hidden="true"></i><span>Connecting</span></p>
+  <dl class="metrics" aria-label="System">
+    <div class="m" id="m-ram"><dt>Memory</dt><dd><i class="dot" aria-hidden="true"></i><span class="v"></span></dd></div>
+    <div class="m" id="m-disk"><dt>Disk free</dt><dd><i class="dot" aria-hidden="true"></i><span class="v"></span></dd></div>
+    <div class="m" id="m-runs"><dt>Runs</dt><dd><span class="v"></span></dd></div>
+    <div class="m" id="m-rss"><dt>Claude RSS</dt><dd><span class="v"></span></dd></div>
+    <div class="m" id="m-net"><dt>Network</dt><dd><i class="dot" aria-hidden="true"></i><span class="v"></span></dd></div>
+  </dl>
+  <button id="theme" class="ghost" type="button">Dark</button>
+</header>
+
+<p id="paused" class="paused" role="status" hidden></p>
+
+<main>
+  <section class="focus" aria-labelledby="focus-h">
+    <div class="focus-main">
+      <h2 id="focus-h" class="focus-label">Do this now</h2>
+      <p id="focusTitle" class="focus-title">Loading</p>
+      <div id="focusMeta" class="focus-meta"></div>
+      <button id="focusDone" class="focus-done" type="button" hidden>Mark done</button>
+    </div>
+    <div id="sched" class="sched" aria-label="Calendar"></div>
+  </section>
+
+  <form id="composer" class="composer" aria-label="New item">
+    <fieldset class="seg">
+      <legend class="sr">Item type</legend>
+      <label><input type="radio" name="mode" value="reminder" checked><span>Reminder</span></label>
+      <label><input type="radio" name="mode" value="flow"><span>Flow</span></label>
+    </fieldset>
+    <input id="newTitle" type="text" autocomplete="off" aria-label="New item" placeholder="Add a reminder. It lands in Inbox.">
+    <select id="flowKind" aria-label="Flow kind" hidden></select>
+    <select id="flowTag" aria-label="Flow tag" hidden></select>
+    <button class="primary" type="submit">Add</button>
+  </form>
+
+  <section class="panel" aria-labelledby="rem-h">
+    <div class="panel-head">
+      <h2 id="rem-h">Reminders</h2>
+      <p class="hint" id="kbd-hint">Drag cards, or focus one and press Alt with the arrow keys. E edits.</p>
+    </div>
+    <div id="board" class="bays" aria-describedby="kbd-hint"></div>
+  </section>
+
+  <section class="panel" aria-labelledby="fl-h">
+    <div class="panel-head">
+      <h2 id="fl-h">Flows</h2>
+      <p id="flows-empty" class="hint">No flows yet. Flows go to agents, and none are built, so new ones are refused for now.</p>
+    </div>
+    <div id="rail" class="rail"></div>
+    <details id="cancelled" class="cancelled" hidden>
+      <summary></summary>
+      <ul id="cancelledList" class="flist"></ul>
+    </details>
+  </section>
+</main>
+
+<dialog id="drawer" class="drawer" aria-label="Flow details"></dialog>
+<div id="toasts" class="toasts" role="status" aria-live="polite"></div>
+
+<script src="/app.js"></script>
+</body>
+</html>

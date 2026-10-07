@@ -1,0 +1,153 @@
+#!/bin/sh
+# Move the live board from v1 (server.js + repo-dir tasks.json) to tbd in ~/taskboard-live (plan P1 AC11, D4 D25 D29 D30).
+# Run only after Irfan's OK. Stops at the first failure and prints the rollback command.
+# Usage: cutover [<sha>] [--yes]      sha = a committed, verified commit; default: dev HEAD
+#        cutover --rollback [--yes]   back to v1; edits made after the cutover are copied back to the v1 file
+# Env: TB_V1_TASKS (default ~/taskboard/tasks.json), TB_PORT (7777), TB_NODE, TB_DEV (see deploy, install-launchd).
+# Needs --yes on the real HOME. Never overwrites: every file it replaces is renamed aside.
+# Prints one "cutover: step <name>" line to stderr as each step starts. The v1 plist is read from ~/.taskboard/backup (install-launchd keeps it there).
+# Run it from the dev repo, not from ~/taskboard-live (step g rewrites that tree under a running script).
+set -eu
+here=$(cd "$(dirname "$0")" && pwd)
+# shellcheck source=live-lib.sh
+. "$here/live-lib.sh"
+
+rollback=0 sha=''
+for a in "$@"; do
+  case $a in
+    --rollback) rollback=1 ;;
+    --yes) ;;
+    -*) die "unknown flag $a" ;;
+    *) sha=$a ;;
+  esac
+done
+guard_home "$@"
+
+dev=${TB_DEV:-$(cd "$here/.." && pwd)}
+v1dir=$HOME/taskboard
+v1=${TB_V1_TASKS:-$v1dir/tasks.json}
+data=$TBHOME/tasks.json
+bin=$HOME/bin
+port=${TB_PORT:-7777}
+ts=$(date +%Y%m%d-%H%M%S)
+step=preflight
+stage() { step=$1; echo "cutover: step $1" >&2; }
+failed() {
+  rc=$?
+  [ "$rc" = 0 ] || echo "cutover FAILED at step: $step. Undo with: scripts/cutover --rollback (--yes on the real HOME)" >&2
+}
+trap failed EXIT
+
+if [ "$rollback" = 1 ]; then
+  [ -f "$V1PLIST" ] || ! grep -q tbd.js "$PLIST" || die "no $V1PLIST to restore the v1 job from"
+  # Refuse before bootout: copying a broken file over the v1 file would leave neither board usable.
+  [ ! -f "$data" ] || has_tasks "$data" || die "$data has no tasks array: repair or move it aside, then retry (nothing was changed)"
+
+  stage "rollback: bootout tbd"
+  launchctl bootout "$DOMAIN/$LABEL" || echo "(tbd was not loaded)"
+
+  stage "rollback: copy live data back to the v1 file"
+  if [ -f "$data" ]; then # tbd stopped: the file is final
+    if [ -e "$v1" ] && ! cmp -s "$data" "$v1"; then mv "$v1" "$v1.pre-rollback-$ts"; fi
+    [ -e "$v1" ] || cp "$data" "$v1"
+    mv "$data" "$data.rolled-back-$ts"
+  fi
+
+  stage "rollback: restore the v1 plist and ~/bin"
+  [ ! -f "$V1PLIST" ] || cp "$V1PLIST" "$PLIST"
+  [ ! -L "$bin/tb" ] || rm "$bin/tb"
+  mkdir -p "$bin"
+  ln -sfn "$v1dir/taskboard-axi" "$bin/taskboard-axi"
+
+  stage "rollback: bootstrap the v1 job"
+  launchctl bootstrap "$DOMAIN" "$PLIST"
+  launchctl print "$DOMAIN/$LABEL" 2>&1 | grep -E '^[[:space:]]*(state|pid) =' || true
+  echo "rolled back: v1 board on $v1. tcal still writes ~/.taskboard/calendar.json; run it with TASKBOARD_DIR=$v1dir for v1."
+  exit 0
+fi
+
+# ---- preflight: every refusal happens before the first change ----
+stage preflight
+"$here/install-launchd" --check --yes
+[ -f "$v1" ] || die "v1 tasks file missing: $v1"
+has_tasks "$v1" || die "$v1 has no tasks array"
+[ ! -e "$data" ] || die "$data already exists: inspect it first (rollback moves it aside); cutover will not overwrite it"
+for n in tb taskboard-axi; do
+  [ ! -e "$bin/$n" ] || [ -L "$bin/$n" ] || die "$bin/$n is a real file, not a symlink: move it first"
+done
+full=$(git -C "$dev" rev-parse --verify --quiet "${sha:-HEAD}^{commit}") || die "unknown commit: ${sha:-HEAD}"
+for f in tbd.js bin/tb bin/taskboard-axi scripts/install-launchd scripts/live-lib.sh scripts/local.taskboard.plist.template; do
+  git -C "$dev" cat-file -e "$full:$f" || die "commit $full has no $f: commit the work first"
+done
+"$here/deploy" "$full" --no-restart --check --yes
+
+stage "a: bootout the v1 job"
+launchctl bootout "$DOMAIN/$LABEL" || echo "(v1 job was not loaded)"
+
+stage "b: unlink ~/bin/taskboard-axi"
+[ ! -L "$bin/taskboard-axi" ] || rm "$bin/taskboard-axi"
+[ ! -e "$bin/taskboard-axi" ] || die "$bin/taskboard-axi still exists"
+
+stage "c: back up the v1 file"
+mkdir -p "$TBHOME"
+chmod 700 "$TBHOME"
+mkdir -p "$TBHOME/backup"
+backup=$TBHOME/backup/tasks-$ts.json
+cp "$v1" "$backup"
+cmp -s "$v1" "$backup" || die "backup differs from $v1"
+
+stage "d+e: copy into ~/.taskboard and deep-equal check"
+(set -C; : > "$data") || die "$data appeared meanwhile; not overwriting it"
+cat "$v1" > "$data" || { rm -f "$data"; die "copy to $data failed; removed the partial copy, v1 file untouched"; }
+if ! same "$backup" "$data"; then
+  rm -f "$data"
+  die "copied tasks differ from the backup; removed the copy, v1 file untouched"
+fi
+
+stage "f: rename the v1 file"
+migrated=$v1.migrated-$(date +%Y-%m-%d)
+[ ! -e "$migrated" ] || migrated=$migrated-$ts # earlier try the same day: keep both
+mv "$v1" "$migrated"
+[ ! -e "$v1" ] || die "$v1 still exists"
+
+stage "g: deploy $full to $LIVE"
+"$here/deploy" "$full" --no-restart --yes
+for f in bin/tb bin/taskboard-axi scripts/install-launchd; do [ -x "$LIVE/$f" ] || die "$LIVE/$f missing or not executable"; done
+
+stage "h: relink ~/bin"
+mkdir -p "$bin"
+for n in tb taskboard-axi; do ln -sfn "$LIVE/bin/$n" "$bin/$n"; done
+
+stage "i: install the plist and bootstrap tbd"
+"$LIVE/scripts/install-launchd" --yes # the deployed, verified copy, not the dev working tree
+launchctl bootstrap "$DOMAIN" "$PLIST"
+
+stage "j: verify tbd serves the v1 reminders"
+url=http://127.0.0.1:$port/api/state
+# tbd wants its token on every /api call. It goes in on stdin so it stays out of `ps`; no token file yet = 401 = retry.
+api() { { printf 'X-TB-Token: '; tr -d '\n' < "$TBHOME/token"; echo; } | curl -fsS --noproxy '*' -H @- "$@"; }
+i=0
+until api -o /dev/null --max-time 2 "$url" 2> /dev/null; do
+  i=$((i + 1))
+  [ "$i" -lt 20 ] || die "no 200 from $url after 10 s (log: $TBHOME/tbd.log)"
+  sleep 0.5
+done
+count=$(api --max-time 5 "$url" | "$NODE" -e '
+  const fs = require("fs");
+  const ids = JSON.parse(fs.readFileSync(0, "utf8")).reminders.map((r) => r.id);
+  const want = JSON.parse(fs.readFileSync(process.argv[1], "utf8")).tasks.map((t) => t.id);
+  require("assert").deepStrictEqual(ids, want);
+  console.log(ids.length);' "$backup") || die "API reminders differ from the backup (count or id order)"
+
+stage "k: follow-ups"
+cat << EOF
+OK: tbd on :$port serves $count reminders, ids in v1 order (deployed $full).
+backup: $backup   v1 file kept as: $migrated
+
+Manual follow-ups:
+1. Rebuild tcal (writes ~/.taskboard/calendar.json now); re-grant Calendar access if macOS prompts:
+   cd $dev && swiftc -O tcal.swift -o tcal -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker tcal-Info.plist && ./tcal events
+2. Irfan: remove the claude.ai-synced taskboard skill (D29). ~/.claude/skills/taskboard stays the only one.
+3. Install the new local skills from .omc/drafts/skills.
+Rollback: scripts/cutover --rollback
+EOF

@@ -20,3 +20,4 @@ docs/verification/
 docs/verdicts/
 docs/LESSONS.md
 *.generated.plist
+.learning/
