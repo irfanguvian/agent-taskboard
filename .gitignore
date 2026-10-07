@@ -1,0 +1,12 @@
+# personal data: never commit
+tasks.json
+tasks.json.*
+calendar.json
+*.tmp
+*.lock
+*.log
+
+# build output: rebuild from tcal.swift (see header)
+tcal
+
+.DS_Store
