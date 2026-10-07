@@ -1,0 +1,15 @@
+{
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "strict": false,
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "target": "es2023",
+    "types": ["node"]
+  },
+  "include": ["tbd.js", "lib/**/*.js", "bin/**/*", "hooks/**/*.js", "scripts/**/*.js", "test/**/*.js"],
+  "exclude": ["server.js", "taskboard-axi", "index.html", "node_modules"]
+}

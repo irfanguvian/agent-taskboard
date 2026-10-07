@@ -1,0 +1,8 @@
+#!/bin/sh
+# Copy scripts/pre-push into the hooks dir of the git repo in cwd. Re-run after editing pre-push.
+set -e
+src=$(cd "$(dirname "$0")" && pwd)/pre-push
+hooks=$(git rev-parse --git-path hooks)
+mkdir -p "$hooks"
+install -m 755 "$src" "$hooks/pre-push"
+echo "installed pre-push -> $hooks/pre-push"

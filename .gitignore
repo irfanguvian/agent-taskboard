@@ -10,3 +10,13 @@ calendar.json
 tcal
 
 .DS_Store
+
+# dev tooling + local-only docs/state
+.omc/
+.claude/settings.local.json
+node_modules/
+/Taskboard Agent Pipeline — Flow & State Design.md
+docs/verification/
+docs/verdicts/
+docs/LESSONS.md
+*.generated.plist

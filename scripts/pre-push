@@ -1,0 +1,22 @@
+#!/bin/sh
+# Versioned pre-push body (D18), installed by scripts/install-git-hooks. Never bypass with --no-verify.
+# stdin: "<local ref> <local sha> <remote ref> <remote sha>" per ref being pushed.
+zero=0000000000000000000000000000000000000000
+# plan m2: live copy once it exists (dev copy before cutover), never a branch's own edits after.
+gate=$HOME/taskboard-live/scripts/leak-check
+[ -x "$gate" ] || gate=$(git rev-parse --show-toplevel)/scripts/leak-check
+[ -x "$gate" ] || { echo "pre-push: leak-check not found, push refused" >&2; exit 1; }
+
+fail=0
+while read -r lref lsha rref rsha; do
+  [ "$lsha" = "$zero" ] && continue
+  if [ "$rsha" = "$zero" ]; then
+    # new remote ref: everything no remote has yet
+    [ -n "$(git rev-list "$lsha" --not --remotes)" ] || continue
+    range="$lsha --not --remotes"
+  else
+    range="$rsha..$lsha"
+  fi
+  "$gate" "$range" --branch "${lref#refs/*/}" --branch "${rref#refs/*/}" </dev/null || fail=1
+done
+[ "$fail" = 0 ] || { echo "pre-push: leak gate refused this push. Fix the hits above, retry. No --no-verify." >&2; exit 1; }

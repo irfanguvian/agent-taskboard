@@ -1,0 +1,69 @@
+#!/bin/bash
+# Leak gate (D18). Usage: leak-check <git-range> [--branch <name>]... [--file <path>]...
+# Scans the repo in cwd. Exit 0 clean, 1 hit, 2 usage/config error.
+# Prints WHERE only, never the matched word or secret.
+PATH=/opt/homebrew/bin:/usr/local/bin:$PATH
+DENY=${TB_DENYLIST:-$HOME/.taskboard/leak-denylist.txt}
+
+die() { echo "leak-check: $*" >&2; exit 2; }
+[ $# -ge 1 ] || die "usage: leak-check <git-range> [--branch <name>]... [--file <path>]..."
+range=$1; shift
+[ -r "$DENY" ] || die "denylist missing: $DENY"
+command -v gitleaks >/dev/null || die "gitleaks not installed"
+# $range is unquoted on purpose: the pre-push hook passes "<sha> --not --remotes".
+# shellcheck disable=SC2086
+git rev-list $range >/dev/null 2>&1 || die "bad git range: $range"
+
+tmp=$(mktemp -d) && trap 'rm -rf "$tmp"' EXIT
+grep -v -e '^#' -e '^$' "$DENY" > "$tmp/deny"
+[ -s "$tmp/deny" ] || die "denylist has no entries: $DENY"
+: > "$tmp/hits"
+
+# stdin: "WHERE<TAB>text" lines. Prints "WHERE: denylist entry #N" per hit.
+match() {
+  awk -v deny="$tmp/deny" '
+    BEGIN { while ((getline l < deny) > 0) d[++n] = tolower(l) }
+    { i = index($0, "\t"); t = tolower(substr($0, i + 1))
+      for (k = 1; k <= n; k++) if (index(t, d[k])) print substr($0, 1, i - 1) ": denylist entry #" k }'
+}
+scan() { match | tee -a "$tmp/hits"; }
+
+# gitleaks: fixed default rules; repo-local config, ignore file and inline allow comments cannot weaken it.
+printf '[extend]\nuseDefault = true\n' > "$tmp/gitleaks.toml"
+mkdir "$tmp/noignore"
+# shellcheck disable=SC2086
+gitleaks git --log-opts="$range" --redact --no-banner --no-color -v --exit-code 99 \
+  -c "$tmp/gitleaks.toml" -i "$tmp/noignore" --ignore-gitleaks-allow > "$tmp/gl.out" 2>&1
+case $? in
+  0) ;;
+  99) awk '{ v = $0; sub(/^[A-Za-z]+: +/, "", v) }
+           /^RuleID:/ { r = v } /^File:/ { f = v } /^Line:/ { l = v }
+           /^Commit:/ { print "gitleaks " r " " f ":" l " commit " substr(v, 1, 12) }' "$tmp/gl.out" | tee -a "$tmp/hits" ;;
+  *) die "gitleaks failed: $(tail -n 3 "$tmp/gl.out")" ;;
+esac
+
+# Per-commit patches, not the net diff: a word added then removed inside the range is still pushed.
+# shellcheck disable=SC2086
+git log -p -m --unified=0 --no-color --format='commit %H' $range | awk '
+  /^commit [0-9a-f]+$/ { sha = substr($2, 1, 12); inh = 0; next }
+  /^diff --git / { inh = 0; next }
+  !inh && /^\+\+\+ / { f = substr($0, 7); print sha " path " f "\t" f; next }
+  /^@@ / { inh = 1; split($3, a, ","); ln = substr(a[1], 2) + 0; next }
+  inh && /^\+/ { print sha " " f ":" ln "\t" substr($0, 2); ln++ }' | scan
+# shellcheck disable=SC2086
+git log --format='commit %H%n%B' $range | awk '
+  /^commit [0-9a-f]+$/ { sha = substr($2, 1, 12); next }
+  { print "commit message " sha "\t" $0 }' | scan
+
+while [ $# -gt 0 ]; do
+  [ $# -ge 2 ] || die "$1 needs a value"
+  case $1 in
+    --branch) printf 'branch name\t%s\n' "$2" | scan ;;
+    --file) [ -r "$2" ] || die "cannot read file: $2"
+            awk -v p="$2" '{ print "file " p ":" FNR "\t" $0 }' "$2" | scan ;;
+    *) die "unknown option: $1" ;;
+  esac
+  shift 2
+done
+
+[ ! -s "$tmp/hits" ]
