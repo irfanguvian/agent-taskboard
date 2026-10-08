@@ -1,0 +1,1 @@
+{ "permissions": { "allow": ["Read", "Glob", "Grep", "Edit(/${WORKTREE}/**)", "Bash", "Agent"] }, "sandbox": { "filesystem": { "allowRead": ["${TB_CODE}", "${NODE_HOME}", "~/.npm", "~/Library/Caches/ms-playwright"], "allowWrite": ["~/.npm"] }, "network": { "allowLocalBinding": true, "allowedDomains": ["registry.npmjs.org"] } } }

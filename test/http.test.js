@@ -122,9 +122,14 @@ test('AC4 SSE: system event on connect, reminder event after a PATCH; bad Host r
   assert.equal(res.statusCode, 200);
   assert.match(res.headers['content-type'], /^text\/event-stream/);
   const [, sys] = await s.until(/event: system\ndata: (.*)\n\n/);
-  const want = { ram_used: null, ram_total: null, pressure: null, disk_free: null, claude_rss: null, runs: 0, max: 1, net: null, paused_until: null, paused_reason: null };
-  assert.deepEqual(JSON.parse(sys), want);
-  assert.deepEqual((await tbd.api('GET', '/api/state')).json.system, want, '/api/state carries the same system object');
+  // P2: live monitor fields change between reads, so compare keys + the runner-owned fields (values: monitor.test.js).
+  const keys = ['ram_total', 'ram_used', 'avail', 'pressure', 'level', 'disk_free', 'claude_rss', 'net', 'power', 'docker', 'disk_warn', 'at', 'runs', 'max', 'paused_until', 'paused_reason'].sort();
+  const runner = ({ runs, max, paused_until, paused_reason }) => ({ runs, max, paused_until, paused_reason });
+  const fromState = (await tbd.api('GET', '/api/state')).json.system;
+  for (const [where, got] of [['SSE', JSON.parse(sys)], ['/api/state', fromState]]) {
+    assert.deepEqual(Object.keys(got).sort(), keys, `${where} carries the system object`);
+    assert.deepEqual(runner(got), { runs: 0, max: 1, paused_until: null, paused_reason: null }, where);
+  }
   const { json } = await tbd.api('POST', '/api/reminders', { title: 'sse me' });
   await tbd.api('PATCH', `/api/reminders/${json.reminder.id}`, { status: 'now' });
   const [, data] = await s.until(new RegExp(`event: reminder\\ndata: (\\{"id":"${json.reminder.id}","status":"now"\\})\\n\\n`));

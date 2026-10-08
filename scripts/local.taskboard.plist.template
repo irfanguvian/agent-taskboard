@@ -18,6 +18,11 @@
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>AbandonProcessGroup</key><true/>
+  <key>Umask</key><integer>63</integer>
+  <key>SoftResourceLimits</key>
+  <dict><key>NumberOfFiles</key><integer>4096</integer></dict>
+  <key>HardResourceLimits</key>
+  <dict><key>NumberOfFiles</key><integer>4096</integer></dict>
   <key>StandardOutPath</key><string>@TBHOME@/tbd.log</string>
   <key>StandardErrorPath</key><string>@TBHOME@/tbd.log</string>
 </dict>

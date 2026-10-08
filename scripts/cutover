@@ -93,7 +93,7 @@ mkdir -p "$TBHOME"
 chmod 700 "$TBHOME"
 mkdir -p "$TBHOME/backup"
 backup=$TBHOME/backup/tasks-$ts.json
-cp "$v1" "$backup"
+(umask 077; cp "$v1" "$backup") # backups are private: 0600
 cmp -s "$v1" "$backup" || die "backup differs from $v1"
 
 stage "d+e: copy into ~/.taskboard and deep-equal check"
@@ -124,14 +124,33 @@ launchctl bootstrap "$DOMAIN" "$PLIST"
 
 stage "j: verify tbd serves the v1 reminders"
 url=http://127.0.0.1:$port/api/state
-# tbd wants its token on every /api call. It goes in on stdin so it stays out of `ps`; no token file yet = 401 = retry.
-api() { { printf 'X-TB-Token: '; tr -d '\n' < "$TBHOME/token"; echo; } | curl -fsS --noproxy '*' -H @- "$@"; }
+# The token goes only to a port that proves it is tbd (N9): /api/whoami?n=<nonce> must answer HMAC-SHA256(token, n).
+# Exit 0 = tbd, 2 = something else answers, 1 = nobody yet (down, 503 starting, no token file yet) = retry.
+# shellcheck disable=SC2016 # ${} below is JavaScript
+whoami() {
+  "$NODE" -e '
+    const c = require("crypto");
+    let token;
+    try { token = require("fs").readFileSync(process.argv[1], "utf8").trim(); } catch { process.exit(1); }
+    const n = c.randomBytes(16).toString("hex");
+    fetch(`http://127.0.0.1:${process.argv[2]}/api/whoami?n=${n}`, { signal: AbortSignal.timeout(2000) }).then(async (r) => {
+      if (r.status === 503) process.exit(1);
+      const mac = r.ok ? (await r.json().catch(() => ({}))).mac : null;
+      process.exit(mac === c.createHmac("sha256", token).update(n).digest("hex") ? 0 : 2);
+    }, () => process.exit(1));' "$TBHOME/token" "$port"
+}
 i=0
-until api -o /dev/null --max-time 2 "$url" 2> /dev/null; do
+while :; do
+  rc=0
+  whoami || rc=$?
+  [ "$rc" != 2 ] || die "port $port answers, but not as this tbd (identity check failed); the token was not sent"
+  [ "$rc" != 0 ] || break
   i=$((i + 1))
-  [ "$i" -lt 20 ] || die "no 200 from $url after 10 s (log: $TBHOME/tbd.log)"
+  [ "$i" -lt 20 ] || die "no tbd on port $port after 10 s (log: $TBHOME/tbd.log)"
   sleep 0.5
 done
+# The token goes in on stdin so it stays out of `ps`.
+api() { { printf 'X-TB-Token: '; tr -d '\n' < "$TBHOME/token"; echo; } | curl -fsS --noproxy '*' -H @- "$@"; }
 count=$(api --max-time 5 "$url" | "$NODE" -e '
   const fs = require("fs");
   const ids = JSON.parse(fs.readFileSync(0, "utf8")).reminders.map((r) => r.id);

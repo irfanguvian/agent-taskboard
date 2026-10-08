@@ -1,0 +1,1 @@
+{ "permissions": { "allow": ["Read", "Glob", "Grep", "Bash(git log *)", "Bash(git show *)", "Bash(git diff *)"], "deny": ["Edit(/${TAG_PATH}/**)"] } }

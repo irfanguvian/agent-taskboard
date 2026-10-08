@@ -1,0 +1,1 @@
+{ "permissions": { "allow": ["Read", "Glob", "Grep", "Edit(/${OUT_DIR}/**)", "Agent"], "deny": ["Edit(/${TAG_PATH}/**)"] } }

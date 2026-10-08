@@ -99,6 +99,21 @@ test('AC6 quiet hours: 22:30 entry silent, night silent, 07:00 one summary, re-p
   assert.equal(s.banners().length, 2);
 });
 
+// FX-1 F2 (heavy slot revoked) + disk: one-off alerts
+test('alert(): banner now in the day; in quiet hours held (latest per title) and sent once at 07:00', async (t) => {
+  const s = setup(t, '2026-10-07T15:30:00Z'); // 22:30 local
+  s.n.alert({ title: 'Heavy slot revoked', message: 'heavy slot revoked after 60 min: npm' });
+  s.n.alert({ title: 'Heavy slot revoked', message: 'heavy slot revoked after 60 min: docker' });
+  s.tickAfter(60);
+  assert.equal(s.calls.length, 0, 'silent 22:00-07:00');
+  s.tickAfter(7.5 * 60); // 07:00
+  assert.deepEqual(s.banners(), [{ title: 'Heavy slot revoked', message: 'heavy slot revoked after 60 min: docker', subtitle: '' }]);
+  s.n.alert({ title: 'Heavy slot revoked', message: 'heavy slot revoked after 60 min: make' });
+  assert.equal(s.banners().length, 2, 'daytime: at once');
+  s.tickAfter(30);
+  assert.equal(s.banners().length, 2, 'not repeated');
+});
+
 test('AC6 REMIND_AT: weekday slot fires "Do now" once with v1 text; off-slot and weekend do not', async (t) => {
   await store.addReminder({ title: 'Ship it', status: 'now' });
   await store.addReminder({ title: 'Second', status: 'now' });
@@ -169,7 +184,8 @@ test('AC6 POST /api/notify-test: 401 without token, 200 {sent, top, extra}; live
   t.after(() => live.stop());
   const sent = await live.api('POST', '/api/notify-test', {});
   assert.deepEqual(sent.json, { sent: true, top: 'Top task', extra: '1 in Now' });
-  const lines = fs.readFileSync(log, 'utf8').trim().split('\n');
+  // P2: the monitor also execs (sysctl, vm_stat, ps, pmset), so look only at notifier binaries.
+  const lines = fs.readFileSync(log, 'utf8').trim().split('\n').filter((l) => /^\/usr\/bin\/(osascript|afplay)\|/.test(l));
   assert.match(lines.at(-1), /^\/usr\/bin\/osascript\|.*\|--\|Do now\|Top task\|1 in Now\|$/);
   assert.ok(lines.every((l) => l.startsWith('/usr/bin/osascript|')), 'banner only, no afplay'); // a live REMIND_AT minute may add a 2nd Do now
 });

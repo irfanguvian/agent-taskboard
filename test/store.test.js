@@ -293,3 +293,11 @@ test('A11b rename fails (tasks.json is a directory): 500, tmp file removed; next
   assert.equal((await tbd.api('POST', '/api/reminders', { title: 'saved now' })).status, 201);
   assert.deepEqual(fileTasks(tbd).map((x) => x.title), [...V1.tasks.map((x) => x.title), 'saved now']);
 });
+
+test('D36 fresh config.json gets the 8 GB RAM defaults (planning/review 0.4, working 1.0, qa 1.5, min_free 1)', async (t) => {
+  const tbd = await startTbd();
+  t.after(() => tbd.stop());
+  const config = JSON.parse(fs.readFileSync(path.join(tbd.tbHome, 'config.json'), 'utf8'));
+  assert.deepEqual(config.memory.phase_need_gb, { planning: 0.4, review: 0.4, working: 1.0, qa: 1.5 });
+  assert.equal(config.memory.min_free_gb, 1);
+});

@@ -41,7 +41,8 @@ main() {
     git -C "$LIVE" checkout -q --detach "$full"
   fi
   mkdir -p "$TBHOME"
-  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) $prev -> $full" >> "$TBHOME/deploy.log"
+  (umask 077; echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) $prev -> $full" >> "$TBHOME/deploy.log")
+  chmod 600 "$TBHOME/deploy.log" # a log from an older deploy keeps its old mode otherwise
   echo "deployed $full (was $prev)"
   [ "$prev" = none ] || echo "rollback: scripts/deploy $prev"
   [ "$restart" = 0 ] || launchctl kickstart -k "$DOMAIN/$LABEL"

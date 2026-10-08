@@ -4,6 +4,7 @@
 const { test, describe, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const { execFile, spawnSync } = require('node:child_process');
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const http = require('node:http');
 const os = require('node:os');
@@ -152,6 +153,7 @@ test('rm: a DELETE failing midway still prints the rows already removed (fix B5)
   const rows = [{ id: 't_aaaaa1', title: 'One', status: 'now' }, { id: 't_aaaaa2', title: 'Two', status: 'now' }];
   const deleted = [];
   const fake = http.createServer((req, res) => { // tbd stand-in: the second DELETE fails
+    if (req.url.startsWith('/api/whoami')) return res.end(JSON.stringify({ mac: crypto.createHmac('sha256', 'x').update(new URL(req.url, 'http://x').searchParams.get('n')).digest('hex') })); // H9: proves it knows the token 'x'
     if (req.method === 'GET') return res.end(JSON.stringify({ reminders: rows, flows: [] }));
     const id = req.url.split('/').pop();
     if (id === 't_aaaaa2') { res.statusCode = 500; return res.end(JSON.stringify({ error: 'internal error' })); }
@@ -301,18 +303,20 @@ test('tbd not running: exit 1 with the restart command', () => withBoard(async (
   assert.match(noToken.stdout, /^error: tbd not running$/m);
 }));
 
-test('a tbd that never answers times out after 5 s (D31)', async () => {
+test('a tbd that never answers times out after 5 s (D31); long-timeout verbs report the 5 s whoami, not their own', async () => {
   const hung = http.createServer(() => {}); // accepts, never replies
   await new Promise(resolve => hung.listen(0, '127.0.0.1', () => resolve(undefined)));
   const tbHome = fs.mkdtempSync(path.join(os.tmpdir(), 'tb-hung-'));
   fs.writeFileSync(path.join(tbHome, 'token'), 'x');
   try {
     const port = /** @type {import('node:net').AddressInfo} */ (hung.address()).port;
-    const { code, stdout } = await new Promise(resolve => execFile(process.execPath, [TB, 'list'], {
+    const run = verb => new Promise(resolve => execFile(process.execPath, [TB, verb], {
       env: isolatedEnv({ home: tbHome, tbHome, port }),
     }, (err, out) => resolve({ code: err ? err.code : 0, stdout: out })));
-    assert.equal(code, 1);
-    assert.match(stdout, /^error: tbd did not answer within 5s$/m);
+    for (const { code, stdout } of await Promise.all([run('list'), run('gc')])) { // gc waits 600 s, but its whoami 5 s
+      assert.equal(code, 1);
+      assert.match(stdout, /^error: tbd did not answer within 5s$/m);
+    }
   } finally {
     hung.closeAllConnections();
     hung.close();

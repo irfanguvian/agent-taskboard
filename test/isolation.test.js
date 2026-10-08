@@ -45,7 +45,7 @@ test('AC10 a full run writes only under TB_HOME; <tmp>/home/.taskboard never exi
   await tbd.api('GET', '/api/state');
   assert.equal(fs.existsSync(path.join(tbd.home, '.taskboard')), false);
   assert.deepEqual(fs.readdirSync(tbd.home), [], 'nothing written to HOME at all');
-  const allowed = new Set(['config.json', 'events.jsonl', 'session', 'tags.json', 'tasks.json', 'tbd.pid', 'tickets', 'token']);
+  const allowed = new Set(['config.json', 'events.jsonl', 'session', 'slots.json', 'tags.json', 'tasks.json', 'tbd.pid', 'tbd.sock', 'tickets', 'token']); // P2: socket + slots state
   const unexpected = fs.readdirSync(tbd.tbHome).filter(f => !allowed.has(f));
   assert.deepEqual(unexpected, [], 'only known files under TB_HOME');
   const config = JSON.parse(fs.readFileSync(path.join(tbd.tbHome, 'config.json'), 'utf8'));
@@ -71,6 +71,16 @@ test('AC10 second tbd on the same TB_HOME refuses to start; a stale pid file doe
   const stale = await startTbd({ files: { 'tbd.pid': String(gone.pid) } });
   t.after(() => stale.stop());
   assert.notEqual(fs.readFileSync(path.join(stale.tbHome, 'tbd.pid'), 'utf8'), String(gone.pid), 'stale pid replaced');
+});
+
+test('unreadable session file: tbd stops with exit 1, one error line, no stack, pid file removed', (t) => {
+  const tbHome = fs.mkdtempSync(path.join(os.tmpdir(), 'tbd-sess-'));
+  t.after(() => fs.rmSync(tbHome, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(tbHome, 'session'), '{}', { mode: 0o000 }); // EACCES on read
+  const r = spawnSync(process.execPath, [TBD], { env: isolatedEnv({ home: tbHome, tbHome, port: 0 }), encoding: 'utf8', timeout: 10_000 });
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /^error: EACCES: permission denied, open '.*session'\n$/);
+  assert.equal(fs.existsSync(path.join(tbHome, 'tbd.pid')), false, 'stop(1) ran, not a crash');
 });
 
 test('AC10 SIGTERM: tbd exits 0 and removes its pid file', async () => {

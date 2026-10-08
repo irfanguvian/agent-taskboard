@@ -5,7 +5,8 @@
 // ~/taskboard* or ~/.taskboard; the real home is only ever read (guard test).
 const { test, after } = require('node:test');
 const assert = require('node:assert/strict');
-const { spawnSync } = require('node:child_process');
+const { spawn, spawnSync } = require('node:child_process');
+const { once } = require('node:events');
 const fs = require('node:fs');
 const net = require('node:net');
 const os = require('node:os');
@@ -244,6 +245,7 @@ test('cutover, deploy, rollback, second cutover on a temp HOME', async (t) => {
     assert.equal(backups.length, 1);
     assert.match(backups[0], /^tasks-\d{8}-\d{6}\.json$/);
     assert.equal(fs.readFileSync(path.join(w.tbHome, 'backup', backups[0]), 'utf8'), V1_TEXT);
+    assert.equal(fs.statSync(path.join(w.tbHome, 'backup', backups[0])).mode & 0o777, 0o600, 'the backup is private even though the v1 file is 0644');
     assert.deepEqual(readTasks(path.join(w.tbHome, 'tasks.json')), TASKS);
     const s = await state();
     assert.deepEqual(s.reminders.map((x) => x.id), TASKS.map((x) => x.id));
@@ -269,16 +271,20 @@ test('cutover, deploy, rollback, second cutover on a temp HOME', async (t) => {
     const lines = fs.readFileSync(path.join(w.tbHome, 'deploy.log'), 'utf8').trim().split('\n');
     assert.equal(lines.length, 1);
     assert.match(lines[0], new RegExp(`^\\d{4}-\\d\\d-\\d\\dT[\\d:]+Z none -> ${sha1}$`));
+    assert.equal(fs.statSync(path.join(w.tbHome, 'deploy.log')).mode & 0o777, 0o600);
   });
 
   await t.test('plist lints, has no placeholders or personal paths, keeps the v1 plist once', () => {
     assert.equal(spawnSync('plutil', ['-lint', w.plist]).status, 0);
     const text = fs.readFileSync(w.plist, 'utf8');
     assert.doesNotMatch(text, /@[A-Z]+@/);
-    for (const want of [`<string>${process.execPath}</string>`, `<string>${w.live}/tbd.js</string>`, `<key>TB_HOME</key><string>${w.tbHome}</string>`, `<key>TB_PORT</key><string>${w.port}</string>`, '<key>KeepAlive</key><true/>', '<key>AbandonProcessGroup</key><true/>']) {
+    for (const want of [`<string>${process.execPath}</string>`, `<string>${w.live}/tbd.js</string>`, `<key>TB_HOME</key><string>${w.tbHome}</string>`, `<key>TB_PORT</key><string>${w.port}</string>`, '<key>KeepAlive</key><true/>', '<key>AbandonProcessGroup</key><true/>', '<key>Umask</key><integer>63</integer>']) {
       assert.ok(text.includes(want), `plist lacks ${want}`);
     }
     assert.match(text, /<key>PATH<\/key><string>\/opt\/homebrew\/bin:[^<]*:\/usr\/local\/bin:\/usr\/bin:\/bin<\/string>/);
+    for (const k of ['SoftResourceLimits', 'HardResourceLimits']) { // N3: fd limit for http sockets + files
+      assert.equal(spawnSync('plutil', ['-extract', `${k}.NumberOfFiles`, 'raw', '-o', '-', w.plist], { encoding: 'utf8' }).stdout.trim(), '4096', k);
+    }
     const tpl = fs.readFileSync(path.join(SCRIPTS, 'local.taskboard.plist.template'), 'utf8');
     assert.doesNotMatch(tpl, /\/Users\//);
     assert.deepEqual(fs.readdirSync(path.dirname(w.plist)), ['local.taskboard.plist'], 'no backup left in LaunchAgents');
@@ -356,6 +362,30 @@ test('cutover, deploy, rollback, second cutover on a temp HOME', async (t) => {
   });
 });
 
+test('N9 verify sends the token only after /api/whoami proves the port is tbd: a squatter gets no token, cutover stops at j', async (t) => {
+  const w = await world();
+  // own process: w.run blocks this one (spawnSync). Logs every request's url + headers, one JSON line each.
+  const log = path.join(w.root, 'squat.log');
+  const squat = spawn(process.execPath, ['-e', `
+    const fs = require('fs');
+    require('http').createServer((req, res) => {
+      fs.appendFileSync(process.argv[1], JSON.stringify({ url: req.url, headers: req.headers }) + '\\n');
+      res.end(JSON.stringify({ mac: '0'.repeat(64), reminders: [] }));
+    }).listen(${w.port}, '127.0.0.1', () => console.log('up'));`, log], { stdio: ['ignore', 'pipe', 'inherit'] });
+  t.after(() => squat.kill());
+  await once(squat.stdout, 'data');
+  fs.mkdirSync(w.tbHome, { mode: 0o700 });
+  fs.writeFileSync(path.join(w.tbHome, 'token'), 'e'.repeat(64), { mode: 0o600 }); // left by an earlier tbd: tbd cannot write one, it never binds
+  const r = w.run('cutover');
+  assert.equal(r.status, 1, out(r));
+  assert.match(r.stderr, new RegExp(`port ${w.port} answers, but not as this tbd \\(identity check failed\\); the token was not sent`));
+  assert.match(r.stderr, /FAILED at step: j: verify/);
+  assert.match(fs.readFileSync(path.join(w.lc, 'tbd.out'), 'utf8'), /EADDRINUSE/, 'D39 tbd binds first: a taken port stops it before store.init');
+  const seen = fs.readFileSync(log, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  assert.ok(seen.length >= 1 && seen.every((q) => q.url.startsWith('/api/whoami?n=')), JSON.stringify(seen.map((q) => q.url)));
+  assert.ok(seen.every((q) => !('x-tb-token' in q.headers)), 'the token never reached the squatter');
+});
+
 test('rollback refuses a corrupt ~/.taskboard/tasks.json before changing anything', async () => {
   const w = await world();
   fs.mkdirSync(w.tbHome);
@@ -409,6 +439,18 @@ test('step i installs the plist with the deployed copy of install-launchd, not t
   assert.match(text, /tbd\.js/);
   assert.doesNotMatch(text, /DevOnlyMarker/);
   assert.doesNotMatch(fs.readFileSync(path.join(w.live, 'scripts', 'local.taskboard.plist.template'), 'utf8'), /DevOnlyMarker/);
+});
+
+test('deploy tightens an existing deploy.log to 0600 and keeps its lines', async () => {
+  const w = await world();
+  const sha = w.git(w.dev, 'rev-parse', 'HEAD');
+  const log = path.join(w.tbHome, 'deploy.log');
+  fs.mkdirSync(w.tbHome);
+  fs.writeFileSync(log, 'earlier line\n');
+  fs.chmodSync(log, 0o644);
+  assert.equal(w.run('deploy', sha, '--no-restart').status, 0);
+  assert.equal(fs.statSync(log).mode & 0o777, 0o600);
+  assert.match(fs.readFileSync(log, 'utf8'), new RegExp(`^earlier line\n.* none -> ${sha}\n$`));
 });
 
 test('deploy after ~/taskboard-live was deleted by hand: --check says so, the real run prunes and succeeds', async () => {

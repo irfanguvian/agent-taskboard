@@ -13,13 +13,14 @@ const TB = path.join(REPO, 'bin', 'tb');
 const children = new Set();
 process.on('exit', () => children.forEach((c) => c.kill('SIGKILL')));
 
-// Inherited env minus every TB_* var, plus the isolated paths.
-function isolatedEnv({ home, tbHome, port }, extra = {}) {
-  const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('TB_')));
-  return { ...env, HOME: home, TB_HOME: tbHome, TB_PORT: String(port), TB_NOTIFY: '0', ...extra };
+// Inherited env minus every TB_* / TBX_* var, plus the isolated paths and the tbd's test run key (SLOT_ROOT).
+function isolatedEnv({ home, tbHome, port, runKey = undefined }, extra = {}) {
+  const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^TBX?_/.test(k)));
+  return { ...env, HOME: home, TB_HOME: tbHome, TB_PORT: String(port), TB_NOTIFY: '0', ...(runKey && { TBX_RUN: runKey }), ...extra };
 }
 
-// Raw HTTP so tests control every header (fetch refuses to set Host).
+// Raw HTTP so tests control every header (fetch refuses to set Host). agent: false = a fresh socket each time: tbd
+// closes idle keep-alive sockets after 2 s (N3), and a pooled one may already be closed while spawnSync blocks the loop.
 function request(port, method, p, body, headers = {}) {
   const data = body === undefined ? undefined : typeof body === 'string' ? body : JSON.stringify(body);
   const hdrs = Object.fromEntries(Object.entries({
@@ -27,7 +28,7 @@ function request(port, method, p, body, headers = {}) {
     ...headers,
   }).filter(([, v]) => v !== undefined));
   return new Promise((resolve, reject) => {
-    const req = http.request({ host: '127.0.0.1', port, method, path: p, headers: hdrs }, (res) => {
+    const req = http.request({ host: '127.0.0.1', port, method, path: p, headers: hdrs, agent: false }, (res) => {
       let text = '';
       res.setEncoding('utf8');
       res.on('data', (c) => (text += c));
@@ -77,14 +78,17 @@ async function startTbd({ env = {}, files = {}, tbd = TBD } = {}) {
     if (i > 50) throw new Error('tbd /api/state never answered 200');
     await new Promise((r) => setTimeout(r, 100));
   }
+  const keyFile = path.join(tbHome, 'test-run.key'); // the test process's run key, from the slot-root preload
+  const runKey = fs.existsSync(keyFile) ? fs.readFileSync(keyFile, 'utf8') : undefined;
   return {
-    port, home, tbHome, token, url: `http://127.0.0.1:${port}`, stderr: () => err,
+    port, home, tbHome, token, runKey, url: `http://127.0.0.1:${port}`, stderr: () => err,
     // api(method, path, body?, headers?) sends the token unless headers override it ({ 'x-tb-token': undefined } omits).
     api: (method, p, body, headers = {}) => request(port, method, p, body, { 'x-tb-token': token, ...headers }),
-    // unlock() runs the `tb open` flow (code → /unlock) and returns the Cookie header value 'tb_session=…'.
+    // unlock() runs the `tb open` flow (code → /unlock → 302 /#k=<ui_key>) and returns the Cookie header value 'tb_session=…'.
     async unlock() {
       const { json } = await request(port, 'POST', '/api/session/code', undefined, { 'x-tb-token': token });
       const r = await request(port, 'GET', new URL(json.url).pathname + new URL(json.url).search);
+      if (!/^\/#k=[0-9a-f]{64}$/.test(r.headers.location)) throw new Error(`unlock: no ui_key fragment in Location ${r.headers.location}`);
       return String(r.headers['set-cookie']).split(';')[0];
     },
     async stop() {
@@ -124,5 +128,6 @@ function phaseFixture(dir, spec) {
 }
 
 const FAKE_HANDLERS = `--require ${path.join(__dirname, 'fake-handlers.js')}`;
+const SLOT_ROOT = `--require ${path.join(__dirname, 'slot-root.js')}`; // test process may take slot leases
 
-module.exports = { startTbd, runTb, request, isolatedEnv, phaseFixture, PHASE_FILES, FAKE_HANDLERS, REPO, TBD };
+module.exports = { startTbd, runTb, request, isolatedEnv, phaseFixture, PHASE_FILES, FAKE_HANDLERS, SLOT_ROOT, REPO, TBD };

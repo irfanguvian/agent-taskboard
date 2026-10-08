@@ -1,6 +1,7 @@
 'use strict';
 // D35 / fix B1 + B2: security headers, Sec-Fetch-Site refusal, `tb open` session cookie (one-time code → HttpOnly
 // SameSite=Strict cookie). The page never carries the token; /api/* and /events need cookie or X-TB-Token.
+// D39: TB_HOME/session = {"secret", "ui_key"}; /unlock hands ui_key to the page in the URL fragment.
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
@@ -9,12 +10,14 @@ const path = require('node:path');
 const { startTbd, request } = require('./helpers/tbd');
 
 const SECRET = 'ab'.repeat(32);
+const UI_KEY = 'cd'.repeat(32);
+const SESSION = JSON.stringify({ secret: SECRET, ui_key: UI_KEY });
 const COOKIE = `tb_session=${crypto.createHmac('sha256', Buffer.from(SECRET, 'hex')).update('tb-ui-v1').digest('hex')}`;
 const SEED = { tasks: [{ id: 't_s3cr3t', title: 'Private reminder', status: 'now', created: '2026-10-01' }] };
 const CSP = "default-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; img-src 'self' data:; style-src 'self'; style-src-attr 'unsafe-inline'";
 
 let tbd;
-before(async () => { tbd = await startTbd({ files: { 'tasks.json': SEED, session: SECRET } }); });
+before(async () => { tbd = await startTbd({ files: { 'tasks.json': SEED, session: SESSION } }); });
 after(() => tbd.stop());
 
 const get = (p, headers = {}) => request(tbd.port, 'GET', p, undefined, headers);
@@ -47,7 +50,7 @@ test('B2 session code: needs X-TB-Token; unlock sets the cookie once; reused / u
 
   const ok = await get(unlockPath(json.url));
   assert.equal(ok.status, 302);
-  assert.equal(ok.headers.location, '/');
+  assert.equal(ok.headers.location, `/#k=${UI_KEY}`, 'D39 ui_key only in the fragment');
   assert.deepEqual(ok.headers['set-cookie'], [`${COOKIE}; HttpOnly; SameSite=Strict; Path=/; Max-Age=31536000`], 'value = HMAC of TB_HOME/session');
   const again = await get(unlockPath(json.url));
   assert.equal(again.status, 403);
@@ -57,10 +60,10 @@ test('B2 session code: needs X-TB-Token; unlock sets the cookie once; reused / u
 
   const file = path.join(tbd.tbHome, 'session');
   assert.equal(fs.statSync(file).mode & 0o777, 0o600);
-  assert.equal(fs.readFileSync(file, 'utf8'), SECRET, 'existing secret kept');
+  assert.equal(fs.readFileSync(file, 'utf8'), SESSION, 'existing secret + ui_key kept');
 });
 
-test('B2 code expires after its TTL; a bad session file is replaced by a fresh 0600 secret', async (t) => {
+test('B2 code expires after its TTL; a bad session file is replaced by a fresh 0600 secret + ui_key', async (t) => {
   const short = await startTbd({ env: { TB_CODE_TTL_MS: '150' }, files: { session: 'not hex' } });
   t.after(() => short.stop());
   const { json } = await request(short.port, 'POST', '/api/session/code', undefined, { 'x-tb-token': short.token });
@@ -69,8 +72,18 @@ test('B2 code expires after its TTL; a bad session file is replaced by a fresh 0
   assert.equal(late.status, 403);
   assert.equal(late.headers['set-cookie'], undefined);
   const file = path.join(short.tbHome, 'session');
-  assert.match(fs.readFileSync(file, 'utf8'), /^[0-9a-f]{64}$/);
+  assert.match(fs.readFileSync(file, 'utf8'), /^\{"secret":"[0-9a-f]{64}","ui_key":"[0-9a-f]{64}"\}$/);
   assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+});
+
+test('D39 old secret-only session file: both secret and ui_key are new, so the old cookie stops working', async (t) => {
+  const old = await startTbd({ files: { session: SECRET } });
+  t.after(() => old.stop());
+  const s = JSON.parse(fs.readFileSync(path.join(old.tbHome, 'session'), 'utf8'));
+  assert.notEqual(s.secret, SECRET);
+  assert.match(s.ui_key, /^[0-9a-f]{64}$/);
+  assert.equal((await request(old.port, 'GET', '/api/state', undefined, { cookie: COOKIE })).status, 401, 'cookie of the old secret refused');
+  assert.equal((await request(old.port, 'GET', '/api/state', undefined, { cookie: await old.unlock() })).status, 200, 'one new tb open fixes it');
 });
 
 test('B2 cookie: GET UI/state/events work; PATCH needs Sec-Fetch-Site same-origin', async () => {

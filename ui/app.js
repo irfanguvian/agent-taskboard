@@ -1,5 +1,6 @@
 // Taskboard UI: vanilla, no deps. Same-origin only: /api/* and one EventSource on /events.
 // Auth is the HttpOnly tb_session cookie from `tb open` (fetch sends it same-origin); the page holds no token.
+// D39: before any cookie goes out the page checks it talks to tbd (see "tbd identity"); the browser never auto-reconnects.
 // Server strings reach the DOM only through textContent (el() text nodes), never as HTML.
 
 const COLS = [['inbox', 'Inbox'], ['now', 'Now'], ['next', 'Next'], ['later', 'Later'], ['done', 'Done']];
@@ -18,6 +19,9 @@ const KINDS = ['code', 'research', 'brainstorm', 'design'];
 const NOW_LIMIT = 3, DONE_SHOWN = 15, GB = 2 ** 30, MB = 2 ** 20, DASH = '—';
 
 let state = null; // { reminders, flows, system, calendar } after first load
+let es = null; // the one EventSource
+let trusted = false; // tbd proved itself and the stream has not dropped since: only then do requests carry the cookie
+let wait = 1000; // reconnect backoff, ms (max 30 s)
 const ui = { drag: null, editing: null, tray: null, promote: null, pick: { kind: KINDS[0], tag: '' }, dirty: false, tags: [], tagsLoaded: false, locked: false };
 
 // ---------- helpers ----------
@@ -64,11 +68,11 @@ $('#theme').addEventListener('click', () => {
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change', syncThemeBtn);
 
 // ---------- api + toasts ----------
-// 401 = no valid session cookie: swap the board for the same hint the server's locked page shows.
-function lockOut() {
+// 401 = no valid session cookie: swap the board for the same hint the server's locked page shows. Nothing runs after.
+function lockOut(title = 'This browser is locked.', hint = ['Run ', el('code', null, 'tb open'), ' in Terminal.']) {
   ui.locked = true;
-  document.body.replaceChildren(el('main', { class: 'locked' },
-    el('h1', null, 'This browser is locked.'), el('p', null, 'Run ', el('code', null, 'tb open'), ' in Terminal.')));
+  es?.close();
+  document.body.replaceChildren(el('main', { class: 'locked' }, el('h1', null, title), el('p', null, ...hint)));
 }
 
 function toast(msg, { kind = 'error', title } = {}) {
@@ -82,6 +86,7 @@ function toast(msg, { kind = 'error', title } = {}) {
 }
 
 async function api(method, path, body) {
+  if (!trusted) throw Object.assign(new Error('tbd is not reachable.'), { status: 0 });
   const init = { method, headers: {} };
   if (body) { init.headers['Content-Type'] = 'application/json'; init.body = JSON.stringify(body); }
   let r;
@@ -100,7 +105,7 @@ async function api(method, path, body) {
 // ---------- load + live updates ----------
 let loadSeq = 0;
 async function load() {
-  if (saving.n || ui.locked) return; // the save chain reloads once it drains
+  if (saving.n || ui.locked || !trusted) return; // the save chain reloads once it drains; reconnect() reloads
   const mine = ++loadSeq;
   try {
     const r = await fetch('/api/state');
@@ -122,16 +127,58 @@ function setLive(on) {
   $('span', p).textContent = on ? 'Live' : 'Disconnected, retrying';
 }
 
+// ---------- tbd identity (D39) ----------
+// During a tbd restart anything may bind the port, and an EventSource auto-reconnect would hand it the cookie. So on
+// any stream error the page closes the stream and asks GET /api/ui-whoami?n=<nonce> WITHOUT cookies; only the answer
+// HMAC-SHA256(ui_key, n) lets it refetch and reopen. ui_key comes once in the unlock URL fragment (#k=, never sent to
+// a server) and stays in localStorage. Residual: a page opened (top-level) during a restart gap still sends the cookie.
+const KEY_RE = /^[0-9a-f]{64}$/;
+const fragKey = /^#k=([0-9a-f]{64})$/.exec(location.hash)?.[1];
+if (location.hash.startsWith('#k=')) history.replaceState(null, '', location.pathname + location.search);
+if (fragKey) safe(() => localStorage.setItem('tb-ui-key', fragKey));
+const storedKey = safe(() => localStorage.getItem('tb-ui-key'));
+const uiKey = fragKey || (KEY_RE.test(storedKey || '') ? storedKey : null);
+const hex = buf => [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
+
+// true = tbd; false = something else answers; null = nobody answers yet (down, or 503 starting): ask again later
+async function isTbd() {
+  const n = hex(crypto.getRandomValues(new Uint8Array(16)));
+  let r;
+  try { r = await fetch(`/api/ui-whoami?n=${n}`, { credentials: 'omit', cache: 'no-store', signal: AbortSignal.timeout(5000) }); } catch { return null; }
+  if (r.status === 503) return null;
+  const mac = r.ok ? (await r.json().catch(() => ({}))).mac : null;
+  try {
+    const key = await crypto.subtle.importKey('raw', new Uint8Array(uiKey.match(/../g).map(h => parseInt(h, 16))), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+    return mac === hex(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(n)));
+  } catch { return false; } // no WebCrypto (not a secure context): cannot prove it, so fail closed
+}
+
+function retry() {
+  setTimeout(reconnect, wait);
+  wait = Math.min(wait * 2, 30000);
+}
+
+async function reconnect() {
+  if (ui.locked) return;
+  const ok = await isTbd();
+  if (ok === null) return retry();
+  if (!ok) {
+    return lockOut('This is not your taskboard (identity check failed).',
+      ['Something else answers on this port, and this page stopped before sending it your session. When tbd is back, run ', el('code', null, 'tb open'), ' in Terminal.']);
+  }
+  trusted = true;
+  await load(); // events may have been missed while down
+  if (!ui.locked) connect();
+}
+
 function connect() {
-  const es = new EventSource('/events');
-  let wasDown = false;
-  es.onopen = () => { setLive(true); if (wasDown) load(); wasDown = false; }; // reload after a reconnect: events may have been missed
-  es.onerror = () => {
-    wasDown = true;
+  es = new EventSource('/events');
+  es.onopen = () => { wait = 1000; setLive(true); };
+  es.onerror = () => { // never let the browser reconnect by itself (D39)
+    es.close();
+    trusted = false;
     setLive(false);
-    if (es.readyState === EventSource.CLOSED) { // browser gave up (e.g. 401); load() spots a lock, else retry
-      setTimeout(async () => { await load(); if (!ui.locked) connect(); }, 3000);
-    }
+    retry();
   };
   es.addEventListener('reminder', refresh);
   es.addEventListener('ticket', refresh);
@@ -580,8 +627,7 @@ syncThemeBtn();
 initComposer();
 document.body.classList.add('boot');
 setTimeout(() => document.body.classList.remove('boot'), 1500);
-load();
-connect();
+if (uiKey) reconnect(); else lockOut(); // no ui_key (first visit after D39, or storage blocked): tb open once more
 // DOM-only refresh of relative times ("in 20 min"); no network
 setInterval(() => { if (document.visibilityState === 'visible' && state && !ui.locked) renderSched(); }, 60000);
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') load(); });
