@@ -144,6 +144,14 @@ test('bash-guard hook I/O: deny and rewrite JSON per hooks docs, other tool_inpu
   assert.match(bad.stderr, /bash-guard: hook input is not JSON; allowing/);
 });
 
+test('S3 io.run deadline: a hook whose check runs past it answers deny (bash-guard fails closed), exit 0', async () => {
+  const slow = path.join(tmp, 'slow-hook.js'); // a busy loop stands in for a stuck regex: no timer could cut it
+  fs.writeFileSync(slow, `require(${JSON.stringify(path.join(HOOKS, 'io.js'))}).run('slow', () => { for (;;); }, { deadline: 200, late: 'slow: took too long' });\n`);
+  const r = await hook(path.relative(HOOKS, slow), { hook_event_name: 'PreToolUse', tool_input: { command: 'x' } });
+  assert.deepEqual([r.code, r.out], [0, { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: 'slow: took too long' } }]);
+  assert.ok(r.ms < 3000, `answered after ${r.ms} ms`);
+});
+
 test('path-guard: writes inside TB_WRITE_ROOTS allowed; outside, ../ escapes and symlinks out denied', () => {
   const root = fs.mkdtempSync(path.join(tmp, 'wt-'));
   const out = fs.mkdtempSync(path.join(tmp, 'out-'));

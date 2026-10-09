@@ -2,7 +2,7 @@
 'use strict';
 // ram-guard: dev-session hook for this 8 GB Mac (D-0021; froze 2026-10-08 under 4 claude procs + tests + Chrome).
 // Wired in .claude/settings.local.json (local, not committed):
-//   PreToolUse Agent|Task → deny when free RAM < MIN_FREE, MAX_AGENTS already run, or a 2nd lacks SECOND_FREE (locked);
+//   PreToolUse Agent|Task → deny when free RAM < MIN_FREE, MAX_AGENTS already run, or an extra one (2nd, 3rd) lacks SECOND_FREE (locked);
 //   PreToolUse TeamCreate|Workflow → always deny (many claude processes at once);
 //   PreToolUse Bash → deny heavy commands (tests, tsc, real claude, browser) when free RAM < MIN_FREE;
 //   SubagentStart → agent file (id + transcript) replaces a reservation; SubagentStop → removes it.
@@ -14,8 +14,8 @@ const path = require('node:path');
 const { run, deny } = require('../hooks/io');
 
 const MIN_FREE = 25; // % free (D-0021); calibration knob
-const MAX_AGENTS = 2; // Irfan 2026-10-09 "limit subagent 2 max" (D-0026; D-0025 had 3, D-0023 2, D-0021 1)
-const SECOND_FREE = 40; // % free the 2nd parallel agent needs
+const MAX_AGENTS = 3; // Irfan 2026-10-09 "parrarel work. 3 sub agent max" (D-0039; D-0026 had 2, D-0025 3, D-0023 2, D-0021 1)
+const SECOND_FREE = 40; // % free every extra parallel agent (2nd, 3rd) needs
 const DIR = path.join(os.tmpdir(), 'claude-ram-guard'); // TMPDIR is wiped on reboot, so a crash leaves nothing behind
 const LOCK = path.join(DIR, '.lock'); // one decision at a time: parallel Agent calls must not both see a free slot
 const IDLE_MS = 15 * 60_000; // Bash caps one tool call at 10 min: a live agent writes its transcript at least that often
@@ -97,7 +97,7 @@ run('ram-guard', (input) => {
         return locked(() => {
           const { agents, res } = live();
           const n = agents.length + res.length;
-          if (n >= MAX_AGENTS) return deny(`D-0021: ${n} subagents already run (max ${MAX_AGENTS}); wait or do this yourself (stale? rm -r ${DIR})`);
+          if (n >= MAX_AGENTS) return deny(`D-0039: ${n} subagents already run (max ${MAX_AGENTS}); wait or do this yourself (stale? rm -r ${DIR})`);
           if (n >= 1 && pct < SECOND_FREE) return deny(`RAM: parallel subagent #${n + 1} needs ${SECOND_FREE}% free (${pct}% now); wait or do this yourself`);
           fs.writeFileSync(path.join(DIR, `res-${process.pid}-${Date.now()}`), '');
           return null;

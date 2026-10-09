@@ -11,6 +11,9 @@
 //       ticket dir already holds .claude/settings.json (a SessionStart hook touching a marker) = refused, Blocked.
 //   down: bootout, plist removed, checked gone. Kills nothing: runs still alive are named. TB_HOME stays unless --rm.
 // seed / status / down take TB_HOME from --home or env TB_HOME; it must hold chaos.json and sit under $TMPDIR.
+// Drill restart / kill-tbd (tb eval chaos): between tbd's death and launchd's restart its port is free, and a run's
+// sandbox allows local binding: an agent could squat the port. Then tbd fails to bind and exits (launchd retries), tb's
+// whoami check refuses the squatter (the token is never sent) and the page's ui-whoami check too (D39). Accepted residual.
 // launchctl is injectable (tests never run it); plutil -lint runs for real.
 const crypto = require('node:crypto');
 const fs = require('node:fs');

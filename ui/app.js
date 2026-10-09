@@ -24,7 +24,8 @@ let es = null; // the one EventSource
 let trusted = false; // tbd proved itself and the stream has not dropped since: only then do requests carry the cookie
 let wait = 1000; // reconnect backoff, ms (max 30 s)
 const ui = { drag: null, editing: null, tray: null, promote: null, pick: { kind: KINDS[0], tag: '' }, dirty: false, tags: [], tagsLoaded: false, locked: false,
-  runs: new Map(), open: null, ticket: null, log: null, act: null, arm: null }; // runs: id → `run` event; open: the drawer's flow id + its ticket, log tail, last action, Cancel armed
+  runs: new Map(), open: null, ticket: null, log: null, act: null, arm: null, // runs: id → `run` event; open: the drawer's flow id + its ticket, log tail, last action, Cancel / Approve armed
+  round: null, plan: null, drafts: new Map(), busy: new Map(), err: null }; // the open ticket's newest planning round and frozen plan, Clarify / Reject drafts (`${id}:${n}` → draft), planning action in flight (id → role), its refusal
 
 // ---------- helpers ----------
 const $ = (s, r = document) => r.querySelector(s);
@@ -50,6 +51,10 @@ function el(tag, attrs, ...kids) {
   e.append(...kids.flat().filter(k => k != null && k !== false));
   return e;
 }
+// Bidi controls and zero-width chars in agent text: stripped (run errors) or shown as [U+202E] (plan, questions,
+// titles), never applied or hidden, so a file name or test_cmd reads the way it runs.
+const BIDI = /[\u061C\u200B-\u200F\u202A-\u202E\u2060\u2066-\u2069\uFEFF]/g;
+const vis = s => String(s ?? '').replace(BIDI, c => `[U+${c.codePointAt(0).toString(16).toUpperCase().padStart(4, '0')}]`);
 const debounce = (fn, ms) => { let t; return () => { clearTimeout(t); t = setTimeout(fn, ms); }; };
 const safe = fn => { try { return fn(); } catch { return undefined; /* storage blocked */ } };
 
@@ -333,7 +338,7 @@ function strip(t, i, total, isTop) {
   s.append(
     el('span', { class: 'grip', 'aria-hidden': 'true' }),
     el('input', {
-      type: 'checkbox', checked: done, 'data-role': 'check', 'aria-label': `${done ? 'Reopen' : 'Mark done'}: ${t.title}`,
+      type: 'checkbox', name: 'check', checked: done, 'data-role': 'check', 'aria-label': `${done ? 'Reopen' : 'Mark done'}: ${t.title}`,
       onchange: ev => move(t.id, ev.target.checked ? 'done' : 'next', 0),
     }),
     el('div', { class: 'body' }, isTop && el('span', { class: 'chip now' }, 'Do this now'), title, meta.length ? el('div', { class: 'meta' }, meta) : null, note),
@@ -359,7 +364,7 @@ function tray(t, i, total) {
     btn('Move up', () => move(t.id, t.status, i - 1), { disabled: i === 0 }),
     btn('Move down', () => move(t.id, t.status, i + 1), { disabled: i >= total - 1 }),
     el('label', null, 'Move to',
-      el('select', { onchange: ev => move(t.id, ev.target.value, 0) },
+      el('select', { name: 'move-to', onchange: ev => move(t.id, ev.target.value, 0) },
         ...COLS.map(([k, l]) => el('option', { value: k, selected: k === t.status }, l)))),
     btn('Promote', () => {
       ui.promote = ui.promote === t.id ? null : t.id;
@@ -373,7 +378,7 @@ function tray(t, i, total) {
 
 function promoteForm(t) {
   const pick = (name, opts) => el('label', null, name,
-    el('select', { 'data-role': `promote-${name.toLowerCase()}`, onchange: ev => { ui.pick[name.toLowerCase()] = ev.target.value; } }, ...opts));
+    el('select', { name: `promote-${name.toLowerCase()}`, 'data-role': `promote-${name.toLowerCase()}`, onchange: ev => { ui.pick[name.toLowerCase()] = ev.target.value; } }, ...opts));
   return el('form', { class: 'promote', 'aria-label': 'Promote to flow', onsubmit: ev => { ev.preventDefault(); promote(t); } },
     pick('Kind', KINDS.map(k => el('option', { value: k, selected: k === ui.pick.kind }, k))),
     pick('Tag', tagOptions(ui.pick.tag)),
@@ -438,7 +443,7 @@ async function remove(id) {
 function startEdit(id) { ui.editing = id; ui.tray = null; renderReminders(); }
 
 function editInput(t) {
-  const input = el('input', { type: 'text', class: 'edit', 'data-role': 'edit', 'aria-label': 'Edit title', maxLength: 200, value: t.title });
+  const input = el('input', { type: 'text', name: 'edit', class: 'edit', 'data-role': 'edit', 'aria-label': 'Edit title', maxLength: 200, value: t.title });
   input.value = t.title;
   let finished = false;
   const finish = save => {
@@ -541,7 +546,7 @@ function flowCard(f) {
   const wait = f.waiting?.reason;
   const run = ui.runs.get(f.id);
   return el('li', null, el('button', { type: 'button', class: 'fcard', 'data-id': f.id, onclick: () => openTicket(f.id) },
-    el('span', { class: 'ftitle' }, f.title),
+    el('span', { class: 'ftitle' }, vis(f.title)),
     el('span', { class: 'frow' },
       el('span', { class: 'chip kind' }, f.kind || DASH),
       f.tag && el('span', { class: 'chip tag', style: `--h:${hue(f.tag)}` }, f.tag),
@@ -585,32 +590,78 @@ function renderFlows() {
 }
 
 const stateLabel = s => FLOW_COLS.find(([k]) => k === s)?.[1] || s;
+const flowOf = id => state.flows.find(x => x.id === id) || { id };
 const OPS = { resume: 'Resume', restart: 'Restart phase', cancel: 'Cancel' };
+// A two-click action (Cancel, Approve): armed by the first click for 4 s, kept across re-renders. A second click within
+// 400 ms of arming is ignored (early): a held Enter repeats clicks on the refocused button.
+const armed = (id, op) => ui.arm?.id === id && ui.arm.op === op && ui.arm.until > Date.now();
+const early = () => Date.now() - ui.arm.at < 400;
+const arm = (id, op) => { ui.arm = { id, op, at: Date.now(), until: Date.now() + 4000 }; };
 
-// Re-renders keep keyboard focus on the same control (data-role) inside the drawer.
-const drawerFocus = () => (document.activeElement?.closest?.('#drawer') ? document.activeElement.dataset.role : null);
-const refocus = role => { if (role) $(`#drawer [data-role="${role}"]`)?.focus(); };
-// ...and the log tail where the reader left it (at the bottom: stays at the bottom).
-const logScroll = () => { const p = $('#runbox pre.log'); return p && { top: p.scrollTop, end: p.scrollTop + p.clientHeight >= p.scrollHeight - 2 }; };
-const rescroll = s => { const p = $('#runbox pre.log'); if (p && s) p.scrollTop = s.end ? p.scrollHeight : s.top; };
+// Re-renders keep keyboard focus on the same control (data-role) inside the drawer, with a text box's caret.
+const drawerFocus = () => {
+  const a = document.activeElement;
+  return a?.closest?.('#drawer') && a.dataset.role ? { role: a.dataset.role, sel: typeof a.selectionStart === 'number' ? [a.selectionStart, a.selectionEnd] : null } : null;
+};
+// A control gone after its click (Send, Approve, Assign): focus goes to Close, never to <body>.
+// Focus on <body> while the drawer is open (no drawer focus to keep: the clicked control was gone first, or a disabled
+// one took none): Close too, without a scroll jump. A closed drawer takes nothing.
+const refocus = f => {
+  const e = f && $(`#drawer [data-role="${CSS.escape(f.role)}"]`);
+  if (e) {
+    e.focus();
+    if (f.sel) e.setSelectionRange(...f.sel);
+  } else if (f) $('#drawer [data-role="close"]')?.focus();
+  const a = document.activeElement;
+  if ((!a || a === document.body) && $('#drawer').open) $('#drawer [data-role="close"]')?.focus({ preventScroll: true });
+};
+// ...and each <pre data-role> (log tail, error tail) where the reader left it (at the bottom: stays at the bottom).
+const logScroll = () => new Map([...document.querySelectorAll('#drawer pre[data-role]')]
+  .map(p => [p.dataset.role, { top: p.scrollTop, end: p.scrollTop + p.clientHeight >= p.scrollHeight - 2 }]));
+const rescroll = m => {
+  for (const p of document.querySelectorAll('#drawer pre[data-role]')) {
+    const s = m.get(p.dataset.role);
+    if (s) p.scrollTop = s.end ? p.scrollHeight : s.top;
+  }
+};
+const redraw = () => { if (ui.open && $('#drawer').open) drawerBody(flowOf(ui.open), ui.ticket); };
 
+// Order: what waits on Irfan first (waiting notice, Assign, Clarify form, plan to approve), related tickets, the run,
+// the request, then an approved plan (read only: long, and the run matters more once it works).
 function drawerBody(f, ticket, error) {
-  const role = drawerFocus(), scroll = logScroll();
+  const foc = drawerFocus(), scroll = logScroll();
   const dd = (k, v) => v == null || v === '' ? null : [el('dt', null, k), el('dd', null, String(v))];
   const k = ticket || {};
   const w = (ticket ? k.waiting : f.waiting)?.reason;
+  // L7: once frozen (plan_hash) the plan shown is the one approve froze (GET's plan), never a newer round file
+  const r = ticket ? (k.plan_hash && ui.plan ? { ...ui.plan, n: ui.round?.n } : ui.round) : null, st = k.state;
+  const plan = r?.kind === 'plan' && (st === 'plan_approval' || k.plan_hash) ? planView(f.id, k, r) : null; // a rejected plan (hash cleared) is not shown
   $('#drawer').replaceChildren(el('div', { class: 'sheet' },
     el('div', { class: 'sheet-head' },
-      el('h2', null, f.title || f.id),
+      el('h2', null, vis(f.title || f.id)),
       el('button', { type: 'button', class: 'ghost', 'data-role': 'close', 'aria-label': 'Close details', onclick: () => $('#drawer').close() }, '×')),
     el('dl', { class: 'facts' },
-      dd('Kind', f.kind), dd('Tag', f.tag), dd('State', stateLabel(k.state || f.state)), dd('Waiting', w), dd('Rework', k.rework ?? f.rework),
+      dd('Kind', f.kind), dd('Tag', f.tag), dd('State', stateLabel(st || f.state)), dd('Waiting', w), dd('Rework', k.rework ?? f.rework),
+      dd('Branch', k.branch), dd('Base', k.base_sha?.slice(0, 12)),
       dd('Created', when(k.created_at)), dd('Updated', when(k.updated_at || f.updated_at)), dd('Id', f.id)),
+    ticket && [
+      notice(f.id, k.waiting),
+      st === 'backlog' && el('section', { class: 'part', 'aria-labelledby': 'as-h' },
+        el('h3', { id: 'as-h' }, 'Assign'),
+        el('p', { class: 'hint' }, 'Assign starts planning: the planner reads the code, then asks you questions or writes a plan.'),
+        el('div', { class: 'acts' }, actBtn(f.id, 'assign', () => post(f.id, 'assign'), { cls: 'primary' })),
+        errLine(f.id, 'assign')),
+      st === 'planning' && k.reject_comment && el('p', { class: 'hint' }, 'Your comment on the last plan: ', el('q', null, k.reject_comment)),
+      st === 'planning' && k.must_ask && el('p', { class: 'hint' }, 'You asked for more: the planner asks you questions before it plans.'),
+      st === 'clarify' && (r?.kind === 'questions' && Array.isArray(r.questions) ? clarifyForm(f.id, r) : el('p', { class: 'hint' }, 'No open questions found.')),
+      st === 'plan_approval' && (plan || el('p', { class: 'hint' }, 'No plan found.')),
+      family(k),
+    ],
     el('section', { id: 'runbox', class: 'runbox', 'aria-labelledby': 'run-h' }, ...runBox(f.id, ticket)),
     el('h3', null, 'Request'),
-    el('p', { class: 'ticket-text' }, error || (ticket ? ticket.text || 'No text.' : 'Loading')),
-    el('p', { class: 'hint' }, 'Plan, questions and tasks show up here as agents are built.')));
-  refocus(role);
+    el('p', { class: 'ticket-text' }, error || (ticket ? vis(ticket.text) || 'No text.' : 'Loading')),
+    st !== 'plan_approval' && plan));
+  refocus(foc);
   rescroll(scroll);
 }
 
@@ -625,11 +676,11 @@ function runBox(id, k) {
   out.push(!l ? el('p', { class: 'hint' }, k ? 'No run yet.' : 'Loading') : el('p', { class: 'run-line' }, r && liveTag(r),
     el('span', null, [l.phase && stateLabel(l.phase), n && `run ${n}`, l.started_at && `started ${hhmm(l.started_at)}`,
       l.pending ? `recovering (${l.pending.why || l.pending.after})` : l.exit ? `ended: ${l.exit}` : 'live'].filter(Boolean).join(' · '))));
-  if (l?.error && !l.pending) out.push(el('p', { class: 'warnbox' }, el('strong', null, 'Run refused. '), l.error.replace(/[\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/g, ''))); // names agent-made files: no bidi reordering
+  if (l?.error && !l.pending) out.push(el('p', { class: 'warnbox' }, el('strong', null, 'Run refused. '), l.error.replace(BIDI, ''))); // names agent-made files: no bidi reordering
   const can = AGENT.includes(st) || st === 'blocked';
-  const armed = ui.arm?.id === id && ui.arm.until > Date.now(); // Cancel's confirm click, kept across re-renders
-  const btn = (op, extra) => el('button', { type: 'button', class: `ghost${op === 'cancel' && armed ? ' armed' : ''}`, 'data-role': op,
-    onclick: () => runAction(id, op), ...extra }, op === 'cancel' && armed ? 'Confirm cancel?' : OPS[op]);
+  const sure = armed(id, 'cancel'); // Cancel's confirm click
+  const btn = (op, extra) => el('button', { type: 'button', class: `ghost${op === 'cancel' && sure ? ' armed' : ''}`, 'data-role': op,
+    onclick: () => runAction(id, op), ...extra }, op === 'cancel' && sure ? 'Confirm cancel?' : OPS[op]);
   const acts = [
     can && btn('resume', { disabled: live, title: live ? 'The run is live. Resume works once it ended.' : null }),
     can && btn('restart'),
@@ -641,7 +692,7 @@ function runBox(id, k) {
   out.push(el('div', { class: 'log-head' }, el('h3', null, 'Log tail'),
     l?.log && el('button', { type: 'button', class: 'ghost', 'data-role': 'log', onclick: () => loadLog(id) }, shown ? 'Refresh' : 'Show last 200 lines')));
   if (shown) out.push(ui.log.error ? el('p', { class: 'hint' }, ui.log.error)
-    : el('pre', { class: 'log', tabindex: '0', 'aria-label': 'Run log, last lines' }, ui.log.lines.join('\n') || 'Empty so far.'));
+    : el('pre', { class: 'log', 'data-role': 'log-tail', tabindex: '0', 'aria-label': 'Run log, last lines' }, ui.log.lines.join('\n') || 'Empty so far.'));
   return out;
 }
 
@@ -660,19 +711,20 @@ function outcome(id, k, running) {
 function renderRunBox() {
   const box = $('#runbox');
   if (!box || !ui.open) return;
-  const role = drawerFocus(), scroll = logScroll();
+  const foc = drawerFocus(), scroll = logScroll();
   box.replaceChildren(...runBox(ui.open, ui.ticket));
-  refocus(role);
+  refocus(foc);
   rescroll(scroll);
 }
 
 async function runAction(id, op) {
-  if (op === 'cancel' && !(ui.arm?.id === id && ui.arm.until > Date.now())) { // stops the run: one more click to confirm
-    ui.arm = { id, until: Date.now() + 4000 };
+  if (op === 'cancel' && !armed(id, 'cancel')) { // stops the run: one more click to confirm
+    arm(id, op);
     renderRunBox();
     setTimeout(renderRunBox, 4000);
     return;
   }
+  if (op === 'cancel' && early()) return;
   ui.arm = null;
   ui.act = { id, op, at: Date.now(), state: 'sent' };
   renderRunBox();
@@ -706,25 +758,282 @@ async function readOpen() {
   const id = ui.open;
   if (!id || !$('#drawer').open) return;
   const mine = ++openSeq;
-  const f = () => state.flows.find(x => x.id === id) || { id };
   try {
-    const k = (await api('GET', `/api/tickets/${encodeURIComponent(id)}`)).ticket;
-    if (mine === openSeq && ui.open === id) drawerBody(f(), ui.ticket = k);
+    const j = await api('GET', `/api/tickets/${encodeURIComponent(id)}`);
+    if (mine === openSeq && ui.open === id) {
+      ui.round = j.round ?? null;
+      ui.plan = j.plan ?? null;
+      drawerBody(flowOf(id), ui.ticket = j.ticket);
+    }
   } catch (e) {
-    if (mine === openSeq && ui.open === id && !ui.ticket) drawerBody(f(), null, e.message); // else the next read tries again
+    if (mine === openSeq && ui.open === id && !ui.ticket) drawerBody(flowOf(id), null, e.message); // else the next read tries again
   }
 }
 const reloadOpen = debounce(readOpen, 200);
 
 async function openTicket(id) {
-  if (ui.open !== id) Object.assign(ui, { log: null, ticket: null, arm: null });
+  const d = $('#drawer');
+  if (ui.open !== id) Object.assign(ui, { log: null, ticket: null, round: null, plan: null, arm: null, err: null });
   ui.open = id;
-  drawerBody(state.flows.find(x => x.id === id) || { id }, ui.ticket);
-  $('#drawer').showModal();
+  drawerBody(flowOf(id), ui.ticket);
+  if (!d.open) d.showModal();
+  else { d.scrollTop = 0; $('#drawer [data-role="close"]').focus(); } // moved to a parent, child or blocker inside the drawer
   await readOpen();
 }
+// A held Enter repeats clicks on the refocused button: the first repeat after 400 ms would confirm Approve or Cancel.
+$('#drawer').addEventListener('keydown', e => { if (e.repeat && e.key === 'Enter' && e.target.closest?.('button')) e.preventDefault(); });
 $('#drawer').addEventListener('click', e => { if (e.target === e.currentTarget) e.currentTarget.close(); });
 $('#drawer').addEventListener('close', () => { if (!$('#drawer').open) ui.open = null; }); // a late close event never ends a newer open
+
+// ---------- planning in the drawer (P4 AC5): Assign, Clarify form, plan + decision sources, Approve / Reject, children ----------
+// POST /api/tickets/:id/{assign,answer,approve,reject}, same guards as tb. Agent text (questions, plan) is shown via vis().
+const SENT = { // button role → [label, label while sending, toast title, toast text]
+  assign: ['Assign', 'Assigning…', 'Assigned', 'Planning starts when a run slot is free.'],
+  answer: ['Send answers', 'Sending…', 'Answers sent', 'The planner plans the next round with them.'],
+  'plan-now': ['Enough, plan now', 'Sending…', 'Plan now', "What you left open is the planner's call."],
+  approve: ['Approve', 'Approving…', 'Approved', 'Setting up: branch, skills, setup command, child tickets.'],
+  reject: ['Reject', 'Sending…', 'Rejected', 'The planner plans again with your comment.'],
+  ask: ['Ask me more', 'Sending…', 'Asked for more', 'The planner asks you questions first.'],
+};
+const WAIT = {
+  setup: 'Setting up the approved plan: branch, env files, skills, the setup command, child tickets.',
+  setup_failed: 'Setup failed. The plan stays as approved. Fix the cause, then approve again.',
+  assign_failed: 'Auto-assign failed. Fix the cause, then assign it.',
+  blocker_cancelled: 'A ticket this one waits for was cancelled. Assign it to go on without it, or cancel this ticket.',
+};
+const code = s => el('code', null, vis(s));
+const none = () => el('p', { class: 'hint' }, 'None.');
+
+// While a request runs its buttons are aria-disabled, not disabled: keyboard focus stays on them across re-renders.
+function actBtn(id, role, onclick, { cls = 'ghost', label = SENT[role][0] } = {}) {
+  const busy = ui.busy.get(id); // one request per ticket; other tickets stay usable
+  return el('button', { type: 'button', class: cls, 'data-role': role, 'aria-disabled': busy ? 'true' : null, onclick: () => { if (!ui.busy.has(id)) onclick(); } },
+    busy === role ? SENT[role][1] : label);
+}
+const errLine = (id, ...roles) => ui.err?.id === id && roles.includes(ui.err.role) && el('p', { class: 'err' }, ui.err.text);
+
+// A refusal shows inline (ui.err) and as a toast: the toast region is the one that speaks it. → null when tbd took it,
+// else the refusal text (ui.err may be gone by then: a click elsewhere during the re-read resets it).
+async function post(id, op, body, role = op) {
+  ui.busy.set(id, role);
+  ui.err = null;
+  redraw();
+  try {
+    await api('POST', `/api/tickets/${encodeURIComponent(id)}/${op}`, body);
+    toast(SENT[role][3], { kind: 'info', title: SENT[role][2] });
+    return null;
+  } catch (e) {
+    ui.err = { id, role, text: e.message };
+    toast(e.message, { title: `${SENT[role][0]} refused` });
+    return e.message;
+  } finally {
+    await readOpen(); // the fresh ticket first: with the old one the same buttons would work again (a 2nd click → 409)
+    ui.busy.delete(id);
+    redraw();
+  }
+}
+
+// waiting reasons the drawer explains (manual, usage, memory…: the Waiting fact says enough)
+function notice(id, w) {
+  const text = WAIT[w?.reason];
+  if (!text) return null;
+  return el('div', { class: `notice${w.reason.endsWith('_failed') ? ' bad' : ''}` },
+    el('p', null, w.reason === 'setup' && el('span', { class: 'spin', 'aria-hidden': 'true' }), text),
+    w.error && el('pre', { class: 'log', 'data-role': 'wait-error', tabindex: '0', 'aria-label': 'Error output, last part' }, vis(w.error)),
+    w.reason === 'setup_failed' && el('div', { class: 'acts' }, actBtn(id, 'approve', () => approve(id, true), { cls: 'primary', label: 'Approve again' })));
+}
+
+// Parent, blockers and children from the board's flow list: no request per ticket.
+function family(k) {
+  const row = id => {
+    const c = state.flows.find(x => x.id === id);
+    return el('li', null, el('button', { type: 'button', class: 'kin', 'data-role': `kin-${id}`, onclick: () => openTicket(id) },
+      el('span', { class: 'ftitle' }, vis(c?.title || id)),
+      el('span', { class: 'frow' }, el('span', { class: 'chip' }, c ? stateLabel(c.state) : 'not found'),
+        c?.waiting?.reason && el('span', { class: 'chip wait' }, `waiting: ${c.waiting.reason}`))));
+  };
+  const kids = Array.isArray(k.children) ? k.children : [];
+  const done = kids.filter(id => ['done', 'cancelled'].includes(state.flows.find(x => x.id === id)?.state)).length; // J4
+  const parts = [
+    k.parent && [el('h3', null, 'Part of'), el('ul', { class: 'kids' }, row(k.parent))],
+    k.blocked_by?.length && [el('h3', null, 'Waits for'), el('ul', { class: 'kids' }, ...k.blocked_by.map(row))],
+    kids.length && [el('h3', null, 'Child tickets', el('span', { class: 'count' }, `${done}/${kids.length} finished`)), el('ul', { class: 'kids' }, ...kids.map(row))],
+  ].filter(Boolean);
+  return parts.length ? el('section', { class: 'part', 'aria-label': 'Related tickets' }, ...parts) : null;
+}
+
+// Clarify: the newest questions round. Answers live in ui.drafts (per ticket + round): re-renders and opening another
+// ticket keep them; a sent one is dropped.
+const draftOf = (id, n) => {
+  const key = `${id}:${n}`;
+  if (!ui.drafts.has(key)) ui.drafts.set(key, { a: Object.create(null), errs: Object.create(null), comment: '' }); // ids like "constructor" are plain keys
+  return ui.drafts.get(key);
+};
+const answerOf = (a, x) => (a?.mode === 'pick' ? { pick: x.options[a.i] } : a?.mode === 'text' ? ((a.text ?? '').trim() ? { text: a.text.trim() } : null)
+  : a?.mode === 'recommended' || a?.mode === 'you_decide' ? { use: a.mode } : null);
+const answered = (d, r) => `${r.questions.filter(x => answerOf(d.a[x.id], x)).length} of ${r.questions.length} answered`;
+
+function clarifyForm(id, r) {
+  const d = draftOf(id, r.n);
+  return el('section', { class: 'part', 'aria-labelledby': 'cq-h' },
+    el('h3', { id: 'cq-h' }, `Questions · round ${r.n}`),
+    el('p', { class: 'hint' }, "Answer each one, or press Enough, plan now: what you leave open is the planner's call."),
+    ...r.questions.map((x, i) => question(d, x, i)),
+    d.errs._ && el('p', { class: 'err' }, d.errs._),
+    el('div', { class: 'acts' },
+      actBtn(id, 'answer', () => sendAnswers(id, r, false), { cls: 'primary' }),
+      actBtn(id, 'plan-now', () => sendAnswers(id, r, true)),
+      el('span', { class: 'hint', 'data-count': '' }, answered(d, r))));
+}
+
+function question(d, x, i) {
+  const a = d.a[x.id], name = `q${i}`, opts = Array.isArray(x.options) ? x.options : [];
+  const set = v => { d.a[x.id] = { ...d.a[x.id], ...v }; delete d.errs[x.id]; };
+  const radio = (mode, j, ...label) => el('label', null,
+    el('input', { type: 'radio', name, 'data-role': `${name}-${mode}${j ?? ''}`, checked: a?.mode === mode && (j == null || a.i === j),
+      onchange: () => { set({ mode, i: j }); redraw(); } }),
+    el('span', null, ...label));
+  const own = el('textarea', { name: `${name}-own`, rows: 2, maxLength: 10000, 'data-role': `${name}-own`, 'aria-label': `Your own answer to question ${i + 1}`,
+    oninput: e => { // typing picks "My own answer"; no re-render per key
+      set({ mode: 'text', text: e.target.value });
+      e.target.closest('fieldset').querySelector(`[data-role="${name}-text"]`).checked = true;
+      $('#drawer [data-count]').textContent = answered(d, ui.round);
+    } });
+  own.value = a?.text ?? '';
+  return el('fieldset', { class: 'q', 'aria-describedby': [`${name}-why`, d.errs[x.id] && `${name}-err`].filter(Boolean).join(' ') },
+    el('legend', null, vis(x.question)),
+    el('p', { class: 'why', id: `${name}-why` }, 'Why: ', vis(x.why)),
+    ...opts.map((o, j) => radio('pick', j, vis(o), o === x.recommended && el('span', { class: 'chip rec' }, 'Recommended'))),
+    radio('recommended', null, 'Use recommended', !opts.includes(x.recommended) && [': ', el('b', null, vis(x.recommended))]),
+    radio('you_decide', null, "You decide (planner's call)"),
+    radio('text', null, 'My own answer'),
+    own,
+    d.errs[x.id] && el('p', { class: 'err', id: `${name}-err` }, d.errs[x.id]));
+}
+
+async function sendAnswers(id, r, planNow) {
+  const d = draftOf(id, r.n), answers = Object.create(null);
+  d.errs = Object.create(null);
+  for (const x of r.questions) {
+    const v = answerOf(d.a[x.id], x);
+    if (v) answers[x.id] = v;
+    else if (!planNow) d.errs[x.id] = 'Not answered yet. Answer it, or press Enough, plan now.';
+  }
+  const open = r.questions.findIndex(x => d.errs[x.id]);
+  if (open >= 0) {
+    redraw();
+    return $(`#drawer [data-role^="q${open}-"]`)?.focus();
+  }
+  const err = await post(id, 'answer', { answers, ...(planNow && { plan_now: true }) }, planNow ? 'plan-now' : 'answer');
+  if (err == null) ui.drafts.delete(`${id}:${r.n}`); // only this ticket's draft
+  else {
+    answerErrors(d, r, err);
+    if (ui.err?.id === id) ui.err = null;
+    redraw();
+  }
+}
+
+// tbd's 400 names one question (answer to "Q2" must be …), its 409 the open ones (not answered: "Q1", "Q3": …), each
+// as JSON.stringify(id.slice(0, 100)). Shown next to those questions, else above the buttons.
+function answerErrors(d, r, msg) {
+  const one = /answer to ("(?:[^"\\]|\\.)*")/.exec(msg);
+  const quoted = one ? [one[1]] : /not answered: (.*): answer every/.exec(msg)?.[1].match(/"(?:[^"\\]|\\.)*"/g) ?? [];
+  const ids = new Set(quoted.map(s => safe(() => JSON.parse(s))));
+  const hit = r.questions.filter(x => ids.has(String(x.id).slice(0, 100)));
+  for (const x of hit) d.errs[x.id] = one ? msg : 'Not answered yet.';
+  if (!hit.length) d.errs._ = msg;
+}
+
+// Spec §5 "at approval": each decision with its source. Same split as lib/metrics.js sourceOf.
+function source(s) {
+  const m = /^(answer|reject):(.*)$/.exec(s);
+  if (m) return ['you', `your ${m[1]} ${m[2]}`];
+  if (s.startsWith('ticket')) return ['ticket', 'ticket'];
+  if (/^adr/i.test(s)) return ['adr', `ADR ${s.replace(/^adr[:\s-]*/i, '')}`.trim()];
+  return ['planner', "planner's call"];
+}
+
+function planView(id, k, r) {
+  const open = k.state === 'plan_approval';
+  const list = (xs, fn) => (Array.isArray(xs) && xs.length ? el('ul', { class: 'plist' }, ...xs.map(x => el('li', null, fn(x)))) : none());
+  // J17: Irfan's locked decisions first (the planner may leave them out; the same id shows his text), then the planner's
+  const locked = Array.isArray(k.locked_decisions) ? k.locked_decisions : [], mine = new Set(locked.map(x => x.id));
+  const decs = [...locked, ...(Array.isArray(r.decisions) ? r.decisions : []).filter(x => !mine.has(x.id))].map(x => [x, source(String(x.source ?? ''))]);
+  const count = who => decs.filter(([, s]) => s[0] === who).length;
+  const tally = [['you', 'yours'], ['ticket', 'from the ticket'], ['adr', 'from ADRs'], ['planner', "planner's calls"]]
+    .map(([who, l]) => count(who) && `${count(who)} ${l}`).filter(Boolean).join(' · ');
+  return el('section', { class: 'part plan', 'aria-labelledby': 'pl-h' },
+    el('h3', { id: 'pl-h' }, open ? `Plan to approve · round ${r.n}` : 'Approved plan'),
+    el('p', { class: 'summary' }, vis(r.summary)),
+    el('h4', null, 'Acceptance criteria'),
+    list(r.acceptance, a => [el('span', { class: `chip ac ${a.type === 'new' ? 'new' : ''}` }, vis(a.type)), ' ', el('span', { class: 'did' }, vis(a.id)), ' ', vis(a.text)]),
+    el('h4', null, 'Tasks'),
+    Array.isArray(r.tasks) && r.tasks.length ? el('ol', { class: 'tasks' }, ...r.tasks.map(task)) : none(),
+    el('h4', null, 'Schema changes allowed'), list(r.allowed_schema_changes, vis),
+    el('h4', null, 'API changes allowed'), list(r.allowed_api_changes, vis),
+    el('h4', null, 'Skills for Working'),
+    Array.isArray(r.skills) && r.skills.length ? el('p', { class: 'frow' }, ...r.skills.map(s => el('span', { class: 'chip' }, vis(s)))) : none(),
+    r.ui && [el('h4', null, 'UI'), el('p', { class: 'ctext' }, vis(r.ui))],
+    el('h4', null, 'Child tickets'),
+    list(r.children, c => [el('strong', null, vis(c.title)), c.blocked_by?.length ? ` · waits for ${c.blocked_by.map(vis).join(', ')}` : '', el('span', { class: 'ctext' }, vis(c.text))]),
+    el('h4', null, 'Decisions'),
+    decs.length ? [el('p', { class: 'hint' }, tally), el('table', { class: 'dtable' },
+      el('caption', { class: 'sr' }, 'Decisions and their source'),
+      el('thead', null, el('tr', null, el('th', { scope: 'col' }, 'Decision'), el('th', { scope: 'col' }, 'Source'))),
+      el('tbody', null, ...decs.map(([x, [who, label]]) => el('tr', { class: who },
+        el('td', null, el('span', { class: 'did' }, vis(x.id)), ' ', vis(x.text)),
+        el('td', null, el('span', { class: `src ${who}`, title: vis(x.source) }, vis(label)))))))] : none(),
+    open && k.waiting?.reason !== 'setup' && planActs(id, k, r)); // Reject is refused while setup runs
+}
+
+const task = t => el('li', { class: 'task' },
+  el('p', null, el('span', { class: 'did' }, vis(t.id)), ' ', el('strong', null, vis(t.title)), t.type && [' ', el('span', { class: 'chip' }, vis(t.type))]),
+  el('dl', { class: 'facts' },
+    el('dt', null, 'Files'), el('dd', null, ...(t.files?.length ? t.files.map(code) : ['none'])),
+    t.modules?.length > 0 && [el('dt', null, 'Modules'), el('dd', null, ...t.modules.map(code))],
+    el('dt', null, 'Blocked by'), el('dd', null, t.blocked_by?.length ? t.blocked_by.map(vis).join(', ') : 'nothing'),
+    el('dt', null, 'Test'), el('dd', null, t.test_cmd ? code(t.test_cmd) : 'none')),
+  t.steps?.length > 0 && el('ol', { class: 'steps' }, ...t.steps.map(s => el('li', null, vis(s)))));
+
+function planActs(id, k, r) {
+  const d = draftOf(id, r.n), sure = armed(id, 'approve');
+  const box = el('textarea', { id: 'rj', name: 'comment', rows: 3, maxLength: 10000, 'data-role': 'comment', 'aria-describedby': d.errs.comment ? 'rj-err' : null,
+    oninput: e => { d.comment = e.target.value; } });
+  box.value = d.comment;
+  return el('div', { class: 'part' },
+    el('label', { for: 'rj' }, 'Comment for Reject or Ask me more'),
+    box,
+    d.errs.comment && el('p', { class: 'err', id: 'rj-err' }, d.errs.comment),
+    el('div', { class: 'acts' },
+      k.waiting?.reason !== 'setup_failed' && actBtn(id, 'approve', () => approve(id), { cls: `primary${sure ? ' armed' : ''}`, label: sure ? 'Confirm approve?' : 'Approve' }),
+      actBtn(id, 'reject', () => sendReject(id, r, false)),
+      actBtn(id, 'ask', () => sendReject(id, r, true))),
+    sure && el('p', { class: 'hint' }, 'Press again to approve. The plan is frozen and setup starts.'),
+    errLine(id, 'approve', 'reject', 'ask'));
+}
+
+function approve(id, again = false) {
+  if (!again && !armed(id, 'approve')) { // freezes the plan and starts setup: one more click to confirm
+    arm(id, 'approve');
+    redraw();
+    setTimeout(redraw, 4000);
+    return;
+  }
+  if (!again && early()) return;
+  ui.arm = null;
+  post(id, 'approve', ui.round?.n === undefined ? undefined : { n: ui.round.n }); // L7: the round shown; tbd refuses (409) when a newer one came
+}
+
+function sendReject(id, r, ask) {
+  const d = draftOf(id, r.n), comment = d.comment.trim();
+  if (!comment) {
+    d.errs.comment = ask ? 'Write what you want to be asked about.' : 'Write what should change.';
+    redraw();
+    return $('#drawer [data-role="comment"]')?.focus();
+  }
+  delete d.errs.comment;
+  post(id, 'reject', { comment, ...(ask && { ask: true }) }, ask ? 'ask' : 'reject').then(err => { if (err == null) ui.drafts.delete(`${id}:${r.n}`); });
+}
 
 // ---------- composer ----------
 const mode = () => $('#composer input[name="mode"]:checked').value;

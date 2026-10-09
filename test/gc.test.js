@@ -57,7 +57,8 @@ function world() {
   put(path.join(tbHome, 'cache', 'b.txt'), 'cached');
   fs.symlinkSync(live, path.join(tbHome, 'cache', 'link'));
   put(path.join(root, 'victim', 'keep'), 'do not touch');
-  const tickets = [{ id: 't_done01', state: 'done' }, { id: 't_canc01', state: 'cancelled' }, { id: 't_work01', state: 'working' }];
+  const common = fs.realpathSync(path.join(dev, '.git')); // assign records it (S1); gc prunes from it, never runs git in a worktree
+  const tickets = [{ id: 't_done01', state: 'done', common_dir: common }, { id: 't_canc01', state: 'cancelled', common_dir: common }, { id: 't_work01', state: 'working', common_dir: common }];
   const gc = createGc({ store: { listTickets: () => tickets }, tbHome });
   return {
     root, dev, live, tbHome, tickets, gc,
@@ -130,7 +131,7 @@ describe('list', () => {
     } finally {
       process.env.PATH = was;
     }
-    assert.ok(!w.listed().includes('t_done01'), 'removed through the real git, which forgot the worktree');
+    assert.ok(!w.listed().includes('t_done01'), 'pruned through the real git, which forgot the worktree');
     assert.equal(fs.existsSync(ran), false, 'nothing from PATH ran');
   });
 
@@ -177,16 +178,19 @@ describe('list', () => {
       else process.env.GITHUB_TOKEN = was;
     }
     const calls = fs.readFileSync(log, 'utf8').split('ARGV ').slice(1);
-    assert.equal(calls.length, 6, 'rev-parse + worktree remove per worktree');
+    // S1 (P4 security review; was rev-parse + worktree remove run inside each worktree = 6): one prune per worktree whose
+    // ticket recorded its repo (t_done01, t_canc01), from that common dir; the orphan (no ticket) gets none
+    assert.equal(calls.length, 2, 'one worktree prune per worktree with a known repo');
     for (const c of calls) {
       const [argv, ...env] = c.split('\n').filter(Boolean);
       assert.ok(argv.startsWith(`${GIT_SAFE.join(' ')} `), argv);
+      assert.ok(argv.endsWith(' worktree prune') && argv.includes(`--git-dir ${w.tickets[0].common_dir}`) && !argv.includes(' -C '), `no git inside a worktree: ${argv}`);
       const keys = env.map((l) => l.slice(4, l.indexOf('=')));
-      assert.deepEqual(keys.filter((k) => !['PWD', 'SHLVL', '_', 'OLDPWD'].includes(k)).sort(), ['GIT_CONFIG_GLOBAL', 'GIT_CONFIG_NOSYSTEM', 'HOME', 'LANG', 'PATH', 'TMPDIR'].filter((k) => keys.includes(k)), 'no GITHUB_TOKEN or other daemon variable');
+      assert.deepEqual(keys.filter((k) => !['PWD', 'SHLVL', '_', 'OLDPWD'].includes(k)).sort(), ['GIT_CONFIG_GLOBAL', 'GIT_CONFIG_NOSYSTEM', 'GIT_NO_REPLACE_OBJECTS', 'HOME', 'LANG', 'PATH', 'TMPDIR'].filter((k) => keys.includes(k)), 'no GITHUB_TOKEN or other daemon variable');
       assert.ok(env.includes('ENV GIT_CONFIG_GLOBAL=/dev/null') && env.includes('ENV GIT_CONFIG_NOSYSTEM=1'));
     }
     assert.equal(fs.existsSync(marker), false, 'no script named by the repo config ran');
-    assert.ok(!w.listed().includes('t_done01'), 'and the worktrees were still removed through git');
+    assert.ok(!w.listed().includes('t_done01'), 'and the dev repo still forgot the worktree (prune)');
   });
 
   test('H2 sizes are measured in parallel, at most 4 du at once, in list and in delete; results keep their order', async () => {
@@ -244,7 +248,7 @@ describe('list', () => {
 });
 
 describe('remove', () => {
-  test('deletes only the confirmed ids: worktrees go through git (the dev repo forgets them), logs and cache are removed', async () => {
+  test('deletes only the confirmed ids: worktrees removed, the dev repo forgets those whose ticket recorded it (S1: prune, no git inside), logs and cache are removed', async () => {
     const w = world();
     const r = await w.gc.remove({ ids: ['worktree/t_done01', 'worktree/t_orph01', 'worktree/t_plain1', 'log/t_done01/runs/old', 'cache/a'] });
     assert.deepEqual(r.deleted.map((d) => d.id), ['worktree/t_done01', 'worktree/t_orph01', 'worktree/t_plain1', 'log/t_done01/runs/old', 'cache/a']);
@@ -254,7 +258,9 @@ describe('remove', () => {
       assert.equal(fs.existsSync(path.join(w.tbHome, gone)), false, gone);
     }
     const listed = w.listed();
-    assert.ok(!listed.includes('t_done01') && !listed.includes('t_orph01'), 'git worktree list forgot them without a prune');
+    assert.ok(!listed.includes('t_done01'), 'git worktree list forgot it (pruned from the recorded common dir)');
+    // S1 contract change (was: forgot too): the orphan has no ticket, so no trusted repo to prune from; its entry stays prunable
+    assert.match(listed, /worktree [^\n]*t_orph01\n(?:[^\n]+\n)*?prunable/, 'orphan: entry left, marked prunable');
     assert.ok(listed.includes(`worktree ${w.live}`) && listed.includes(`worktree ${w.dev}`) && listed.includes('t_work01') && listed.includes('t_canc01'));
     assert.equal(w.intact(), true, 'live, dev, the active worktree and the victim are untouched');
     assert.ok(fs.existsSync(path.join(w.tbHome, 'cache', 'b.txt')) && fs.existsSync(path.join(w.tbHome, 'tickets', 't_done01', 'runs', 'new')), 'unlisted ids stay');

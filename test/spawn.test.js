@@ -161,3 +161,63 @@ test('S1 worktree as cwd: config changed since base_sha (tracked, untracked, ign
     git('clean', '-qfdx');
   }
 });
+
+// ---- P4 fix lane B2 (security review S1 S4) -------------------------------------------------------------------------
+const GENV = { PATH: process.env.PATH, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
+// A tag repo with one commit and a worktree detached at it, as assign makes them: {repo, wt, t (the ticket's git fields)}.
+function tagRepo() {
+  const root = fs.mkdtempSync(path.join(ROOT, 'tag-'));
+  const repo = path.join(root, 'repo');
+  const wt = path.join(root, 'wt');
+  const git = (cwd, ...a) => execFileSync('/usr/bin/git', ['-C', cwd, ...a], { env: GENV, encoding: 'utf8' }).trim();
+  fs.mkdirSync(repo);
+  git(repo, 'init', '-q', '-b', 'main');
+  fs.writeFileSync(path.join(repo, 'a.txt'), 'a\n');
+  git(repo, 'add', '.');
+  git(repo, '-c', 'user.name=t', '-c', 'user.email=t@example.invalid', 'commit', '-qm', 'base');
+  const base_sha = git(repo, 'rev-parse', 'HEAD');
+  git(repo, 'worktree', 'add', '-q', '--detach', wt, base_sha);
+  const t = { worktree: wt, base_sha, git_dir: fs.realpathSync(git(wt, 'rev-parse', '--absolute-git-dir')), common_dir: fs.realpathSync(path.join(repo, '.git')) };
+  return { root, repo, wt, t };
+}
+
+test('S1 git dirs pinned: commondir rewritten to a copy whose config has a clean filter → dirtyPaths and the planted check refuse git before it runs (unpinned it does run)', async () => {
+  const { root, repo, wt, t } = tagRepo();
+  const marker = path.join(root, 'filter-ran');
+  const evil = path.join(root, 'evil');
+  fs.cpSync(path.join(repo, '.git'), evil, { recursive: true }); // the agent's copy of the common dir, its filter runs code
+  fs.appendFileSync(path.join(evil, 'config'), `[filter "x"]\n\tclean = touch ${marker} && cat\n`);
+  fs.writeFileSync(path.join(t.git_dir, 'commondir'), `${evil}\n`);
+  fs.writeFileSync(path.join(wt, '.gitattributes'), '* filter=x\n');
+  const touch = () => fs.utimesSync(path.join(wt, 'a.txt'), new Date(), new Date(Date.now() + 3_600_000)); // git must hash it again
+  touch();
+  // final verify (contract change; was: git ran pinned and listed ?? .gitattributes): git 2.50 still reads refs via the
+  // commondir file, so tbd refuses git when it does not lead to the recorded common_dir (fail closed: Blocked / refused)
+  await assert.rejects(spawn.dirtyPaths(t), /commondir leads to /);
+  await assert.rejects(spawn.plantedConfig(t, wt, path.join(root, 'ticket'), process.env), /commondir leads to/);
+  assert.equal(fs.existsSync(marker), false, 'pinned: the planted filter never ran');
+  touch();
+  await spawn.dirtyPaths({ worktree: wt }); // control: a ticket from before the fix (no git_dir) reads commondir
+  assert.equal(fs.existsSync(marker), true, 'unpinned: the planted filter runs (the attack is real)');
+  // git strips only the trailing newline: `../.. ` (a space) is another dir an agent can make → refused, not trimmed
+  fs.mkdirSync(path.join(path.dirname(t.git_dir), '.. '));
+  fs.writeFileSync(path.join(t.git_dir, 'commondir'), '../.. \n');
+  await assert.rejects(spawn.dirtyPaths(t), (/** @type {any} */ e) => /commondir leads to /.test(e.message) && e.code === 'PLANTED');
+  // a link first, then `..`: git follows L (→ evil/a/b/c) before the dots, so this is evil/, not the common dir
+  fs.mkdirSync(path.join(evil, 'a', 'b', 'c'), { recursive: true });
+  fs.symlinkSync(path.join(evil, 'a', 'b', 'c'), path.join(t.git_dir, 'L'));
+  fs.writeFileSync(path.join(t.git_dir, 'commondir'), 'L/../../..\n');
+  await assert.rejects(spawn.dirtyPaths(t), (/** @type {any} */ e) => /commondir leads to /.test(e.message) && e.code === 'PLANTED');
+});
+
+test('S4 a .gitmodules path that leads out of the worktree through a link (the leaf or a folder on the way) → refused by name, the outside never walked', async () => {
+  const { root, wt, t } = tagRepo();
+  const outside = path.join(root, 'outside');
+  fs.mkdirSync(path.join(outside, 'sub'), { recursive: true });
+  for (const f of ['CLAUDE.md', 'sub/CLAUDE.md']) fs.writeFileSync(path.join(outside, f), 'planted\n');
+  fs.symlinkSync(outside, path.join(wt, 'link'));
+  fs.symlinkSync(outside, path.join(wt, 'a'));
+  fs.writeFileSync(path.join(wt, '.gitmodules'), '[submodule "l"]\n\tpath = link\n\turl = ./l\n[submodule "s"]\n\tpath = a/sub\n\turl = ./s\n');
+  assert.deepEqual((await spawn.plantedConfig(t, wt, path.join(root, 'ticket'), process.env)).sort(),
+    ['.gitmodules: a/sub (leads outside the worktree)', '.gitmodules: link (leads outside the worktree)']);
+});

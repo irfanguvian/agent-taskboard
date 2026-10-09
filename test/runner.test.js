@@ -96,16 +96,19 @@ test('AC1 outcomes from the last result line: crash, invalid JSON, max turns, sc
   for (const id of ['t_unblt1', 't_mscfg1', 't_backl1']) assert.equal(fs.existsSync(path.join(tbd.tbHome, 'tickets', id, 'runs')), false, `${id} never spawned`);
   assert.equal(read(tbd, 't_backl1').lease, null);
   // P3b (contract change; was "an ended lease in its phase is P3b's: no second run"): a counted failure past
-  // max_failures_per_phase (0 here), max_turns and refusal → Blocked at once; schema_fail → resumed once, then
-  // Blocked; a result that kept the phase → no second run.
+  // max_failures_per_phase (0 here) and max_turns → Blocked at once; schema_fail → resumed once, then Blocked; a
+  // result that kept the phase → no second run. P4 AC7 / U7 (contract change; was "refusal → Blocked at once"): a
+  // refusal on fable (the planning default) → one fresh run on opus xhigh, not counted; it refuses too → Blocked.
   await new Promise((r) => setTimeout(r, 2500));
   const second = ['t_ijson1', 't_schem1'];
-  for (const id of ran) assert.equal(hasRun(tbd, id, 2), second.includes(id), `${id}: a second run only for the schema retry`);
+  const opus = ['t_refus1'];
+  for (const id of ran) assert.equal(hasRun(tbd, id, 2), [...second, ...opus].includes(id), `${id}: a second run only for the schema retry or the opus re-run`);
   for (const id of second) assert.deepEqual([read(tbd, id).lease.resumed, read(tbd, id).lease.schema_retry, read(tbd, id).failures], [true, true, {}], id);
+  for (const id of opus) assert.deepEqual([read(tbd, id).lease.resumed, read(tbd, id).lease.opus, read(tbd, id).lease.model, read(tbd, id).failures], [undefined, true, 'opus', {}], id);
   assert.deepEqual(read(tbd, 't_crash1').failures, { planning: 1 });
   // D37 positive: launchd checked after every run, job loaded → no alert
   const uid = process.getuid();
-  assert.equal(spyLog(tbd, 'test-exec.jsonl').filter((e) => e.file === '/bin/launchctl' && e.args.join(' ') === `print gui/${uid}/local.taskboard`).length, ran.length + second.length);
+  assert.equal(spyLog(tbd, 'test-exec.jsonl').filter((e) => e.file === '/bin/launchctl' && e.args.join(' ') === `print gui/${uid}/local.taskboard`).length, ran.length + second.length + opus.length);
   assert.deepEqual(spyLog(tbd, 'test-alerts.jsonl'), []);
 });
 
@@ -176,7 +179,9 @@ test('AC2 + AC3: §9 argv and env through tbd (removed keys absent, TBX_RUN live
   assert.match(d.env.TBX_RUN, /^[0-9a-f]{32}$/);
   const sock = path.join(tbd.tbHome, 'tbd.sock');
   assert.deepEqual(await call(sock, { op: 'subagent.request', session: lease.session, run: d.env.TBX_RUN }, { timeoutMs: 2000 }), { ok: true, used: 1 });
-  assert.match(lease.lstart, /^\w{3} \w{3} +\d+ \d\d:\d\d:\d\d \d{4}$/, 'C-locale ps lstart');
+  // lstart lands in a later save than pid (fillLstart, after ps lists the pid): wait for it, then check its form
+  const { lstart } = await until(() => read(tbd, 't_argv01').lease?.lstart && read(tbd, 't_argv01').lease, 5000, 'lstart saved');
+  assert.match(lstart, /^\w{3} \w{3} +\d+ \d\d:\d\d:\d\d \d{4}$/, 'C-locale ps lstart');
   await until(() => read(tbd, 't_argv01').lease.exit, 15_000, 'run ended');
   assert.equal(read(tbd, 't_argv01').lease.exit, 'result');
   assert.deepEqual(await call(sock, { op: 'subagent.request', session: lease.session, run: d.env.TBX_RUN }, { timeoutMs: 2000 }),

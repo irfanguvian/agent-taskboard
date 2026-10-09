@@ -16,9 +16,13 @@ const { RESUME_PROMPT } = require('../lib/spawn');
 const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'recovery-tbd-'));
 after(() => fs.rmSync(ROOT, { recursive: true, force: true }));
 const PHASES = path.join(ROOT, 'phases');
-fs.mkdirSync(path.join(PHASES, 'code/planning'), { recursive: true });
-for (const [f, c] of Object.entries({ 'prompt.md': '# planning fixture\n', 'settings.json': '{"permissions":{"allow":["Read"]}}', 'result.schema.json': '{"type":"object"}' })) {
-  fs.writeFileSync(path.join(PHASES, 'code/planning', f), c);
+// code/working: AC5 stall's dirty worktree (P4e J16: a planning run must leave its worktree clean, so that test's run
+// is a working one, where uncommitted changes are normal)
+for (const ph of ['code/planning', 'code/working']) {
+  fs.mkdirSync(path.join(PHASES, ph), { recursive: true });
+  for (const [f, c] of Object.entries({ 'prompt.md': '# fixture\n', 'settings.json': '{"permissions":{"allow":["Read"]}}', 'result.schema.json': '{"type":"object"}' })) {
+    fs.writeFileSync(path.join(PHASES, ph, f), c);
+  }
 }
 const CONFIG = { // admission always yes (unless critical pressure); a run silent 3 s is stalled
   claude_bin: FAKE,
@@ -53,7 +57,7 @@ test('AC5 stall: the hang ignores SIGINT → SIGKILL after 10 s, kill(pid, 0) fi
   fs.writeFileSync(path.join(repo, 'new.txt'), 'new\n');
   const scenario = { steps: [{ hang: 'ignore_sigint' }], resume_steps: [{ result: { structured_output: { answer: 'resumed' } } }] };
   const base_sha = execFileSync('git', ['-C', repo, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(); // S1: a worktree run needs its base
-  const { tbd, dir } = await boot(t, 't_stall1', scenario, { worktree: repo, base_sha });
+  const { tbd, dir } = await boot(t, 't_stall1', scenario, { worktree: repo, base_sha, state: 'working' }); // P4e: was planning (J16)
   const l1 = await until(() => read(tbd, 't_stall1').lease?.lstart && read(tbd, 't_stall1').lease, 15_000, 'run 1 live');
   const int = await until(() => spyLog(tbd, 'test-kills.jsonl').find((k) => k.pid === l1.pid && k.sig === 'SIGINT'), 20_000, 'SIGINT after the stall');
   const sent = Date.now();
@@ -69,7 +73,7 @@ test('AC5 stall: the hang ignores SIGINT → SIGKILL after 10 s, kill(pid, 0) fi
   assert.equal(d2.prompt, `${RESUME_PROMPT}\n\nThe working tree has uncommitted changes (git status --porcelain):\n M a.txt\n?? new.txt\n`);
   assert.equal(fs.realpathSync(d2.cwd), fs.realpathSync(repo));
   const k = read(tbd, 't_stall1');
-  assert.deepEqual([l2.gen, l2.log, l2.resumed, k.failures, k.state], [2, 'runs/2.jsonl', true, { planning: 1 }, 'planning']);
+  assert.deepEqual([l2.gen, l2.log, l2.resumed, k.failures, k.state], [2, 'runs/2.jsonl', true, { working: 1 }, 'working']);
   assert.deepEqual(spyLog(tbd, 'test-handled.jsonl').map((h) => h.output), [{ answer: 'resumed' }]);
 });
 

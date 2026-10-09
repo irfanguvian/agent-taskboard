@@ -486,7 +486,7 @@ describe('tag checks', () => {
       const [argv, ...env] = c.split('\n').filter(Boolean);
       assert.ok(argv.startsWith(`${GIT_SAFE.join(' ')} -C ${w.repo} `), argv);
       const keys = env.map((l) => l.slice(4, l.indexOf('=')));
-      assert.deepEqual(keys.filter((k) => !['PWD', 'SHLVL', '_', 'OLDPWD'].includes(k)).sort(), ['GIT_CONFIG_GLOBAL', 'GIT_CONFIG_NOSYSTEM', 'HOME', 'PATH', 'TBD_SOCK'], 'no GITHUB_TOKEN or other daemon variable');
+      assert.deepEqual(keys.filter((k) => !['PWD', 'SHLVL', '_', 'OLDPWD'].includes(k)).sort(), ['GIT_CONFIG_GLOBAL', 'GIT_CONFIG_NOSYSTEM', 'GIT_NO_REPLACE_OBJECTS', 'HOME', 'PATH', 'TBD_SOCK'], 'no GITHUB_TOKEN or other daemon variable');
       assert.ok(env.includes('ENV GIT_CONFIG_GLOBAL=/dev/null') && env.includes('ENV GIT_CONFIG_NOSYSTEM=1'));
     }
     assert.equal(fs.existsSync(marker), false, 'no script named by the repo config ran');

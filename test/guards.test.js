@@ -236,3 +236,43 @@ test('S1 path-guard + bash-guard: Claude config (.claude/, CLAUDE.md, CLAUDE.loc
   }
   for (const c of ['cat src/claude.ts', 'ls .claude-plugin', 'npm test -- claude.md.test.js']) assert.equal(guard(c, {})?.deny, undefined, c);
 });
+
+test('J8 bash-guard: commands that only read a CLAUDE.md pass; a redirect into it, a non-reader naming it, git -c / --output, and any .claude/ use stay denied', () => {
+  for (const c of ['git log -- CLAUDE.md', 'git show HEAD:CLAUDE.md', 'cat CLAUDE.md', 'git -C sub log --oneline -- docs/CLAUDE.md | head -5', 'git diff main -- CLAUDE.local.md 2>&1']) {
+    assert.equal(guard(c, {})?.deny, undefined, c);
+  }
+  for (const c of ['cat x > CLAUDE.md', 'echo hi >>docs/CLAUDE.md', 'cat CLAUDE.md | tee CLAUDE.md', 'git diff --output=CLAUDE.md', 'git -c core.pager=sh log -- CLAUDE.md',
+    'sed -i s/a/b/ CLAUDE.md', 'cat .claude/settings.json', 'git show HEAD:.claude/settings.json',
+    // P4b LOW: readers that run commands (pager, -O, env-prefixed git), redirect targets spelled apart or globbed
+    'less CLAUDE.md', 'git grep -O x CLAUDE.md', 'GIT_EXTERNAL_DIFF=x git diff CLAUDE.md', 'cat x > "CLAUDE".md', 'cat x > CLAU""DE.md', 'cat x > C*.md',
+    'git grep --open-f=/bin/echo a -- CLAUDE.md']) { // P4 L2: git takes unique long-option prefixes
+    assert.match(guard(c, {})?.deny ?? 'allowed', /Claude config/, c);
+  }
+});
+
+test('J16 bash-guard planning (TB_PHASE=planning): git that writes, leaves the repo, runs a program or a pager, or has VAR= in front is denied; plain reads pass; other phases unchanged', () => {
+  const P = { TB_PHASE: 'planning' };
+  for (const c of ['git diff --output=x', 'git -c core.pager=x log', 'git -C . -c alias.x=!sh x', 'git -p log', 'git --paginate show', 'git diff --no-index /etc/hosts a',
+    'git diff --ext-diff', 'git show --textconv HEAD:a', 'git grep -O x', 'git --exec-path=/tmp log', 'git --config-env=core.pager=X log',
+    'GIT_PAGER=sh git log', 'env GIT_EXTERNAL_DIFF=x git diff', "sh -c 'git diff --output=x'",
+    'git diff --outp=x', 'git log --oneline > notes.txt', 'git show HEAD &>x', 'git log >| x']) { // P4 L2, S2 belt: no file redirect
+    assert.match(guard(c, P)?.deny ?? 'allowed', /^bash-guard: planning (only reads|runs git with no VAR=value)/, c);
+  }
+  for (const c of ['git log --oneline -5', 'git log -p -3 -- src', 'git show HEAD:src/a.js', 'git diff HEAD~1 --stat', 'git --no-pager log -c',
+    'git log -3 2>&1 | head -5', 'git diff HEAD~1 > /dev/null']) assert.equal(guard(c, P), null, c);
+  for (const env of [{ TB_PHASE: 'working' }, {}]) {
+    for (const c of ['git -c user.name=x commit -m y', 'git diff --output=x', 'GIT_PAGER=cat git log', 'git log > notes.txt']) assert.equal(guard(c, env), null, `${JSON.stringify(env)} ${c}`);
+  }
+});
+
+test('S3 bash-guard: a glob redirect target is matched in linear time (no RegExp from agent text); C*.md still denied, plain files pass', () => {
+  for (const tail of ['z', 'md']) { // ...z: no match; ...md: could be claude.md → denied
+    const c = `echo hi > ${'*'.repeat(40)}${tail}`;
+    const t0 = performance.now();
+    const r = guard(c, {});
+    assert.ok(performance.now() - t0 < 100, `${c}: ${performance.now() - t0} ms`); // the RegExp took 15 s+ at 22 stars
+    assert.equal(!!r?.deny, tail === 'md', c);
+  }
+  for (const c of ['cat x > C*.md', 'cat x > CLAU?E.md', 'cat x > a[b].md', `cat x > ${'?'.repeat(201)}`]) assert.match(guard(c, {})?.deny ?? 'allowed', /Claude config/, c);
+  for (const c of ['echo hi > out.txt', 'echo hi > out*.log', 'echo hi > ?.md']) assert.equal(guard(c, {}), null, c);
+});

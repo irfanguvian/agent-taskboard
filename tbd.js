@@ -14,6 +14,8 @@ const { createMonitor } = require('./lib/monitor');
 const doctor = require('./lib/doctor');
 const { createSlots } = require('./lib/slots');
 const { createRunner } = require('./lib/runner');
+const planning = require('./lib/planning'); // registers the code/planning handler + seed (P4)
+const metrics = require('./lib/metrics');
 
 function die(msg) {
   console.error(`error: ${msg}`);
@@ -61,6 +63,7 @@ function boot() {
   try {
     store.init();
     notifier = createNotifier({ store });
+    store.on('transition', (t) => metrics.ticket(t, store.ticketDir(t.id))); // AC8: t:ticket on done, blocked, cancelled
   } catch (e) {
     die(e.message);
   }
@@ -75,7 +78,9 @@ function boot() {
     runner = createRunner({
       store, slots, tbHome: process.env.TB_HOME || path.join(os.homedir(), '.taskboard'), port: /** @type {import('node:net').AddressInfo} */ (server.address()).port,
       system: () => monitor?.snapshot() ?? null, alert: notifier.alert, probe: () => monitor.probeNet(), // D31: timeout + breaker
+      autoAssign: planning.autoAssign, // J5: approval-made children, once their blockers are merged / done
     });
+    planning.lostSetups(runner.alert); // an approve's setup dies with its tbd: waiting setup → setup_failed (J12)
     monitor.on('wake', (e) => runner.wake(e)); // §8 sleep: the OS wake carries the slept time; a wall jump alone is a hint
     runner.start(); // re-attaches live leases, then starts runs (after the socket: TBX_RUN keys work from the first second)
     ready(notifier, monitor, runner); // throws on an unreadable session file: caught below, clean stop(1)

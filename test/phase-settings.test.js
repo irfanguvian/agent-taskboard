@@ -6,6 +6,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const { render, tools } = require('../lib/phase-settings');
 const { guard } = require('../hooks/bash-guard');
@@ -46,12 +47,14 @@ const all = () => Object.keys(EXPECTED).map((k) => [k, render(...k.split('/'), C
 // S1: Claude config at any depth (and top level) of every root an agent can write
 const PLANTED = [CTX.WORKTREE, CTX.TICKET_DIR, CTX.TAG_PATH].flatMap((r) => ['.claude', 'CLAUDE.md', 'CLAUDE.local.md'].flatMap((f) => [`${r}/${f}`, `${r}/**/${f}`]));
 
-test('phase-settings: one template per §5/§6 phase, allow == table, no prompt.md or schema anywhere (D9)', () => {
+test('phase-settings: one template per §5/§6 phase, allow == table, prompt.md + schema only where built (D9)', () => {
   const found = [];
   for (const kind of fs.readdirSync(path.join(REPO, 'phases'))) {
     for (const phase of fs.readdirSync(path.join(REPO, 'phases', kind))) {
       found.push(`${kind}/${phase}`);
-      assert.deepEqual(fs.readdirSync(path.join(REPO, 'phases', kind, phase)), ['settings.json'], `${kind}/${phase}`);
+      // P4 (contract change; was settings.json only everywhere): code/planning is built (D9: prompt.md + settings.json +
+      // result.schema.json + its handler), landed after the fable evals passed 3/3 and golden A scored 4/5 (AC1 AC9)
+      assert.deepEqual(fs.readdirSync(path.join(REPO, 'phases', kind, phase)), `${kind}/${phase}` === 'code/planning' ? ['prompt.md', 'result.schema.json', 'settings.json'] : ['settings.json'], `${kind}/${phase}`);
     }
   }
   assert.deepEqual(found.sort(), Object.keys(EXPECTED).sort());
@@ -95,25 +98,30 @@ test('phase-settings: hooks wired by absolute path; sandbox kept on, localhost o
       { matcher: 'Bash', hooks: cmd('bash-guard') },
       { matcher: 'Edit|Write|NotebookEdit|MultiEdit', hooks: cmd('path-guard') },
       { matcher: 'Agent|Task', hooks: cmd('subagent-count') },
+      ...(k === 'code/planning' ? [{ matcher: 'StructuredOutput', hooks: cmd('plan-check') }] : []), // P4e J15: planning only
     ], k);
     assert.deepEqual(s.hooks.SubagentStart, [{ hooks: cmd('subagent-count') }], k);
     assert.deepEqual(s.hooks.SubagentStop, [{ hooks: cmd('subagent-count') }], k);
-    for (const name of ['bash-guard', 'path-guard', 'subagent-count']) assert.ok(fs.existsSync(path.join(REPO, 'hooks', `${name}.js`)));
+    for (const name of ['bash-guard', 'path-guard', 'subagent-count', 'plan-check']) assert.ok(fs.existsSync(path.join(REPO, 'hooks', `${name}.js`)));
     assert.deepEqual({ ...s.env, TB_WRITE_ROOTS: undefined }, { TBD_SOCK: `${H}/tbd.sock`, TB_PORT: '7777', TB_HEAVY: '["npm test","npm run build"]', TB_CODE: REPO, TB_WRITE_ROOTS: undefined }, k);
     const sb = s.sandbox;
     assert.equal(sb.enabled && sb.failIfUnavailable && !sb.allowUnsandboxedCommands && !sb.autoAllowBashIfSandboxed, true, k);
-    assert.deepEqual(sb.filesystem.denyRead, [H], k);
+    // P4 L8 (contract change; was [TB_HOME] only): a TB_HOME that is not the live ~/.taskboard denies the live one too
+    assert.deepEqual(sb.filesystem.denyRead, [H, path.join(os.homedir(), '.taskboard')], k);
     const bashPhase = k === 'code/working' || k === 'code/qa';
     const reopen = bashPhase ? [REPO, '/u/.nvm/v24', '~/.npm', '~/Library/Caches/ms-playwright'] : []; // tbx, node, npm
     assert.deepEqual(sb.filesystem.allowRead, [CTX.WORKTREE, CTX.TICKET_DIR, `${H}/tbd.sock`, ...reopen], k);
     for (const p of [REPO, '/u/.nvm/v24/bin', '~/.claude*', '~/.zshrc', `${CTX.TAG_PATH}/.git/config`, `${CTX.TAG_PATH}/.git/hooks`,
-      `${CTX.TAG_PATH}/.git/info`, `${CTX.TAG_PATH}/.git/modules`, `${CTX.TAG_PATH}/.git/worktrees/*/config.worktree`, `${CTX.WORKTREE}/.git`, `${CTX.TICKET_DIR}/runs`, ...PLANTED]) {
+      `${CTX.TAG_PATH}/.git/info`, `${CTX.TAG_PATH}/.git/modules`, `${CTX.TAG_PATH}/.git/worktrees/*/config.worktree`, `${CTX.WORKTREE}/.git`, `${CTX.TICKET_DIR}/runs`, ...PLANTED,
+      `${CTX.TAG_PATH}/.git/worktrees/*/commondir`, `${CTX.TAG_PATH}/.git/worktrees/*/gitdir`, `${CTX.TAG_PATH}/.git/refs/replace`, `${CTX.TICKET_DIR}/rounds`, `${CTX.TICKET_DIR}/*.json`]) { // P4 S1, L7, replace refs
       assert.ok(sb.filesystem.denyWrite.includes(p), `${k}: denyWrite ${p}`);
     }
     assert.ok(!sb.filesystem.denyWrite.some((p) => CTX.WORKTREE.startsWith(`${p}/`) || p === CTX.WORKTREE), `${k}: worktree write-denied`);
     assert.deepEqual(sb.network.allowUnixSockets, [`${H}/tbd.sock`], k);
     assert.equal(sb.network.allowLocalBinding === true, bashPhase, `${k}: allowLocalBinding`);
   }
+  const live = path.join(os.homedir(), '.taskboard'); // L8: the live TB_HOME is denied once, not twice
+  assert.deepEqual(render('code', 'planning', { ...CTX, TB_HOME: live }).sandbox.filesystem.denyRead, [live]);
 });
 
 test('phase-settings: --tools from allow (Edit brings Write); read-only phases get no write tool', () => {

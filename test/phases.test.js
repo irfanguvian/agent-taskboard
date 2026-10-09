@@ -74,7 +74,7 @@ test('phases: built fixture → POST /api/flows 201 backlog ticket on disk, SSE 
   assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'events.jsonl'), 'utf8')).kind, 'create');
   assert.deepEqual((await tbd.api('GET', `/api/tickets/${k.id}`)).json, { ticket: k });
   assert.deepEqual((await tbd.api('GET', '/api/state')).json.flows,
-    [{ id: k.id, title: k.title, kind: 'code', tag: null, state: 'backlog', waiting: null, rework: 0, updated_at: k.updated_at }]);
+    [{ id: k.id, title: k.title, kind: 'code', tag: null, state: 'backlog', waiting: null, rework: 0, updated_at: k.updated_at, merged_at: null }]);
   const want = `event: ticket\ndata: {"id":"${k.id}","state":"backlog","waiting":null,"rework":0}\n\n`;
   for (let i = 0; i < 100 && !events.join('').includes(want); i++) await new Promise((r) => setTimeout(r, 50));
   assert.ok(events.join('').includes(want), 'SSE ticket event');

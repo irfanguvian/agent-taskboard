@@ -1,0 +1,91 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["kind", "facts", "decisions"],
+  "properties": {
+    "kind": { "type": "string", "enum": ["questions", "plan"] },
+    "round": { "type": "integer" },
+    "questions": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "question", "why", "options", "recommended"],
+        "properties": {
+          "id": { "type": "string" },
+          "question": { "type": "string" },
+          "why": { "type": "string", "minLength": 1 },
+          "options": { "type": "array", "minItems": 2, "maxItems": 4, "items": { "type": "string" } },
+          "recommended": { "type": "string" }
+        }
+      }
+    },
+    "summary": { "type": "string" },
+    "acceptance": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "text", "type"],
+        "properties": {
+          "id": { "type": "string" },
+          "text": { "type": "string" },
+          "type": { "type": "string", "enum": ["new", "preserve"] }
+        }
+      }
+    },
+    "tasks": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "title", "files", "modules", "blocked_by", "acceptance", "type", "test_cmd", "steps"],
+        "properties": {
+          "id": { "type": "string" },
+          "title": { "type": "string" },
+          "files": { "type": "array", "items": { "type": "string" } },
+          "modules": { "type": "array", "items": { "type": "string" } },
+          "blocked_by": { "type": "array", "items": { "type": "string" } },
+          "acceptance": { "type": "array", "items": { "type": "string" } },
+          "type": { "type": "string", "enum": ["new", "preserve"] },
+          "test_cmd": { "type": "string" },
+          "steps": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "allowed_schema_changes": { "type": "array", "items": { "type": "string" } },
+    "allowed_api_changes": { "type": "array", "items": { "type": "string" } },
+    "skills": { "type": "array", "items": { "type": "string" } },
+    "ui": { "type": ["string", "null"] },
+    "children": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "title", "text", "blocked_by"],
+        "properties": {
+          "id": { "type": "string" },
+          "title": { "type": "string" },
+          "text": { "type": "string" },
+          "blocked_by": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "facts": { "type": "array", "items": { "type": "string" } },
+    "decisions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "text", "source"],
+        "properties": {
+          "id": { "type": "string" },
+          "text": { "type": "string" },
+          "source": { "type": "string" }
+        }
+      }
+    }
+  }
+}

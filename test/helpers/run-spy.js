@@ -2,10 +2,13 @@
 // Test preload (NODE_OPTIONS=--require <this>) for runner tests (P3 T4). Production never loads this file.
 // 1. A fixture handler for every <kind>/<phase> under TB_PHASES_DIR: appends {id, phase, output} to
 //    TB_HOME/test-handled.jsonl; throws when the result has `throw`, returns {to: output.next} when it names one.
+//    TEST_REAL_HANDLERS=1: none, so the handlers tbd registers itself run (P4 code/planning: lib/planning.js).
 // 2. Wraps createRunner deps: launchd check on, launchctl answered by a spy (TEST_LAUNCHD=missing → exit 1; every
 //    call logged to TB_HOME/test-exec.jsonl, nothing real runs; git, read-only `git status` of recovery step 4, runs
 //    for real), alerts logged to TB_HOME/test-alerts.jsonl, caffeinate a spy (start/kill logged to
-//    TB_HOME/test-caffeinate.jsonl, no real caffeinate), net probe answers TEST_NET (down → false; else true).
+//    TB_HOME/test-caffeinate.jsonl, no real caffeinate), net probe answers TEST_NET (down → false; else true),
+//    TEST_PRESSURE=normal: the runner sees that memory pressure (this 8 GB Mac sits at warn under the full suite, and
+//    D2 admits no 2nd run at warn: a test that needs two live runs sets it).
 // 3. Group kills of the runner AND of slots (endRun, revoke) allowed only when every process of the group is this
 //    tbd's own: by ppid ancestry, it descends from tbd or from a member of a run's process group tbd spawned (a run's
 //    children outlive it, reparented to launchd, in its group), or was approved before with the same pid + start time
@@ -28,7 +31,7 @@ const HOME = process.env.TB_HOME;
 const log = (name, obj) => fsp.appendFile(path.join(HOME, name), JSON.stringify(obj) + '\n');
 
 const dir = process.env.TB_PHASES_DIR;
-for (const kind of dir ? fs.readdirSync(dir) : []) {
+for (const kind of dir && process.env.TEST_REAL_HANDLERS !== '1' ? fs.readdirSync(dir) : []) {
   for (const phase of fs.readdirSync(path.join(dir, kind))) {
     phases.registerHandler(`${kind}/${phase}`, async (t, output) => {
       await log('test-handled.jsonl', { id: t.id, phase, output });
@@ -78,7 +81,7 @@ runner.createRunner = (deps) => createRunner({
   },
   launchd: () => true,
   exec: async (file, args, opts) => {
-    if (file === '/usr/bin/git' && args.at(-2) === 'status') return sh(file, args, opts);
+    if (file === '/usr/bin/git' && args.includes('status')) return sh(file, args, opts); // recovery's dirty-tree note: real git, read-only
     await log('test-exec.jsonl', { file, args });
     const missing = file === '/bin/launchctl' && process.env.TEST_LAUNCHD === 'missing';
     return { err: file !== '/bin/launchctl' || missing ? new Error('spy: not loaded') : null, stdout: '', stderr: '' };
@@ -86,6 +89,7 @@ runner.createRunner = (deps) => createRunner({
   alert: (a) => void log('test-alerts.jsonl', a),
   kill: spyKill('runner'),
   probe: async () => process.env.TEST_NET !== 'down',
+  ...(process.env.TEST_PRESSURE && { system: () => { const s = deps.system?.(); return s && { ...s, pressure: process.env.TEST_PRESSURE }; } }),
   caffeinate: () => {
     void log('test-caffeinate.jsonl', { op: 'start', at: Date.now() });
     return { kill: () => void log('test-caffeinate.jsonl', { op: 'kill', at: Date.now() }) };
