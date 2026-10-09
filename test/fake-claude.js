@@ -1,11 +1,18 @@
 #!/usr/bin/env node
 // Stand-in for the `claude` binary (spec §9 spawn line, §12 fake suite). Zero deps.
 // Scenario: FAKE_CLAUDE_SCENARIO=<file.json> or FAKE_CLAUDE_SCENARIO_DIR=<dir> (<dir>/<n>.json by invocation).
-// Scenario JSON: {"init"?: false, "steps": [ step ... ]}. Step = {"emit": event} | {"sleep_ms": n} | {"crash": code}
-//   | {"hang": true} | {"result": {...}} | "refusal" | "usage_limit" | "max_turns" | "schema_fail" | "invalid_json" | "api_retry".
+// Scenario JSON: {"init"?: false, "steps": [ step ... ], "resume_steps"?: [ step ... ] (used instead when run with
+// --resume)}. Step = {"emit": event} | {"sleep_ms": n} | {"crash": code}
+//   | {"hang": true} | {"hang": "ignore_sigint"} (D-0011: SIGINT ignored) | {"hang": "ignore_term"} (INT, TERM, HUP
+//   ignored: only SIGKILL ends it) | {"result": {...}}
+//   | {"background": [file, ...args], "env"?: {...}} (started in this process group with this env + env, left running
+//     when this one exits; its pid is emitted)
+//   | {"exec": [file, ...args]} (runs it in this env + cwd; emits its exit status and stderr tail)
+//   | "refusal" | "usage_limit" | "max_turns" | "schema_fail" | "invalid_json" | "api_retry".
 // Event shapes follow test/fixtures/stream/real-sonnet-sample.jsonl (claude 2.1.292).
 'use strict';
 const fs = require('node:fs');
+const { spawn, spawnSync } = require('node:child_process');
 const path = require('node:path');
 const crypto = require('node:crypto');
 
@@ -13,7 +20,7 @@ const VALUE_FLAGS = new Set(['--session-id', '--resume', '--setting-sources', '-
   '--add-dir', '--mcp-config', '--tools', '--disallowedTools', '--permission-mode', '--permission-prompts', '--model',
   '--effort', '--fallback-model', '--max-turns', '--json-schema', '--output-format']);
 const BOOL_FLAGS = new Set(['-p', '--print', '--strict-mcp-config', '--verbose', '--include-partial-messages']);
-const ENV_KEEP = /^(CLAUDE_|ANTHROPIC_|GIT_|GH_|BASH_|TB_)|^(GITHUB_TOKEN|SSH_AUTH_SOCK|DISABLE_AUTOUPDATER|TBD_SOCK)$/;
+const ENV_KEEP = /^(CLAUDE_|ANTHROPIC_|GIT_|GH_|BASH_|TB_)|^(GITHUB_TOKEN|SSH_AUTH_SOCK|DISABLE_AUTOUPDATER|TBD_SOCK|TBX_RUN|PATH|NODE_OPTIONS)$/;
 const ENV_SECRET = /TOKEN|_KEY$|^SSH_AUTH_SOCK$/; // D31: dump presence only, never the value
 
 const warn = (msg) => fs.writeSync(2, `fake-claude: ${msg}\n`);
@@ -63,7 +70,7 @@ if (FAKE_CLAUDE_DUMP_DIR) {
     JSON.stringify({ argv, opts, env, cwd: process.cwd(), prompt }, null, 2));
 }
 
-/** @type {{ init?: boolean, steps: any[] }} */
+/** @type {{ init?: boolean, steps: any[], resume_steps?: any[] }} */
 let scenario = { steps: [{ result: {} }] };
 if (scenarioFile) {
   try {
@@ -108,7 +115,7 @@ async function main() {
       mcp_servers: [], model, permissionMode: opts['--permission-mode'] || 'default', apiKeySource: 'none', claude_code_version: 'fake' });
   }
   let exitCode = 0;
-  const steps = scenario.steps.flatMap((s) => {
+  const steps = (opts['--resume'] && scenario.resume_steps ? scenario.resume_steps : scenario.steps).flatMap((s) => {
     if (typeof s !== 'string') return [s];
     if (!SHORTCUTS[s]) {
       warn(`unknown shortcut ${s}`);
@@ -121,8 +128,16 @@ async function main() {
     else if (s.sleep_ms) await new Promise((r) => setTimeout(r, s.sleep_ms));
     else if ('crash' in s) process.exit(s.crash);
     else if (s.hang) {
+      for (const sig of { ignore_sigint: ['SIGINT'], ignore_term: ['SIGINT', 'SIGTERM', 'SIGHUP'] }[s.hang] ?? []) process.on(sig, () => {});
       setInterval(() => {}, 1 << 30); // stay alive until killed
       return;
+    } else if (s.background) {
+      const child = spawn(s.background[0], s.background.slice(1), { env: { ...process.env, ...s.env }, stdio: 'ignore' }); // not detached: same group
+      child.unref();
+      emit({ type: 'system', subtype: 'fake_child', pid: child.pid });
+    } else if (s.exec) {
+      const r = spawnSync(s.exec[0], s.exec.slice(1), { encoding: 'utf8', timeout: 30_000 });
+      emit({ type: 'system', subtype: 'fake_exec', status: r.status, stderr: String(r.stderr ?? r.error?.message ?? '').slice(-500) });
     } else if (s.result) {
       const line = resultLine(s.result);
       emit(line);

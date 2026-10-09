@@ -43,6 +43,8 @@ const EXPECTED = {
   'code/context': [[...GIT, W(`${CTX.WORKTREE}/.learning`)], [`${CTX.WORKTREE}/.learning`]], // module context refresh
 };
 const all = () => Object.keys(EXPECTED).map((k) => [k, render(...k.split('/'), CTX)]);
+// S1: Claude config at any depth (and top level) of every root an agent can write
+const PLANTED = [CTX.WORKTREE, CTX.TICKET_DIR, CTX.TAG_PATH].flatMap((r) => ['.claude', 'CLAUDE.md', 'CLAUDE.local.md'].flatMap((f) => [`${r}/${f}`, `${r}/**/${f}`]));
 
 test('phase-settings: one template per §5/§6 phase, allow == table, no prompt.md or schema anywhere (D9)', () => {
   const found = [];
@@ -60,12 +62,13 @@ test('phase-settings: one template per §5/§6 phase, allow == table, no prompt.
   }
 });
 
-test('phase-settings: §3b deny paths + D35c reads on every phase; own worktree and out/ never denied', () => {
+test('phase-settings: §3b deny paths + D35c reads + S1 Claude config on every phase; own worktree and out/ never denied', () => {
   const must = [
     ...['config.json', 'tags.json', 'tasks.json', 'token', 'session', 'metrics.jsonl', 'leak-denylist.txt', 'slots.json', 'doctor.json',
       'events.jsonl', 'tbd.log', 'tbd.pid', 'deploy.log', 'backup/**'].flatMap((f) => [`Read(/${H}/${f})`, `Edit(/${H}/${f})`]),
     `Edit(/${H}/tbd.sock)`, `Edit(/${H}/bin/**)`, W(CTX.SKILLS_DIR), 'Edit(~/taskboard-live/**)', `Edit(/${CTX.WORKTREE}/.git)`,
     `Edit(/${CTX.TICKET_DIR}/*.json)`, `Edit(/${CTX.TICKET_DIR}/rounds/**)`, 'Bash(git push *)',
+    ...PLANTED.map((p) => `Edit(/${p}${p.endsWith('.claude') ? '/**' : ''})`),
   ];
   for (const [k, s] of all()) {
     assert.equal(s.permissions.blockReadsOutsideWorkingDirectories, true, k); // file tools: cwd + --add-dir only
@@ -104,7 +107,7 @@ test('phase-settings: hooks wired by absolute path; sandbox kept on, localhost o
     const reopen = bashPhase ? [REPO, '/u/.nvm/v24', '~/.npm', '~/Library/Caches/ms-playwright'] : []; // tbx, node, npm
     assert.deepEqual(sb.filesystem.allowRead, [CTX.WORKTREE, CTX.TICKET_DIR, `${H}/tbd.sock`, ...reopen], k);
     for (const p of [REPO, '/u/.nvm/v24/bin', '~/.claude*', '~/.zshrc', `${CTX.TAG_PATH}/.git/config`, `${CTX.TAG_PATH}/.git/hooks`,
-      `${CTX.TAG_PATH}/.git/info`, `${CTX.TAG_PATH}/.git/modules`, `${CTX.TAG_PATH}/.git/worktrees/*/config.worktree`, `${CTX.WORKTREE}/.git`]) {
+      `${CTX.TAG_PATH}/.git/info`, `${CTX.TAG_PATH}/.git/modules`, `${CTX.TAG_PATH}/.git/worktrees/*/config.worktree`, `${CTX.WORKTREE}/.git`, `${CTX.TICKET_DIR}/runs`, ...PLANTED]) {
       assert.ok(sb.filesystem.denyWrite.includes(p), `${k}: denyWrite ${p}`);
     }
     assert.ok(!sb.filesystem.denyWrite.some((p) => CTX.WORKTREE.startsWith(`${p}/`) || p === CTX.WORKTREE), `${k}: worktree write-denied`);
@@ -124,6 +127,7 @@ test('phase-settings: rendered env drives the real guards (worktree write ok, co
   assert.equal(check({ tool_input: { file_path: `${CTX.WORKTREE}/src/a.ts` } }, s.env), null);
   assert.equal(check({ tool_input: { file_path: `${H}/config.json` } }, s.env)?.permissionDecision, 'deny');
   assert.equal(check({ tool_input: { file_path: `${H}/tickets/other/x.md` } }, s.env)?.permissionDecision, 'deny');
+  assert.match(check({ tool_input: { file_path: `${CTX.WORKTREE}/pkg/.claude/skills/x/SKILL.md` } }, s.env)?.permissionDecisionReason ?? '', /Claude config/); // S1
   assert.match(guard(`cat ${H}/token`, s.env)?.deny ?? '', /token and session/);
   assert.match(guard('curl -s http://127.0.0.1:7777/api/state', s.env)?.deny ?? '', /HTTP API/);
   assert.deepEqual(guard('cd x && npm run build', s.env), { command: `"$TB_CODE/bin/tbx" heavy -- sh -c 'cd x && npm run build'` });

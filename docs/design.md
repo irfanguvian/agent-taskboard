@@ -340,7 +340,7 @@ Otherwise the card shows the reason: "waiting: memory", "disk" or "slot".
 ### Spawn so runs survive a daemon restart
 
 - **Output to files, not pipes.** The prompt is read from a file (`runs/<n>.prompt`). stdout goes to `runs/<n>.jsonl`, stderr to `runs/<n>.err`. A `tbd` crash can't break a pipe the child is writing to.
-- **Own process group.** Runs are spawned with `detached: true`, so each run leads its own process group.
+- **Own process group.** Runs are spawned with `detached: true`, so each run leads its own process group. Claude starts each Bash call in a new group of its own, so the runner also remembers every process it sees in a run's tree (pid + start time); the run end and recovery kill those too. A Bash child of a claude that died while tbd was down is missed (a reboot kills it anyway).
 - **The lease** in `ticket.json` records `pid`, the process start time (`LC_ALL=C ps -o lstart= -p <pid>`), `pgid`, `gen`, phase, task, session id and log path. A run counts as alive only if pid **and** start time both match, which guards against pid reuse.
 - **Re-attach.** `tbd` tails the log file. The outcome comes from the last `result` line in the log, not from an exit code, which a restarted `tbd` can't collect.
 
@@ -366,7 +366,7 @@ Each card shows the icon, "last activity 12 s ago", elapsed time, subagents aliv
 ### Recovery: one path for every case
 
 1. **Take the ticket's mutex** and bump the lease `gen` with compare-and-swap. A second recovery attempt (an auto-resume, your button, or a post-restart check) sees the new `gen` and stops. The Resume button is disabled while a live lease exists.
-2. **Make sure the old run is dead.** Send SIGINT to the process tree (pgid plus a ppid walk), wait 10 s, send SIGKILL, then confirm with `kill(pid, 0)`.
+2. **Make sure the old run is dead.** Send SIGINT to the process tree (pgid plus a ppid walk, plus the remembered Bash-call groups), wait 10 s, send SIGKILL, then confirm with `kill(pid, 0)`.
 3. **Wait** for the network (probe every 30 s) and for admission (§7).
 4. **Check `git status`.** A dirty tree is fine; it's mentioned in the prompt.
 5. **Resume** with `claude -p --resume <session>` (no `--session-id` on resume) and the prompt "Your previous run was interrupted. Check the current state and continue from your last step." No resume env var, so there's exactly one continuation path.
@@ -379,7 +379,7 @@ Each card shows the icon, "last activity 12 s ago", elapsed time, subagents aliv
 - **Network back:** after an offline period.
 - **Usage limit reset:** the reset time has passed.
 - **Memory pause lifted:** pressure is back to normal.
-- **Sleep/wake:** the monitor sees a wall-clock jump of more than 30 s between ticks. Each live run then gets 6 minutes to produce an event before recovery; Claude Code's own stream watchdog often recovers within that time.
+- **Sleep/wake:** the monitor reads `kern.sleeptime` / `kern.waketime` each sample: a new wake after a sleep of more than 30 s gives the slept time, which the wall cap leaves out. A wall-clock jump of more than 30 s between ticks is only an early hint: it gives the grace and holds the wall cap until the OS wake arrives, but adds no sleep time (Node's clock keeps counting through sleep). Each live run then gets 6 minutes to produce an event before recovery; Claude Code's own stream watchdog often recovers within that time. Known limit: macOS keeps only the last sleep/wake pair, so dark wakes between two samples can undercount sleep.
 
 **Idle sleep** is blocked only while runs are active. `tbd` starts `caffeinate -i` when the first run starts and kills it when the last one ends, and by default only on AC power. Closing the lid still sleeps the Mac; recovery handles that.
 
@@ -395,7 +395,7 @@ Each card shows the icon, "last activity 12 s ago", elapsed time, subagents aliv
 
 **Subscription only**
 
-- **Auth check:** `tb doctor` runs `claude auth status`; `authMethod` must be `claude.ai` or `oauth_token`. It's checked again every 30 min and after wake, not on every spawn.
+- **Auth check:** `tb doctor` runs `claude auth status`; `authMethod` must be `claude.ai` (keychain login). Runs get an allowlisted env (PATH, HOME, TMPDIR, locale, USER, LOGNAME, SHELL, TERM), so `CLAUDE_CODE_OAUTH_TOKEN` never reaches an agent (D-0024). It's checked again every 30 min and after wake, not on every spawn.
 - **Pinned binary.** Runs use a pinned binary at `~/.taskboard/bin/claude-<version>` with `DISABLE_AUTOUPDATER=1`, so your interactive `claude` updating itself doesn't change the pipeline.
 - **Why pin:** the docs say `--bare` will become the default for `-p`, and bare mode doesn't use your subscription login. An upgrade is a deliberate step: run the fake-claude suite, then one real smoke run, then switch the pin.
 - **Repo check:** refuse a tag whose `.claude/settings.json` sets `apiKeyHelper` or `ANTHROPIC_*` / `CLAUDE_CODE_USE_*` env keys.
@@ -766,19 +766,20 @@ From M4 on, build later milestones through the pipeline itself.
 | `GET /` | UI |
 | `GET /api/state` | Reminders, flow summaries, system snapshot |
 | `GET /api/tickets/:id` | Full ticket, plan and current round |
-| `GET /api/tickets/:id/log?tail=200` | Log tail |
+| `GET /api/tickets/:id/log?tail=200` | Log tail (max 1000 lines; `after=<offset>` for the lines since an earlier read, `run=<n>` for an older run) |
 | `GET /events` | Server-Sent Events: `system`, `ticket`, `run`, `reminder` |
 | `POST /api/reminders`, `PATCH /api/reminders/:id` | Reminders |
 | `POST /api/flows` | New flow |
 | `POST /api/tickets/:id/{assign,answer,approve,reject,scope,resume,restart,cancel,promote}` | Actions, with the same guards as `tb` |
 | `GET /api/gc`, `POST /api/gc` | Preview, then delete confirmed items |
+| `POST /api/drills` | Chaos drill result `{name, ok, note}` from `tb eval chaos` → `t:drill` line (token only) |
 | `GET /api/health` | Metrics summary |
 
 Event payloads:
 
-- `system`: `{ram_used, ram_total, pressure, disk_free, runs, max, net, paused_until}`
+- `system`: `{ram_used, ram_total, pressure, disk_free, runs, max, net, paused_until, usage_warning}`
 - `ticket`: `{id, state, waiting, rework}`
-- `run`: `{id, liveness, last_event_age_s, tool, subagents_alive, rss_mb}`
+- `run`: `{id, liveness, last_event_age_s, tool, subagents_alive, rss_mb}` (+ `tool_s, live, started_at, last_event_at`); `{id, liveness: null}` once the run left the view. Sent only when it changes.
 - `reminder`: `{id, status}`
 
 ### Unix socket (`~/.taskboard/tbd.sock`)
@@ -800,11 +801,13 @@ Used by `tbx` and the hooks. `slot.acquire {pid, cmd}` → waits → `{lease}`; 
 `metrics.jsonl` lines:
 
 ```json
-{"t":"run","ticket":"t_k3x9qa","phase":"working","task":"T2","model":"opus","effort":"xhigh","started":"…","ended":"…","exit":"result|interrupted|stalled|paused|usage|crash|max_turns|schema_fail|wall_cap","turns":31,"cost_delta":0.84,"peak_rss_mb":1120,"subagents_peak":2,"slot_wait_ms":42000,"resumed":false}
+{"t":"run","ticket":"t_k3x9qa","phase":"working","task":"T2","model":"opus","effort":"xhigh","started":"…","ended":"…","exit":"result|interrupted|stalled|paused|usage|crash|max_turns|schema_fail|wall_cap|refusal|cancelled","turns":31,"cost_delta":840000,"peak_rss_mb":1120,"subagents_peak":2,"slot_wait_ms":42000,"resumed":false}
 {"t":"gate","ticket":"t_k3x9qa","gate":"task","ok":false,"class":"work|infra","ms":48210,"detail":"2 tests failed"}
 {"t":"ticket","ticket":"t_k3x9qa","kind":"code","tag":"acme/billing","outcome":"done|blocked|cancelled","rounds":3,"decisions":{"you":9,"ticket":2,"adr":1,"planner":2},"rework":1,"interventions":0,"phase_minutes":{"planning":14,"working":52,"review":6,"qa":21},"pr_edited":false,"fix_of":null}
-{"t":"drill","name":"wifi_off_5min","ok":true,"note":"auto-resumed after 5m12s"}
+{"t":"drill","at":"2026-10-09T03:12:40.000Z","name":"wifi","ok":true,"note":"healthy after 312s: run 2 running"}
 ```
+
+`cost_delta` is integer micro-USD (T5): 840000 = $0.84. `total_cost_usd` adds up over `--resume`, so a resumed run's `cost_delta` is its total minus the session's last known total (`cost_base` on the lease).
 
 ## Design review
 

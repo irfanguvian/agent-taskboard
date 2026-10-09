@@ -123,12 +123,12 @@ test('AC4 SSE: system event on connect, reminder event after a PATCH; bad Host r
   assert.match(res.headers['content-type'], /^text\/event-stream/);
   const [, sys] = await s.until(/event: system\ndata: (.*)\n\n/);
   // P2: live monitor fields change between reads, so compare keys + the runner-owned fields (values: monitor.test.js).
-  const keys = ['ram_total', 'ram_used', 'avail', 'pressure', 'level', 'disk_free', 'claude_rss', 'net', 'power', 'docker', 'disk_warn', 'at', 'runs', 'max', 'paused_until', 'paused_reason'].sort();
-  const runner = ({ runs, max, paused_until, paused_reason }) => ({ runs, max, paused_until, paused_reason });
+  const keys = ['ram_total', 'ram_used', 'avail', 'pressure', 'level', 'disk_free', 'claude_rss', 'net', 'power', 'docker', 'disk_warn', 'at', 'runs', 'max', 'paused_until', 'paused_reason', 'usage_warning'].sort();
+  const runner = ({ runs, max, paused_until, paused_reason, usage_warning }) => ({ runs, max, paused_until, paused_reason, usage_warning });
   const fromState = (await tbd.api('GET', '/api/state')).json.system;
   for (const [where, got] of [['SSE', JSON.parse(sys)], ['/api/state', fromState]]) {
     assert.deepEqual(Object.keys(got).sort(), keys, `${where} carries the system object`);
-    assert.deepEqual(runner(got), { runs: 0, max: 1, paused_until: null, paused_reason: null }, where);
+    assert.deepEqual(runner(got), { runs: 0, max: 1, paused_until: null, paused_reason: null, usage_warning: false }, where);
   }
   const { json } = await tbd.api('POST', '/api/reminders', { title: 'sse me' });
   await tbd.api('PATCH', `/api/reminders/${json.reminder.id}`, { status: 'now' });

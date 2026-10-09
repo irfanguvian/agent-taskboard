@@ -2,7 +2,7 @@
 'use strict';
 // bash-guard: PreToolUse hook for Bash (spec §7, plan D35, §3b). Denies agent commands that reach for tbd
 // (token, session, socket, HTTP port), broad kills (pkill, kill 0/-1/-pgid), launchctl, nested claude, git push,
-// tb mutations, or drive the heavy slot by hand.
+// tb mutations, Claude config (.claude, CLAUDE.md: S1), or drive the heavy slot by hand.
 // Rewrites (updatedInput) a command whose simple commands start with a TB_HEAVY prefix (JSON array, matched
 // by leading words, after keywords/VAR=value/env/timeout/nice/nohup/command wrappers, by basename, also inside
 // `sh -c '…'`) to `tbx heavy -- sh -c '<whole command>'`; pins jest --maxWorkers=2, playwright --workers=1.
@@ -33,6 +33,8 @@ function rules(env) {
     [/\bTBX_LEASE\b/, 'TBX_LEASE belongs to tbx; do not read or set it'],
     [new RegExp(`\\.taskboard/(token|session)\\b${home}`), `the taskboard token and session are private to tb; ${STATUS}`],
     [/\btbd\.sock\b/, `talk to tbd only through tbx; ${STATUS}`],
+    // S1 belt (by name only, reads too; the sandbox write-deny is the wall): the next run would load what is written there
+    [/(^|[^\w.-])(\.claude|claude(\.local)?\.md)(?![\w.-])/i, 'Claude config (.claude/, CLAUDE.md) is off limits to Bash; read it with the Read tool, never write it'],
     [new RegExp(`(${host})(:|\\s+)${port}\\b`, 'i'), `tbd's HTTP API is off limits to agents; ${STATUS}`],
     [/\b(pkill|killall)\b/, 'broad kills hit other runs; stop only processes you started, by pid'],
     [/\bgit(\s+-[Cc]\s+\S+|\s+--[\w-]+(=\S+)?)*\s+push\b/, 'agents never push; commit your work, the pipeline pushes after the final gate'],

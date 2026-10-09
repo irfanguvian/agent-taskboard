@@ -13,9 +13,10 @@ const os = require('node:os');
 const path = require('node:path');
 const { startTbd, SLOT_ROOT } = require('../test/helpers/tbd');
 const { render, tools } = require('../lib/phase-settings');
+const { DEFAULT_PIN } = require('../lib/util');
 
 const REPO = path.join(__dirname, '..');
-const CLAUDE = process.env.CLAUDE_BIN || path.join(os.homedir(), '.local/share/claude/versions/2.1.292');
+const CLAUDE = process.env.CLAUDE_BIN || path.join(os.homedir(), '.local/share/claude/versions', DEFAULT_PIN);
 const SANDBOX_REPO = path.join(os.homedir(), 'Documents/tb-sandbox');
 const HEAVY = ['npm ci', 'npm install', 'npm test', 'npm run test:e2e', 'npm run build', 'npm run openapi:json']; // P0 facts + install
 const ESCAPE = path.join(os.homedir(), 'tb-escape-test');
@@ -61,7 +62,7 @@ function probes(p) {
 
 // Bypasses hooks can't fully stop (security review): only the sandbox should. Script-only (probe-* runs).
 function bypasses(p) {
-  const claude = `${os.homedir()}/.local/share/claude/versions/2.1.292`;
+  const claude = CLAUDE;
   return [
     ['3b token via /./ path', `cat "${p.TB_HOME}/./token"`],
     ['3b token via $TBD_SOCK dir', 'cat "$(dirname "$TBD_SOCK")/token"'],

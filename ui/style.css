@@ -241,10 +241,16 @@ main { max-width: 1560px; margin: 0 auto; padding: 22px 24px 56px; }
 .chip.wait { justify-self: start; background: var(--amber-bg); color: var(--ink); font-weight: 600; }
 .fstats { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; padding-top: 8px; border-top: 1px dashed var(--line); font-size: 12px; color: var(--mute); font-variant-numeric: tabular-nums; }
 .stat > span:first-child { margin-right: 4px; }
-.live-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; border: 2px solid var(--mute); vertical-align: -1px; }
-.live-dot.alive { background: var(--green); border-color: var(--green); }
-.live-dot.stalled { background: var(--amber); border-color: var(--amber); }
-.live-dot.dead { background: var(--red); border-color: var(--red); }
+/* run liveness (spec §8): a dot for thinking / quiet / stalled, a text glyph for the rest; the word always shows */
+.lv { display: inline-flex; align-items: center; gap: 5px; font-weight: 600; color: var(--ink); }
+.lv i { font-style: normal; line-height: 1; }
+.lv.thinking i, .lv.quiet i, .lv.stalled i { width: 10px; height: 10px; border-radius: 50%; background: var(--green); }
+.lv.quiet { color: var(--amber); }
+.lv.quiet i { background: var(--amber); }
+.lv.stalled i { background: var(--red); }
+.lv.stalled, .lv.interrupted, .lv.offline { color: var(--red); }
+.lv.waiting, .lv.paused { color: var(--amber); }
+.lv.tool i { color: var(--steel); }
 .cancelled { margin-top: 8px; color: var(--mute); }
 .cancelled summary { cursor: pointer; padding: 6px 0; }
 .cancelled .flist { margin-top: 8px; max-width: 20rem; }
@@ -262,6 +268,18 @@ main { max-width: 1560px; margin: 0 auto; padding: 22px 24px 56px; }
 .facts { display: grid; grid-template-columns: max-content 1fr; gap: 6px 18px; font-size: 14px; }
 .facts dt { color: var(--mute); }
 .facts dd { overflow-wrap: anywhere; }
+.runbox { display: grid; gap: 10px; }
+.run-line { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; font-size: 14px; }
+.warnbox { padding: 10px 12px; border-radius: 6px; border-left: 4px solid var(--red); background: var(--blocked-bg); overflow-wrap: anywhere; }
+.run-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.run-actions .ghost { border: 1px solid var(--line); background: var(--strip); color: var(--ink); }
+.run-actions .ghost.armed { background: var(--red); border-color: var(--red); color: var(--on-red); font-weight: 700; }
+.log-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.log-head .ghost { border: 1px solid var(--line); color: var(--ink); }
+.log {
+  max-height: 50vh; overflow: auto; margin: 0; padding: 10px 12px; border-radius: 6px; background: var(--bay);
+  font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere;
+}
 .ticket-text { white-space: pre-wrap; overflow-wrap: anywhere; padding: 12px 14px; border-radius: 6px; background: var(--bay); }
 
 /* toasts */
@@ -305,4 +323,6 @@ main { max-width: 1560px; margin: 0 auto; padding: 22px 24px 56px; }
   .drawer[open] { animation: slide 0.22s ease-out; }
   @keyframes slide { from { opacity: 0; transform: translateX(28px); } }
   .tray { animation: rise 0.16s ease-out; }
+  .lv.thinking i { animation: pulse 1.6s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: 0.3; } }
 }

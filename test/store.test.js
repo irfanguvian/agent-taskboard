@@ -294,6 +294,25 @@ test('A11b rename fails (tasks.json is a directory): 500, tmp file removed; next
   assert.deepEqual(fileTasks(tbd).map((x) => x.title), [...V1.tasks.map((x) => x.title), 'saved now']);
 });
 
+// S8: the tmp name is predictable and a run's cwd can be the ticket dir. In process: a real fs, fsp.rm wrapped once
+// so the agent wins the race between the rm and the open.
+test('S8 writeAtomic never writes through a link at its tmp path: planted before (removed, the write lands) or after the rm (wx refuses)', async (t) => {
+  const fsp = require('node:fs/promises');
+  const { writeAtomic } = require('../lib/store');
+  const dir = fs.mkdtempSync(path.join(root, 's8-'));
+  const [victim, file] = [path.join(dir, 'victim'), path.join(dir, 'ticket.json')];
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(victim, 'mine');
+  fs.symlinkSync(victim, tmp);
+  await writeAtomic(file, 'new');
+  assert.deepEqual([fs.readFileSync(victim, 'utf8'), fs.readFileSync(file, 'utf8')], ['mine', 'new'], 'link target unchanged, write landed');
+  const rm = fsp.rm;
+  t.after(() => { fsp.rm = rm; });
+  fsp.rm = async (...a) => { await rm(...a); fsp.rm = rm; fs.symlinkSync(victim, tmp); };
+  await assert.rejects(writeAtomic(file, 'newer'), { code: 'EEXIST' });
+  assert.deepEqual([fs.readFileSync(victim, 'utf8'), fs.readFileSync(file, 'utf8')], ['mine', 'new'], 'link target unchanged, nothing written');
+});
+
 test('D36 fresh config.json gets the 8 GB RAM defaults (planning/review 0.4, working 1.0, qa 1.5, min_free 1)', async (t) => {
   const tbd = await startTbd();
   t.after(() => tbd.stop());

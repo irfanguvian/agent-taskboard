@@ -44,12 +44,13 @@ function request(port, method, p, body, headers = {}) {
 }
 
 // files: { 'tasks.json': {...} | 'raw text' } seeded into tbHome. tbd: alternate tbd.js path (code-dir copies).
-async function startTbd({ env = {}, files = {}, tbd = TBD } = {}) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'tbd-'));
+// root: the root of an earlier startTbd stopped with stop({ keep: true }): a restart on the same HOME + TB_HOME.
+async function startTbd({ env = {}, files = {}, tbd = TBD, root: reuse = undefined } = {}) {
+  const root = reuse ?? fs.mkdtempSync(path.join(os.tmpdir(), 'tbd-'));
   const home = path.join(root, 'home');
   const tbHome = path.join(root, 'tbhome');
-  fs.mkdirSync(home);
-  fs.mkdirSync(tbHome);
+  fs.mkdirSync(home, { recursive: true });
+  fs.mkdirSync(tbHome, { recursive: true });
   for (const [name, content] of Object.entries(files)) {
     fs.mkdirSync(path.dirname(path.join(tbHome, name)), { recursive: true });
     fs.writeFileSync(path.join(tbHome, name), typeof content === 'string' ? content : JSON.stringify(content, null, 2));
@@ -81,7 +82,7 @@ async function startTbd({ env = {}, files = {}, tbd = TBD } = {}) {
   const keyFile = path.join(tbHome, 'test-run.key'); // the test process's run key, from the slot-root preload
   const runKey = fs.existsSync(keyFile) ? fs.readFileSync(keyFile, 'utf8') : undefined;
   return {
-    port, home, tbHome, token, runKey, url: `http://127.0.0.1:${port}`, stderr: () => err,
+    port, root, home, tbHome, token, runKey, url: `http://127.0.0.1:${port}`, stderr: () => err,
     // api(method, path, body?, headers?) sends the token unless headers override it ({ 'x-tb-token': undefined } omits).
     api: (method, p, body, headers = {}) => request(port, method, p, body, { 'x-tb-token': token, ...headers }),
     // unlock() runs the `tb open` flow (code → /unlock → 302 /#k=<ui_key>) and returns the Cookie header value 'tb_session=…'.
@@ -91,23 +92,25 @@ async function startTbd({ env = {}, files = {}, tbd = TBD } = {}) {
       if (!/^\/#k=[0-9a-f]{64}$/.test(r.headers.location)) throw new Error(`unlock: no ui_key fragment in Location ${r.headers.location}`);
       return String(r.headers['set-cookie']).split(';')[0];
     },
-    async stop() {
+    // keep: leave HOME + TB_HOME for a restart (the caller removes root later).
+    async stop({ keep = false } = {}) {
       if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');
       const timer = setTimeout(() => child.kill('SIGKILL'), 5000);
       const res = await exited;
       clearTimeout(timer);
       children.delete(child);
       const leaked = fs.existsSync(path.join(home, '.taskboard'));
-      fs.rmSync(root, { recursive: true, force: true });
+      if (!keep) fs.rmSync(root, { recursive: true, force: true });
       if (leaked) throw new Error('AC10: something wrote <tmp>/home/.taskboard (homedir fallback)');
       return res;
     },
   };
 }
 
-function runTb(args, { tbHome, port, home }) {
+// env: extra vars for the tb process (e.g. NODE_OPTIONS with a test preload).
+function runTb(args, { tbHome, port, home }, env = {}) {
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, [TB, ...args], { env: isolatedEnv({ home, tbHome, port }), stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(process.execPath, [TB, ...args], { env: isolatedEnv({ home, tbHome, port }, env), stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
     child.stdout.on('data', (c) => (stdout += c));

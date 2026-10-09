@@ -17,6 +17,8 @@ const WORD = 'zebracorp';
 const FAKE_KEY = 'AK' + 'IAZ7FXQ3JDPW2KLM4N';
 // same trick; gitleaks github-pat shape
 const FAKE_PAT = 'gh' + 'p_' + 'aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6';
+// same trick; a Claude OAuth token shape (S3: gitleaks 8.30 defaults miss it)
+const FAKE_OAT = 'sk-' + 'ant-' + 'oat01-' + 'Zq3xV8mN2pL7kR4tW9yB1cD6fH0jK5sA3eG8iU2oQ7wE4rT1yP6aS9dF2gH5jK8lZ3x';
 
 // Temp world: HOME, denylist, one git repo on main with a clean first commit.
 function world() {
@@ -70,6 +72,17 @@ test('fake AWS key is refused and never printed', () => {
   assert.equal(r.status, 1);
   assert.match(out(r), /gitleaks aws-access-token conf\.txt:1/);
   assert.ok(!out(r).includes(FAKE_KEY));
+});
+
+test('S3 a Claude OAuth token (sk-ant-oat01-) is refused and never printed; sk-ant- with a short tail is not a token', () => {
+  const w = world();
+  w.commit('env.txt', `CLAUDE_CODE_OAUTH_TOKEN=${FAKE_OAT}\n`);
+  const r = w.check('HEAD~1..HEAD');
+  assert.equal(r.status, 1, out(r));
+  assert.match(out(r), /gitleaks anthropic-token env\.txt:1/);
+  assert.ok(!out(r).includes(FAKE_OAT.slice(14)));
+  w.commit('doc.txt', 'keys start with sk-ant-api03- or sk-ant-oat01-\n');
+  assert.equal(w.check('HEAD~1..HEAD').status, 0, 'prefix only: no token');
 });
 
 test('denylist word in a file is refused, case-insensitive, word not printed', () => {

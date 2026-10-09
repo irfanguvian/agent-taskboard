@@ -16,19 +16,23 @@ const FLOW_COLS = [
 const YOU = new Set(['clarify', 'plan_approval', 'blocked']); // states that wait on Irfan
 const STAGE = { backlog: 'idle', done: 'done', blocked: 'blocked', clarify: 'you', plan_approval: 'you' };
 const KINDS = ['code', 'research', 'brainstorm', 'design'];
+const AGENT = ['planning', 'working', 'review', 'qa']; // phases with agent runs (fsm.AGENT)
 const NOW_LIMIT = 3, DONE_SHOWN = 15, GB = 2 ** 30, MB = 2 ** 20, DASH = '—';
 
 let state = null; // { reminders, flows, system, calendar } after first load
 let es = null; // the one EventSource
 let trusted = false; // tbd proved itself and the stream has not dropped since: only then do requests carry the cookie
 let wait = 1000; // reconnect backoff, ms (max 30 s)
-const ui = { drag: null, editing: null, tray: null, promote: null, pick: { kind: KINDS[0], tag: '' }, dirty: false, tags: [], tagsLoaded: false, locked: false };
+const ui = { drag: null, editing: null, tray: null, promote: null, pick: { kind: KINDS[0], tag: '' }, dirty: false, tags: [], tagsLoaded: false, locked: false,
+  runs: new Map(), open: null, ticket: null, log: null, act: null, arm: null }; // runs: id → `run` event; open: the drawer's flow id + its ticket, log tail, last action, Cancel armed
 
 // ---------- helpers ----------
 const $ = (s, r = document) => r.querySelector(s);
 const pad = n => String(n).padStart(2, '0');
-const today = () => { const d = new Date(); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; };
+const day = v => { const d = new Date(v); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; };
+const today = () => day(Date.now());
 const hhmm = v => { const d = new Date(v); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+const when = v => (v ? `${day(v)} ${hhmm(v)}` : null); // one time format everywhere: local, 24 h
 // teal..magenta only: orange, red and green are reserved for meaning
 const hue = s => 170 + [...s].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 140, 7);
 const byId = id => state.reminders.find(r => r.id === id);
@@ -115,6 +119,7 @@ async function load() {
     if (mine !== loadSeq) return; // a newer load is in flight
     state = { reminders: j.reminders || [], flows: j.flows || [], system: j.system || {}, calendar: j.calendar || {} };
     if (ui.drag || ui.editing) ui.dirty = true; else render();
+    reloadOpen(); // whatever changed (an event, a reconnect after missed ones), the open drawer reads its ticket again
   } catch {
     if ($('#live').dataset.live === 'on') toast('Could not load the board.', { title: 'Load failed' });
   }
@@ -167,6 +172,7 @@ async function reconnect() {
       ['Something else answers on this port, and this page stopped before sending it your session. When tbd is back, run ', el('code', null, 'tb open'), ' in Terminal.']);
   }
   trusted = true;
+  ui.runs.clear(); // the stream opens with every current run
   await load(); // events may have been missed while down
   if (!ui.locked) connect();
 }
@@ -181,7 +187,8 @@ function connect() {
     retry();
   };
   es.addEventListener('reminder', refresh);
-  es.addEventListener('ticket', refresh);
+  es.addEventListener('ticket', refresh); // load() then re-reads the open drawer too
+  es.addEventListener('run', onRun);
   es.addEventListener('system', e => {
     try { state.system = JSON.parse(e.data); renderHeader(); } catch { /* ignore malformed frame */ }
   });
@@ -210,12 +217,13 @@ function renderHeader() {
   metric('m-rss', s.claude_rss == null ? null : fmtBytes(s.claude_rss));
   metric('m-net', s.net == null ? null : s.net ? 'online' : 'offline', s.net == null ? null : s.net ? 'ok' : 'crit', '');
 
+  $('#usage').hidden = !s.usage_warning;
   const p = $('#paused');
   p.hidden = !s.paused_until;
   if (s.paused_until) {
     const d = new Date(s.paused_until);
-    const when = d.toDateString() === new Date().toDateString() ? hhmm(d) : d.toLocaleString();
-    p.textContent = `Agent runs are paused until ${when}.${PAUSE[s.paused_reason] ? ` ${PAUSE[s.paused_reason]}` : ''}`;
+    const until = d.toDateString() === new Date().toDateString() ? hhmm(d) : when(d);
+    p.textContent = `Agent runs are paused until ${until}.${PAUSE[s.paused_reason] ? ` ${PAUSE[s.paused_reason]}` : ''}`;
   }
 }
 
@@ -502,15 +510,36 @@ $('#board').addEventListener('keydown', e => {
 });
 
 // ---------- flows ----------
-const ago = v => {
+const span = v => {
   const s = Math.max(0, Math.round((Date.now() - new Date(v)) / 1000));
-  return s < 90 ? `${s}s ago` : s < 5400 ? `${Math.round(s / 60)}m ago` : `${Math.round(s / 3600)}h ago`;
+  return s < 90 ? `${s}s` : s < 5400 ? `${Math.round(s / 60)}m` : `${Math.round(s / 3600)}h`;
 };
+const ago = v => `${span(v)} ago`;
+
+// Spec §8 liveness: an icon and a word. Dots are CSS; the others are text glyphs (\uFE0E: never emoji).
+const LIVE = {
+  thinking: ['', 'Thinking'], tool: ['\u2699\uFE0E', 'Tool'], waiting: ['\u29D7', 'Waiting'], quiet: ['', 'Quiet'],
+  stalled: ['', 'Stalled'], offline: ['\u21AF', 'Offline'], paused: ['\u2016', 'Paused'], interrupted: ['\u2715', 'Interrupted'],
+};
+const liveTag = r => {
+  const [icon, word] = LIVE[r.liveness] || ['', String(r.liveness)];
+  return el('span', { class: `lv ${r.liveness}` }, el('i', { 'aria-hidden': 'true' }, icon),
+    r.liveness === 'tool' && r.tool ? [r.tool, r.tool_at && el('span', { 'data-since': r.tool_at }, span(r.tool_at))] : word);
+};
+
+// Card stats of a run (`run` event): liveness, last activity, elapsed, subagents, RSS. Times tick in place (ticker).
+function runStats(r) {
+  const stat = (label, value, attrs) => el('span', { class: 'stat' }, el('span', null, label), el('span', attrs, value));
+  return el('span', { class: 'fstats' }, liveTag(r),
+    stat('last activity', r.last_event_at ? ago(r.last_event_at) : DASH, r.last_event_at && { 'data-ago': r.last_event_at }),
+    r.live && stat('elapsed', span(r.started_at), { 'data-since': r.started_at }),
+    r.live && stat('agents', String(r.subagents_alive ?? 0)),
+    r.live && stat('RSS', `${r.rss_mb ?? 0} MB`));
+}
 
 function flowCard(f) {
   const wait = f.waiting?.reason;
-  const live = f.liveness || 'unknown'; // placeholder fields arrive with P3
-  const stat = (label, value) => el('span', { class: 'stat' }, el('span', null, label), value);
+  const run = ui.runs.get(f.id);
   return el('li', null, el('button', { type: 'button', class: 'fcard', 'data-id': f.id, onclick: () => openTicket(f.id) },
     el('span', { class: 'ftitle' }, f.title),
     el('span', { class: 'frow' },
@@ -518,11 +547,25 @@ function flowCard(f) {
       f.tag && el('span', { class: 'chip tag', style: `--h:${hue(f.tag)}` }, f.tag),
       f.rework > 0 && el('span', { class: 'chip rework' }, `rework ${f.rework}`)),
     wait && el('span', { class: 'chip wait' }, `waiting: ${wait}`),
-    el('span', { class: 'fstats' },
-      el('span', { class: 'stat' }, el('i', { class: `live-dot ${live}`, 'aria-hidden': 'true' }), el('span', { class: 'sr' }, `Liveness: ${live}`)),
-      stat('last activity', f.last_activity ? ago(f.last_activity) : DASH),
-      stat('agents', `${f.subagents ?? DASH}/3`),
-      stat('RSS', f.rss == null ? DASH : fmtBytes(f.rss)))));
+    run && runStats(run)));
+}
+
+// A `run` event: that card's stats (and the open drawer's run box) change in place; liveness null = the run left the view.
+function onRun(e) {
+  let r;
+  try { r = JSON.parse(e.data); } catch { return; }
+  if (typeof r?.id !== 'string') return;
+  if (r.liveness == null) ui.runs.delete(r.id);
+  else ui.runs.set(r.id, { ...r, tool_at: r.tool_s == null ? null : new Date(Date.now() - r.tool_s * 1000).toISOString() });
+  const run = ui.runs.get(r.id);
+  for (const card of document.querySelectorAll(`.fcard[data-id="${CSS.escape(r.id)}"]`)) {
+    card.querySelector('.fstats')?.remove();
+    if (run) card.append(runStats(run));
+  }
+  if (ui.open === r.id) {
+    renderRunBox();
+    reloadOpen(); // the run moved: the lease changed too
+  }
 }
 
 function renderFlows() {
@@ -541,31 +584,147 @@ function renderFlows() {
   $('#cancelledList').replaceChildren(...gone.map(flowCard));
 }
 
-const when = v => (v ? new Date(v).toLocaleString() : null);
+const stateLabel = s => FLOW_COLS.find(([k]) => k === s)?.[1] || s;
+const OPS = { resume: 'Resume', restart: 'Restart phase', cancel: 'Cancel' };
+
+// Re-renders keep keyboard focus on the same control (data-role) inside the drawer.
+const drawerFocus = () => (document.activeElement?.closest?.('#drawer') ? document.activeElement.dataset.role : null);
+const refocus = role => { if (role) $(`#drawer [data-role="${role}"]`)?.focus(); };
+// ...and the log tail where the reader left it (at the bottom: stays at the bottom).
+const logScroll = () => { const p = $('#runbox pre.log'); return p && { top: p.scrollTop, end: p.scrollTop + p.clientHeight >= p.scrollHeight - 2 }; };
+const rescroll = s => { const p = $('#runbox pre.log'); if (p && s) p.scrollTop = s.end ? p.scrollHeight : s.top; };
 
 function drawerBody(f, ticket, error) {
+  const role = drawerFocus(), scroll = logScroll();
   const dd = (k, v) => v == null || v === '' ? null : [el('dt', null, k), el('dd', null, String(v))];
-  const w = f.waiting?.reason;
+  const k = ticket || {};
+  const w = (ticket ? k.waiting : f.waiting)?.reason;
   $('#drawer').replaceChildren(el('div', { class: 'sheet' },
     el('div', { class: 'sheet-head' },
       el('h2', null, f.title || f.id),
-      el('button', { type: 'button', class: 'ghost', 'aria-label': 'Close details', onclick: () => $('#drawer').close() }, '×')),
+      el('button', { type: 'button', class: 'ghost', 'data-role': 'close', 'aria-label': 'Close details', onclick: () => $('#drawer').close() }, '×')),
     el('dl', { class: 'facts' },
-      dd('Kind', f.kind), dd('Tag', f.tag), dd('State', f.state), dd('Waiting', w), dd('Rework', f.rework),
-      dd('Created', when(ticket?.created_at)), dd('Updated', when(f.updated_at)), dd('Id', f.id)),
+      dd('Kind', f.kind), dd('Tag', f.tag), dd('State', stateLabel(k.state || f.state)), dd('Waiting', w), dd('Rework', k.rework ?? f.rework),
+      dd('Created', when(k.created_at)), dd('Updated', when(k.updated_at || f.updated_at)), dd('Id', f.id)),
+    el('section', { id: 'runbox', class: 'runbox', 'aria-labelledby': 'run-h' }, ...runBox(f.id, ticket)),
     el('h3', null, 'Request'),
     el('p', { class: 'ticket-text' }, error || (ticket ? ticket.text || 'No text.' : 'Loading')),
-    el('p', { class: 'hint' }, 'Plan, questions, tasks and run logs show up here as agents are built.')));
+    el('p', { class: 'hint' }, 'Plan, questions and tasks show up here as agents are built.')));
+  refocus(role);
+  rescroll(scroll);
 }
 
+// Run section of the drawer (spec §10 card detail): run line, refused-run error (R17), Resume / Restart / Cancel,
+// the outcome of the last click, log tail on demand.
+function runBox(id, k) {
+  const r = ui.runs.get(id), l = k?.lease, st = k?.state;
+  const running = !!r?.live || (!!l && !l.exit);
+  const live = running || !!l?.pending; // Resume is refused for both
+  const n = /^runs\/(\d+)\.jsonl$/.exec(l?.log || '')?.[1];
+  const out = [el('h3', { id: 'run-h' }, 'Run')];
+  out.push(!l ? el('p', { class: 'hint' }, k ? 'No run yet.' : 'Loading') : el('p', { class: 'run-line' }, r && liveTag(r),
+    el('span', null, [l.phase && stateLabel(l.phase), n && `run ${n}`, l.started_at && `started ${hhmm(l.started_at)}`,
+      l.pending ? `recovering (${l.pending.why || l.pending.after})` : l.exit ? `ended: ${l.exit}` : 'live'].filter(Boolean).join(' · '))));
+  if (l?.error && !l.pending) out.push(el('p', { class: 'warnbox' }, el('strong', null, 'Run refused. '), l.error.replace(/[\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/g, ''))); // names agent-made files: no bidi reordering
+  const can = AGENT.includes(st) || st === 'blocked';
+  const armed = ui.arm?.id === id && ui.arm.until > Date.now(); // Cancel's confirm click, kept across re-renders
+  const btn = (op, extra) => el('button', { type: 'button', class: `ghost${op === 'cancel' && armed ? ' armed' : ''}`, 'data-role': op,
+    onclick: () => runAction(id, op), ...extra }, op === 'cancel' && armed ? 'Confirm cancel?' : OPS[op]);
+  const acts = [
+    can && btn('resume', { disabled: live, title: live ? 'The run is live. Resume works once it ended.' : null }),
+    can && btn('restart'),
+    st && st !== 'done' && st !== 'cancelled' && btn('cancel'),
+  ].filter(Boolean);
+  if (acts.length) out.push(el('div', { class: 'run-actions' }, ...acts));
+  out.push(el('p', { class: 'hint', 'aria-live': 'polite' }, outcome(id, k, running)));
+  const shown = ui.log?.id === id;
+  out.push(el('div', { class: 'log-head' }, el('h3', null, 'Log tail'),
+    l?.log && el('button', { type: 'button', class: 'ghost', 'data-role': 'log', onclick: () => loadLog(id) }, shown ? 'Refresh' : 'Show last 200 lines')));
+  if (shown) out.push(ui.log.error ? el('p', { class: 'hint' }, ui.log.error)
+    : el('pre', { class: 'log', tabindex: '0', 'aria-label': 'Run log, last lines' }, ui.log.lines.join('\n') || 'Empty so far.'));
+  return out;
+}
+
+// L4: the last click wins (gen CAS in tbd); this line shows what came of it once the ticket and run events arrive.
+function outcome(id, k, running) {
+  const a = ui.act?.id === id ? ui.act : null;
+  if (!a) return '';
+  const at = hhmm(a.at);
+  if (a.state !== 'accepted') return a.state === 'sent' ? `${OPS[a.op]}: sending.` : `${OPS[a.op]} refused at ${at}: ${a.error}`;
+  const l = k?.lease;
+  // a recovery waiting (pending) has no live run: its waiting reason says what it waits for
+  const run = running ? 'run live' : l?.pending ? null : l?.exit ? `run ended (${l.exit})` : 'no run';
+  return `${OPS[a.op]} accepted at ${at}. Now: ${[stateLabel(k?.state), run, k?.waiting?.reason && `waiting: ${k.waiting.reason}`].filter(Boolean).join(', ')}.`;
+}
+
+function renderRunBox() {
+  const box = $('#runbox');
+  if (!box || !ui.open) return;
+  const role = drawerFocus(), scroll = logScroll();
+  box.replaceChildren(...runBox(ui.open, ui.ticket));
+  refocus(role);
+  rescroll(scroll);
+}
+
+async function runAction(id, op) {
+  if (op === 'cancel' && !(ui.arm?.id === id && ui.arm.until > Date.now())) { // stops the run: one more click to confirm
+    ui.arm = { id, until: Date.now() + 4000 };
+    renderRunBox();
+    setTimeout(renderRunBox, 4000);
+    return;
+  }
+  ui.arm = null;
+  ui.act = { id, op, at: Date.now(), state: 'sent' };
+  renderRunBox();
+  try {
+    await api('POST', `/api/tickets/${encodeURIComponent(id)}/${op}`, op === 'resume' ? {} : undefined);
+    ui.act.state = 'accepted';
+  } catch (e) {
+    Object.assign(ui.act, { state: 'refused', error: e.message });
+    toast(e.message, { title: `${OPS[op]} refused` });
+  }
+  renderRunBox();
+  reloadOpen();
+}
+
+async function loadLog(id) {
+  try {
+    ui.log = { id, lines: (await api('GET', `/api/tickets/${encodeURIComponent(id)}/log?tail=200`)).lines };
+  } catch (e) {
+    ui.log = { id, lines: [], error: e.status === 404 ? 'No run log yet.' : e.message };
+  }
+  renderRunBox();
+  const pre = $('#runbox pre.log');
+  if (pre) pre.scrollTop = pre.scrollHeight;
+}
+
+// The open drawer's ticket, read again (state, lease: the run box shows the outcome). Reads can answer out of order:
+// only the newest one renders. Called on open, after every board load (any ticket event, a reconnect), on the flow's
+// run events and after a click.
+let openSeq = 0;
+async function readOpen() {
+  const id = ui.open;
+  if (!id || !$('#drawer').open) return;
+  const mine = ++openSeq;
+  const f = () => state.flows.find(x => x.id === id) || { id };
+  try {
+    const k = (await api('GET', `/api/tickets/${encodeURIComponent(id)}`)).ticket;
+    if (mine === openSeq && ui.open === id) drawerBody(f(), ui.ticket = k);
+  } catch (e) {
+    if (mine === openSeq && ui.open === id && !ui.ticket) drawerBody(f(), null, e.message); // else the next read tries again
+  }
+}
+const reloadOpen = debounce(readOpen, 200);
+
 async function openTicket(id) {
-  const f = state.flows.find(x => x.id === id) || { id };
-  drawerBody(f, null);
+  if (ui.open !== id) Object.assign(ui, { log: null, ticket: null, arm: null });
+  ui.open = id;
+  drawerBody(state.flows.find(x => x.id === id) || { id }, ui.ticket);
   $('#drawer').showModal();
-  try { drawerBody(f, (await api('GET', `/api/tickets/${encodeURIComponent(id)}`)).ticket); }
-  catch (e) { drawerBody(f, null, e.message); }
+  await readOpen();
 }
 $('#drawer').addEventListener('click', e => { if (e.target === e.currentTarget) e.currentTarget.close(); });
+$('#drawer').addEventListener('close', () => { if (!$('#drawer').open) ui.open = null; }); // a late close event never ends a newer open
 
 // ---------- composer ----------
 const mode = () => $('#composer input[name="mode"]:checked').value;
@@ -630,4 +789,10 @@ setTimeout(() => document.body.classList.remove('boot'), 1500);
 if (uiKey) reconnect(); else lockOut(); // no ui_key (first visit after D39, or storage blocked): tb open once more
 // DOM-only refresh of relative times ("in 20 min"); no network
 setInterval(() => { if (document.visibilityState === 'visible' && state && !ui.locked) renderSched(); }, 60000);
+// Run times tick in place each second (last activity, elapsed, tool time); no network, no re-render
+setInterval(() => {
+  if (document.visibilityState !== 'visible') return;
+  for (const e of document.querySelectorAll('[data-ago]')) e.textContent = ago(e.dataset.ago);
+  for (const e of document.querySelectorAll('[data-since]')) e.textContent = span(e.dataset.since);
+}, 1000);
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') load(); });

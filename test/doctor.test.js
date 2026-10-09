@@ -10,7 +10,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { createDoctor } = require('../lib/doctor');
-const { GIT_SAFE } = require('../lib/util');
+const { GIT_SAFE, claudeEnv } = require('../lib/util');
 const realStore = require('../lib/store');
 const { startTbd, runTb } = require('./helpers/tbd');
 
@@ -81,18 +81,18 @@ function fakeStore(claudeBin, tags = {}) {
   return s;
 }
 
-// Temp world: fake HOME (with the D30 node and a fake claude 2.1.292 in the versions dir), TB_HOME, auth file, store.
+// Temp world: fake HOME (with the D30 node and a fake claude 2.1.295 in the versions dir), TB_HOME, auth file, store.
 function world(auth = AUTH.ok) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'doctor-'));
   roots.push(root);
   const home = path.join(root, 'home');
   const tbHome = path.join(root, 'tbhome');
   const authFile = path.join(root, 'auth.json');
-  const bin = path.join(tbHome, 'bin', 'claude-2.1.292');
+  const bin = path.join(tbHome, 'bin', 'claude-2.1.295');
   const node = path.join(home, '.nvm', 'versions', 'node', 'v24.13.0', 'bin', 'node');
   fs.mkdirSync(path.dirname(node), { recursive: true });
   fs.writeFileSync(node, '#!/bin/sh\n', { mode: 0o755 });
-  fakeClaude(path.join(home, '.local', 'share', 'claude', 'versions', '2.1.292'), { authFile });
+  fakeClaude(path.join(home, '.local', 'share', 'claude', 'versions', '2.1.295'), { authFile });
   fakeClaude(bin, { authFile });
   fs.writeFileSync(authFile, JSON.stringify(auth));
   const codesign = fakeCodesign(path.join(root, 'codesign'));
@@ -108,12 +108,12 @@ function world(auth = AUTH.ok) {
 }
 
 describe('auth', () => {
-  test('claude.ai and oauth_token pass; apiKey, logged out, missing binary and an API key in the env fail', async () => {
+  test('claude.ai passes; oauth_token (S2: runs never get the token), apiKey, logged out, missing binary and an API key in the env fail', async () => {
     const w = world();
     const d = w.make();
     assert.deepEqual(w.check(await d.run({}), 'auth'), { name: 'auth', ok: true, detail: 'claude.ai' });
     w.setAuth(AUTH.oauth);
-    assert.equal(w.check(await d.run({}), 'auth').ok, true);
+    assert.match(w.check(await d.run({}), 'auth').detail, /authMethod oauth_token: runs must use the claude\.ai subscription/);
     w.setAuth(AUTH.apiKey);
     const bad = w.check(await d.run({}), 'auth');
     assert.equal(bad.ok, false);
@@ -135,17 +135,30 @@ describe('auth', () => {
     // the claude_bin check still ran `--version` (once per loop pass): with the key stripped from its env
     assert.deepEqual(fs.readFileSync(`${w.bin}.sawkey`, 'utf8').split('\n').slice(0, -1), ['', '']);
   });
+
+  test('the `auth status` child gets the env runs get (util.claudeEnv): allowlist only (S3), OAuth token dropped (S2)', async () => {
+    const w = world();
+    const dump = `${w.bin}.env`;
+    fs.writeFileSync(w.bin, `#!/bin/sh\n[ "$1" = auth ] && env > "${dump}"\n[ "$1" = auth ] && cat "${w.authFile}" || echo "2.1.295 (Claude Code)"\n`, { mode: 0o755 });
+    const kept = { PATH: process.env.PATH, HOME: w.home, LANG: 'en_US.UTF-8', USER: 'irfan', TERM: 'xterm' };
+    const env = { ...kept, CLAUDE_CODE_OAUTH_TOKEN: 'tok-test', NODE_OPTIONS: '--require /x.js', TB_HOME: w.tbHome, AWS_SECRET_ACCESS_KEY: 'aws', OPENAI_API_KEY: 'o', SOME_VAR: '1' };
+    assert.equal(w.check(await w.make({ env }).run({}), 'auth').ok, true);
+    const seen = Object.fromEntries(fs.readFileSync(dump, 'utf8').split('\n').filter(Boolean).map((l) => [l.slice(0, l.indexOf('=')), l.slice(l.indexOf('=') + 1)]));
+    for (const k of ['PWD', 'SHLVL', '_', 'OLDPWD']) delete seen[k]; // set by sh itself
+    assert.deepEqual(seen, { ...kept, DISABLE_AUTOUPDATER: '1' });
+    assert.deepEqual(claudeEnv(env), seen);
+  });
 });
 
 describe('claude_bin, fable_billing, node', () => {
   test('claude_bin: pinned name + matching --version passes; mismatch, unpinned name and missing file fail', async () => {
     const w = world();
     const d = w.make();
-    assert.equal(w.check(await d.run({}), 'claude_bin').detail, `${w.bin} 2.1.292`);
+    assert.equal(w.check(await d.run({}), 'claude_bin').detail, `${w.bin} 2.1.295`);
     fakeClaude(w.bin, { authFile: w.authFile, lie: '2.1.999' });
-    assert.match(w.check(await d.run({}), 'claude_bin').detail, /--version says 2\.1\.999, file name says 2\.1\.292/);
+    assert.match(w.check(await d.run({}), 'claude_bin').detail, /--version says 2\.1\.999, file name says 2\.1\.295/);
     const plain = path.join(w.tbHome, 'bin', 'claude');
-    fakeClaude(plain, { authFile: w.authFile, lie: '2.1.292' });
+    fakeClaude(plain, { authFile: w.authFile, lie: '2.1.295' });
     w.store.config.claude_bin = plain;
     assert.match(w.check(await d.run({}), 'claude_bin').detail, /file name must be claude-<version>/);
     w.store.config.claude_bin = path.join(w.tbHome, 'bin', 'claude-2.1.111');
@@ -189,9 +202,9 @@ describe('pin', () => {
     const st = fs.lstatSync(w.bin);
     assert.ok(st.isFile() && !st.isSymbolicLink(), 'a real file');
     assert.equal(st.mode & 0o777, 0o755);
-    assert.equal(fs.readFileSync(w.bin, 'utf8'), fs.readFileSync(path.join(w.home, '.local', 'share', 'claude', 'versions', '2.1.292'), 'utf8'));
-    assert.equal(spawnSync(w.bin, ['--version'], { encoding: 'utf8' }).stdout.trim(), '2.1.292 (Claude Code)');
-    assert.deepEqual(fs.readdirSync(path.dirname(w.bin)), ['claude-2.1.292'], 'no tmp file left');
+    assert.equal(fs.readFileSync(w.bin, 'utf8'), fs.readFileSync(path.join(w.home, '.local', 'share', 'claude', 'versions', '2.1.295'), 'utf8'));
+    assert.equal(spawnSync(w.bin, ['--version'], { encoding: 'utf8' }).stdout.trim(), '2.1.295 (Claude Code)');
+    assert.deepEqual(fs.readdirSync(path.dirname(w.bin)), ['claude-2.1.295'], 'no tmp file left');
     assert.equal(res.checks[0].name, 'pin', 'pin runs first: the later checks use the new binary');
   });
 
@@ -208,13 +221,13 @@ describe('pin', () => {
     assert.equal(lie.ok, false);
     assert.match(lie.detail, /the copy says "2\.1\.200 \(Claude Code\)", expected 2\.1\.294/);
     assert.equal(fs.existsSync(path.join(w.tbHome, 'bin', 'claude-2.1.294')), false);
-    assert.deepEqual(fs.readdirSync(path.join(w.tbHome, 'bin')).sort(), ['claude-2.1.292', 'claude-2.1.293'], 'no tmp file left');
+    assert.deepEqual(fs.readdirSync(path.join(w.tbHome, 'bin')).sort(), ['claude-2.1.293', 'claude-2.1.295'], 'no tmp file left');
 
     const gone = w.check(await w.make().run({ pin: true, version: '9.9.9' }), 'pin');
     assert.match(gone.detail, /versions\/9\.9\.9 not found/);
     assert.equal(w.store.updates.length, 1, 'a failed pin changes no config');
 
-    for (const body of [{ pin: true, version: '../../etc/x' }, { pin: true, version: '1.2' }, { version: '2.1.292' }, { pin: 'yes' }, { tag: '../x' }, { extra: 1 }, []]) {
+    for (const body of [{ pin: true, version: '../../etc/x' }, { pin: true, version: '1.2' }, { version: '2.1.295' }, { pin: 'yes' }, { tag: '../x' }, { extra: 1 }, []]) {
       await assert.rejects(() => w.make().run(body), is400, JSON.stringify(body));
     }
   });
@@ -224,9 +237,9 @@ describe('pin hardening (H7)', () => {
   const pinned = async (w, extra, body = { pin: true }) => w.check(await w.make(extra).run(body), 'pin');
   const untouched = (w) => {
     assert.deepEqual(w.store.updates, [], 'a refused pin changes no config');
-    assert.equal(fs.existsSync(path.join(w.tbHome, 'bin', 'claude-2.1.292')), false, 'nothing pinned');
+    assert.equal(fs.existsSync(path.join(w.tbHome, 'bin', 'claude-2.1.295')), false, 'nothing pinned');
     assert.deepEqual(fs.readdirSync(path.join(w.tbHome, 'bin')), [], 'no tmp file left');
-    assert.equal(fs.existsSync(`${w.versions}/2.1.292.sawkey`), false, 'the refused copy was never run');
+    assert.equal(fs.existsSync(`${w.versions}/2.1.295.sawkey`), false, 'the refused copy was never run');
   };
   const fresh = () => {
     const w = world();
@@ -236,7 +249,7 @@ describe('pin hardening (H7)', () => {
   };
 
   test('H7 a source that is a symlink, a directory, owned by another uid or writable by group / others is refused before any copy', async () => {
-    const src = (w) => path.join(w.versions, '2.1.292');
+    const src = (w) => path.join(w.versions, '2.1.295');
     let w = fresh();
     fs.renameSync(src(w), path.join(w.root, 'real-claude'));
     fs.symlinkSync(path.join(w.root, 'real-claude'), src(w));
@@ -271,7 +284,7 @@ describe('pin hardening (H7)', () => {
     untouched(w);
     const calls = w.codesign.calls();
     assert.equal(calls.length, 1);
-    assert.match(calls[0], new RegExp(`^--verify --strict ${w.tbHome.replace(/[.]/g, '\\.')}/bin/claude-2\\.1\\.292\\.\\d+\\.tmp$`), 'on the copy, never the source');
+    assert.match(calls[0], new RegExp(`^--verify --strict ${w.tbHome.replace(/[.]/g, '\\.')}/bin/claude-2\\.1\\.295\\.\\d+\\.tmp$`), 'on the copy, never the source');
 
     for (const none of ['not set', '']) {
       w = fresh();
@@ -282,8 +295,8 @@ describe('pin hardening (H7)', () => {
 
     w = fresh();
     assert.equal((await pinned(w)).ok, true);
-    assert.match(w.codesign.calls()[1], /^-dv .*claude-2\.1\.292\.\d+\.tmp$/, 'Team ID read from the copy');
-    assert.equal(fs.existsSync(`${w.versions}/2.1.292.sawkey`), true, 'after a good signature the copy runs --version');
+    assert.match(w.codesign.calls()[1], /^-dv .*claude-2\.1\.295\.\d+\.tmp$/, 'Team ID read from the copy');
+    assert.equal(fs.existsSync(`${w.versions}/2.1.295.sawkey`), true, 'after a good signature the copy runs --version');
   });
 
   test('H7 the first pin records the Team ID in config; later pins must carry the same one or are refused without touching the pinned copy', async () => {
@@ -298,13 +311,13 @@ describe('pin hardening (H7)', () => {
     assert.deepEqual(w.store.updates.at(-1), { claude_bin: path.join(w.tbHome, 'bin', 'claude-2.1.293') }, 'recorded once, not rewritten');
 
     w.codesign.team('ZZZZZ99999');
-    fs.writeFileSync(path.join(w.versions, '2.1.292'), fs.readFileSync(path.join(w.versions, '2.1.292'), 'utf8') + '# changed\n', { mode: 0o755 });
+    fs.writeFileSync(path.join(w.versions, '2.1.295'), fs.readFileSync(path.join(w.versions, '2.1.295'), 'utf8') + '# changed\n', { mode: 0o755 });
     const mismatch = w.check(await d.run({ pin: true }), 'pin');
     assert.equal(mismatch.ok, false);
     assert.match(mismatch.detail, /Team ID ZZZZZ99999 is not the expected Q6L2SF6YDW/);
     assert.equal(w.store.updates.length, 2, 'no config change');
     assert.equal(fs.readFileSync(w.bin, 'utf8'), before, 'the pinned copy is untouched');
-    assert.deepEqual(fs.readdirSync(path.join(w.tbHome, 'bin')).sort(), ['claude-2.1.292', 'claude-2.1.293']);
+    assert.deepEqual(fs.readdirSync(path.join(w.tbHome, 'bin')).sort(), ['claude-2.1.293', 'claude-2.1.295']);
   });
 });
 
@@ -643,8 +656,8 @@ describe('e2e: POST /api/doctor and tb doctor on a real tbd', () => {
   const setup = (authObj) => {
     const authFile = path.join(t.tbHome, 'auth.json');
     fs.writeFileSync(authFile, JSON.stringify(authObj));
-    fakeClaude(path.join(t.tbHome, 'bin', 'claude-2.1.292'), { authFile }); // the default config.claude_bin
-    fakeClaude(path.join(t.home, '.local', 'share', 'claude', 'versions', '2.1.292'), { authFile });
+    fakeClaude(path.join(t.tbHome, 'bin', 'claude-2.1.295'), { authFile }); // the default config.claude_bin
+    fakeClaude(path.join(t.home, '.local', 'share', 'claude', 'versions', '2.1.295'), { authFile });
     const node = path.join(t.home, '.nvm', 'versions', 'node', 'v24.13.0', 'bin', 'node');
     fs.mkdirSync(path.dirname(node), { recursive: true });
     fs.writeFileSync(node, '#!/bin/sh\n', { mode: 0o755 });
@@ -658,7 +671,7 @@ describe('e2e: POST /api/doctor and tb doctor on a real tbd', () => {
     const authFile = setup(AUTH.ok);
     assert.equal((await t.api('POST', '/api/doctor', {}, { 'x-tb-token': undefined })).status, 401);
     assert.equal((await t.api('POST', '/api/doctor', { pin: 'yes' })).status, 400);
-    assert.equal((await t.api('POST', '/api/doctor', { version: '2.1.292' })).status, 400);
+    assert.equal((await t.api('POST', '/api/doctor', { version: '2.1.295' })).status, 400);
     const r = await t.api('POST', '/api/doctor', {});
     assert.equal(r.status, 200);
     assert.deepEqual(r.json.checks.map((c) => [c.name, c.ok]), [['auth', true], ['claude_bin', true], ['fable_billing', true], ['node', true]]);

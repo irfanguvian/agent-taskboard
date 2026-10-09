@@ -139,6 +139,15 @@ test('AC3 transition() saves via store: state + event line + blocked_from; a ref
   assert.equal(onDisk().state, 'planning');
 });
 
+// P3a: the runner sets ticket.waiting (D9 manual, admission reasons); a wait belongs to its state
+test('P3a a state change clears waiting (a cancelled ticket never re-pings a stale wait); an update in place keeps it', async () => {
+  const t = await store.createFlow({ text: 'stale wait', kind: 'code' });
+  const w = { reason: 'manual', since: '2026-10-08T00:00:00.000Z' };
+  await store.updateTicket(t.id, (k) => ({ ...k, state: 'review', waiting: w }));
+  assert.deepEqual((await store.updateTicket(t.id, (k) => ({ ...k, title: 'renamed' }))).waiting, w);
+  assert.equal((await fsm.transition(store, t.id, 'cancelled', 'you')).waiting, null);
+});
+
 // A10
 test('A10 resume from blocked resets rework to 0 and clears blocked_from; blocking alone keeps rework', async () => {
   const t = await store.createFlow({ text: 'resume resets rework', kind: 'code' });

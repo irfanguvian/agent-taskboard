@@ -44,7 +44,9 @@ scan() { match | tee -a "$tmp/hits"; }
 
 # gitleaks: fixed default rules; repo-local config, ignore file and inline allow comments cannot weaken it.
 # Source = the git dir, not the work tree: gitleaks also reads <source>/.gitleaksignore. --text: .gitattributes cannot blind it.
-printf '[extend]\nuseDefault = true\n' > "$tmp/gitleaks.toml"
+# + anthropic-token: every sk-ant- key or OAuth token (gitleaks 8.30 defaults miss sk-ant-oat01-).
+printf '[extend]\nuseDefault = true\n\n[[rules]]\nid = "anthropic-token"\ndescription = "Anthropic key or OAuth token"\nregex = %s\nkeywords = ["sk-ant-"]\n' \
+  "'''sk-ant-[A-Za-z0-9_-]{20,}'''" > "$tmp/gitleaks.toml"
 mkdir "$tmp/noignore"
 gitdir=$(git rev-parse --absolute-git-dir) || die "not a git repo"
 gitleaks git "$gitdir" --log-opts="--text $range" --redact --no-banner --no-color -v --exit-code 99 \

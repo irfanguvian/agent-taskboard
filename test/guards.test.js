@@ -214,3 +214,25 @@ test('G6 path-guard: hardlink to an outside file, `..` segments and symlinked-di
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+test('S1 path-guard + bash-guard: Claude config (.claude/, CLAUDE.md, CLAUDE.local.md) at any depth, any case, through a symlink either way, denied; look-alikes allowed', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'pg-'));
+  try {
+    const root = path.join(tmp, 'root');
+    fs.mkdirSync(path.join(root, 'src'), { recursive: true });
+    fs.symlinkSync('.claude', path.join(root, 'cfg')); // dangling: a write through it creates .claude/
+    fs.mkdirSync(path.join(root, 'sub'));
+    fs.symlinkSync('src', path.join(root, 'sub', '.claude')); // the next run reads sub/.claude → src
+    const edit = (file_path) => check({ cwd: root, tool_name: 'Write', tool_input: { file_path } }, { TB_WRITE_ROOTS: JSON.stringify([root]) });
+    for (const p of ['.claude/settings.json', 'pkg/.Claude/skills/x/SKILL.md', 'docs/CLAUDE.md', 'claude.local.md', 'cfg/settings.json', 'sub/.claude/agents/a.md']) {
+      assert.match(edit(p)?.permissionDecisionReason ?? 'allowed', /^path-guard: .*Claude config/, p);
+    }
+    for (const p of ['src/claude.ts', 'notclaude.md', '.claude-plugin/plugin.json', 'src/CLAUDE.md.bak']) assert.equal(edit(p), null, p);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+  for (const c of ["echo '{}' > .claude/settings.json", 'mkdir -p pkg/.CLAUDE/skills', 'cp notes sub/CLAUDE.md', 'sh -c "tee CLAUDE.local.md"']) {
+    assert.match(guard(c, {})?.deny ?? 'allowed', /Claude config/, c);
+  }
+  for (const c of ['cat src/claude.ts', 'ls .claude-plugin', 'npm test -- claude.md.test.js']) assert.equal(guard(c, {})?.deny, undefined, c);
+});

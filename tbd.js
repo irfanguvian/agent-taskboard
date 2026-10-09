@@ -13,6 +13,7 @@ const { createNotifier } = require('./lib/notify');
 const { createMonitor } = require('./lib/monitor');
 const doctor = require('./lib/doctor');
 const { createSlots } = require('./lib/slots');
+const { createRunner } = require('./lib/runner');
 
 function die(msg) {
   console.error(`error: ${msg}`);
@@ -33,6 +34,7 @@ const server = createServer();
 let notifier;
 let monitor;
 let slots;
+let runner;
 let stopping = false;
 
 async function stop(code = 0) {
@@ -41,6 +43,7 @@ async function stop(code = 0) {
   monitor?.stop();
   server.close();
   server.closeAllConnections();
+  await runner?.stop(); // runs keep going: the next tbd re-attaches them
   await slots?.stop();
   await store.flush();
   await store.releasePid();
@@ -69,7 +72,13 @@ function boot() {
   doctor.start({ notifier, monitor }); // login re-check every 30 min and after a wake
   // socket before "tbd listening": tbx and hooks can talk once it is printed
   slots.start().then(() => {
-    ready(notifier, monitor); // throws on an unreadable session file: caught below, clean stop(1)
+    runner = createRunner({
+      store, slots, tbHome: process.env.TB_HOME || path.join(os.homedir(), '.taskboard'), port: /** @type {import('node:net').AddressInfo} */ (server.address()).port,
+      system: () => monitor?.snapshot() ?? null, alert: notifier.alert, probe: () => monitor.probeNet(), // D31: timeout + breaker
+    });
+    monitor.on('wake', (e) => runner.wake(e)); // §8 sleep: the OS wake carries the slept time; a wall jump alone is a hint
+    runner.start(); // re-attaches live leases, then starts runs (after the socket: TBX_RUN keys work from the first second)
+    ready(notifier, monitor, runner); // throws on an unreadable session file: caught below, clean stop(1)
     console.log(`tbd listening ${/** @type {import('node:net').AddressInfo} */ (server.address()).port}`);
   }).catch((e) => { console.error(`error: ${e.message}`); stop(1); });
 }

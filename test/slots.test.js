@@ -241,10 +241,12 @@ test('F2 caps: 256 subagent sessions, 32 lock names, 64 waiters, 128 connections
   const slots = await local(t);
   const ask = (msg) => call(slots.sock, msg, { timeoutMs: 2000 });
   const res = [];
-  for (let i = 0; i < 300; i++) res.push(await ask({ op: 'subagent.request', session: `s${i}` }));
+  // over 75 run keys, 4 sessions each (T2): keyless sessions have their own cap of 8 (next test)
+  const keys = Array.from({ length: 75 }, (_, i) => slots.registerRoot({ pid: process.pid, lstart: 'x', runId: `r${i}` }));
+  for (let i = 0; i < 300; i++) res.push(await ask({ op: 'subagent.request', session: `s${i}`, run: keys[i >> 2] }));
   assert.equal(res.filter((r) => r.ok).length, 256);
   assert.deepEqual(res[299], { ok: false, error: 'too many subagent sessions (max 256)' });
-  assert.deepEqual(await ask({ op: 'subagent.request', session: 's0' }), { ok: true, used: 2 }, 'known session still served');
+  assert.deepEqual(await ask({ op: 'subagent.request', session: 's0', run: keys[0] }), { ok: true, used: 2 }, 'known session still served');
   assert.deepEqual((await ask({ op: 'status' })).subagents, { sessions: 256, alive_total: 0 });
 
   const holder = sleeper(t);
@@ -269,6 +271,14 @@ test('F2 caps: 256 subagent sessions, 32 lock names, 64 waiters, 128 connections
   await assert.rejects(ask({ op: 'status' }), (/** @type {any} */ e) => ['ECONNRESET', 'EPIPE'].includes(e.code)); // closed before or after our write
   idle.splice(0, 8).forEach((c) => c.destroy());
   await until(async () => (await ask({ op: 'status' }).catch(() => ({}))).ok);
+});
+
+test('LOW keyless subagent sessions (no TBX_RUN) are capped at 8: the 9th is refused, a known one still served', async (t) => {
+  const slots = await local(t);
+  const ask = (msg) => call(slots.sock, msg, { timeoutMs: 2000 });
+  for (let i = 0; i < 8; i++) assert.deepEqual(await ask({ op: 'subagent.request', session: `k${i}` }), { ok: true, used: 1 });
+  assert.deepEqual(await ask({ op: 'subagent.request', session: 'k8' }), { ok: false, error: 'too many subagent sessions without a run key (max 8)' });
+  assert.deepEqual(await ask({ op: 'subagent.request', session: 'k0' }), { ok: true, used: 2 });
 });
 
 // F3
@@ -382,6 +392,31 @@ test('N4 a flood of unknown pids costs one coalesced fresh ps, not one per acqui
   await call(slots.sock, { op: 'slot.release', lease: got.lease, nonce });
 });
 
+// F4 (P2 carry): what would break silently. A local TZ in lstart would make every run look dead (pid + start time)
+// after a TZ change; no cache, a ps per caller; no timeout, a hung ps stalls every runner tick.
+test('F4 procs(): one ps per 500 ms for every caller (cached, single flight); lstart in C locale + UTC whatever TZ tbd has; ps timeout 5 s', async (t) => {
+  const shPath = require.resolve('../lib/sh');
+  const slotsPath = require.resolve('../lib/slots');
+  const [realSh, realSlots] = [require.cache[shPath].exports, require.cache[slotsPath]];
+  const ps = [];
+  require.cache[shPath].exports = (file, args, opts) => { if (file === '/bin/ps') ps.push(opts); return realSh(file, args, opts); };
+  delete require.cache[slotsPath];
+  let counted;
+  try { counted = require('../lib/slots'); } finally { require.cache[shPath].exports = realSh; require.cache[slotsPath] = realSlots; }
+  const tz = process.env.TZ;
+  process.env.TZ = 'Pacific/Kiritimati'; // UTC+14: a local start time would show another hour (and date)
+  t.after(() => { if (tz === undefined) delete process.env.TZ; else process.env.TZ = tz; });
+  const [a, b] = await Promise.all([counted.procs(), counted.procs()]);
+  assert.equal(a, b, 'one scan for both callers');
+  assert.equal((await counted.procs()), a, 'and for a caller within 500 ms');
+  assert.deepEqual(ps.map((o) => o.timeout), [5000], 'one ps run, with a 5 s timeout');
+  const utc = require('node:child_process').execFileSync('/bin/ps', ['-o', 'lstart=', '-p', String(process.pid)], { env: { ...process.env, TZ: 'UTC', LC_ALL: 'C' }, encoding: 'utf8' });
+  assert.equal(a.get(process.pid).lstart, utc.trim().replace(/\s+/g, ' '));
+  await new Promise((r) => setTimeout(r, 550));
+  await counted.procs();
+  assert.equal(ps.length, 2, 'a new scan once the cache is 500 ms old');
+});
+
 // N5 (at cap with every session spawned ≥ 1 → refused: F2 caps test)
 test('N5 subagent sessions are per run key; at the cap a new session evicts the oldest one that never spawned', async (t) => {
   const slots = await local(t);
@@ -391,11 +426,12 @@ test('N5 subagent sessions are per run key; at the cap a new session evicts the 
   for (let i = 1; i <= 3; i++) assert.deepEqual(await ask({ op: 'subagent.request', session: 'same', run: key }), { ok: true, used: i });
   assert.deepEqual(await ask({ op: 'subagent.request', session: 'same' }), { ok: true, used: 1 }, 'same id outside the run: own budget');
   assert.deepEqual(await ask({ op: 'subagent.request', session: 'same', run: 'e'.repeat(32) }), { ok: false, error: 'unknown run key (wrong, or the run ended)' });
-  for (let i = 0; i < 254; i++) assert.equal((await ask({ op: 'subagent.start', session: `idle${i}` })).ok, true); // 256 sessions now
+  const idle = Array.from({ length: 64 }, (_, i) => slots.registerRoot({ pid: process.pid, lstart: 'x', runId: `i${i}` })); // 4 sessions per key (T2), keyless capped at 8
+  for (let i = 0; i < 254; i++) assert.equal((await ask({ op: 'subagent.start', session: `idle${i}`, run: idle[i >> 2] })).ok, true); // 256 sessions now
   assert.deepEqual(await ask({ op: 'subagent.request', session: 'late' }), { ok: true, used: 1 });
   const kept = Object.keys(JSON.parse(fs.readFileSync(path.join(path.dirname(slots.sock), 'slots.json'), 'utf8')).subagents);
   assert.equal(kept.length, 256);
-  assert.ok(!kept.includes('tbd:idle0') && kept.includes('tbd:idle1') && kept.includes('tbd:late') && kept.includes('r5:same'), 'oldest never-spawned evicted');
+  assert.ok(!kept.includes('i0:idle0') && kept.includes('i0:idle1') && kept.includes('tbd:late') && kept.includes('r5:same'), 'oldest never-spawned evicted');
 });
 
 // N6
@@ -469,4 +505,82 @@ test('N11 release needs the lease and the acquirer\'s nonce, or for a lease take
     assert.deepEqual(await ask({ op: 'lock.release', lease: lock.lease, ...proof }), { ok: false, error: 'release needs the holder pid and lstart' });
   }
   assert.deepEqual(await ask({ op: 'lock.release', lease: lock.lease, pid: a.pid, lstart }), { ok: true });
+});
+
+// P3a T2 (P2 LOW 3)
+test('T2 one run holds at most 4 subagent sessions: a 5th is refused, other runs and tbd sessions unaffected', async (t) => {
+  const slots = await local(t);
+  const holder = sleeper(t);
+  const lstart = (await procs(true)).get(holder.pid).lstart;
+  const a = slots.registerRoot({ pid: holder.pid, lstart, runId: 'ra' });
+  const b = slots.registerRoot({ pid: holder.pid, lstart, runId: 'rb' });
+  const ask = (msg) => call(slots.sock, msg, { timeoutMs: 2000 });
+  for (let i = 1; i <= 4; i++) assert.deepEqual(await ask({ op: 'subagent.request', session: `s${i}`, run: a }), { ok: true, used: 1 });
+  const full = { ok: false, error: 'too many subagent sessions for this run (max 4)' };
+  assert.deepEqual(await ask({ op: 'subagent.request', session: 's5', run: a }), full);
+  assert.deepEqual(await ask({ op: 'subagent.start', session: 's5', run: a }), full);
+  assert.deepEqual(await ask({ op: 'subagent.request', session: 's1', run: a }), { ok: true, used: 2 }, 'a known session is still served');
+  assert.deepEqual(await ask({ op: 'subagent.request', session: 's5', run: b }), { ok: true, used: 1 }, 'another run: own 4');
+  assert.deepEqual(await ask({ op: 'subagent.request', session: 's5' }), { ok: true, used: 1 }, 'no run key: tbd session');
+  assert.deepEqual([slots.usage('ra'), slots.usage('rb')], [{ alive: 0, spawned: 5 }, { alive: 0, spawned: 1 }]);
+});
+
+// P3a re-attach: a run keeps its TBX_RUN key across a tbd restart
+test('P3a run roots survive a restart (sha256 in slots.json, live pid + lstart only); registerRoot takes the key the run was spawned with', async (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'sl-'));
+  let s2 = null;
+  t.after(async () => { await s2?.stop(); fs.rmSync(home, { recursive: true, force: true }); }); // stop (last save) before rm
+  const opts = { tbHome: home, config: {}, kill: () => {}, exec: async () => ({ err: null, stdout: '', stderr: '' }) };
+  const holder = sleeper(t);
+  const lstart = (await procs(true)).get(holder.pid).lstart;
+  const [key, reused] = ['ab'.repeat(16), 'cd'.repeat(16)];
+  const s1 = createSlots(opts);
+  await s1.start();
+  assert.equal(s1.registerRoot({ pid: holder.pid, lstart, runId: 'live', key }), key);
+  s1.registerRoot({ pid: holder.pid, lstart: 'Thu Jan  1 00:00:00 1970', runId: 'reused', key: reused });
+  assert.throws(() => s1.registerRoot({ pid: holder.pid, lstart, runId: 'x', key: 'short' }), /key must be 32 hex/);
+  await s1.stop();
+  const text = fs.readFileSync(path.join(home, 'slots.json'), 'utf8');
+  assert.ok(!text.includes(key) && !text.includes(reused), 'keys saved as sha256 only');
+  s2 = createSlots(opts);
+  await s2.start();
+  const ask = (msg) => call(path.join(home, 'tbd.sock'), msg, { timeoutMs: 2000 });
+  const unknown = { ok: false, error: 'unknown run key (wrong, or the run ended)' };
+  assert.deepEqual(await ask({ op: 'subagent.request', session: 's', run: key }), { ok: true, used: 1 });
+  assert.deepEqual(await ask({ op: 'subagent.request', session: 's', run: reused }), unknown, 'root pid lives with another start time: dropped');
+  s2.unregisterRoot('live');
+  assert.deepEqual(await ask({ op: 'subagent.request', session: 's', run: key }), unknown);
+});
+
+// P3b: the wall cap excludes a run's heavy-slot wait (spec §4, §8); liveness "waiting" while any of its processes waits
+test('P3b waits(runId): heavy-slot wait of a run (finished + still waiting); a lock wait only flags waiting; dropped with the root', async (t) => {
+  const slots = await local(t);
+  const [a, b] = [sleeper(t), sleeper(t)];
+  const m = await procs(true);
+  const ka = slots.registerRoot({ pid: a.pid, lstart: m.get(a.pid).lstart, runId: 'ra' });
+  const kb = slots.registerRoot({ pid: b.pid, lstart: m.get(b.pid).lstart, runId: 'rb' });
+  const ask = (msg) => call(slots.sock, msg, { timeoutMs: 5000 });
+  const [na, nb] = ['a1'.repeat(16), 'b1'.repeat(16)];
+  const held = await ask({ op: 'slot.acquire', pid: a.pid, run: ka, nonce: na });
+  const queued = ask({ op: 'slot.acquire', pid: b.pid, run: kb, nonce: nb });
+  await until(() => slots.waits('rb').waiting);
+  await new Promise((r) => setTimeout(r, 300));
+  const mid = slots.waits('rb');
+  assert.ok(mid.waiting && mid.wait_ms >= 300, `still waiting: ${JSON.stringify(mid)}`);
+  assert.ok(slots.waits('ra').wait_ms < 100 && !slots.waits('ra').waiting, 'the holder got it at once');
+  await ask({ op: 'slot.release', lease: held.lease, nonce: na });
+  const got = await queued;
+  const done = slots.waits('rb');
+  assert.ok(got.ok && !done.waiting && done.wait_ms >= mid.wait_ms, JSON.stringify(done));
+  await new Promise((r) => setTimeout(r, 200));
+  assert.equal(slots.waits('rb').wait_ms, done.wait_ms, 'a finished wait stops growing');
+  const lock = await ask({ op: 'lock.acquire', name: 'qa:x', pid: a.pid, run: ka, nonce: na });
+  const lockWait = ask({ op: 'lock.acquire', name: 'qa:x', pid: b.pid, run: kb, nonce: nb });
+  await until(() => slots.waits('rb').waiting);
+  await new Promise((r) => setTimeout(r, 200));
+  assert.equal(slots.waits('rb').wait_ms, done.wait_ms, 'a lock wait is not slot wait');
+  await ask({ op: 'lock.release', lease: lock.lease, nonce: na });
+  await lockWait;
+  slots.unregisterRoot('rb');
+  assert.deepEqual(slots.waits('rb'), { wait_ms: 0, waiting: false });
 });
