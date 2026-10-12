@@ -467,7 +467,7 @@ describe('tag checks', () => {
     }
   });
 
-  test('H8 tag checks get PATH, HOME, TMPDIR, LANG and TBD_SOCK only; no key, token or other variable of the daemon', async () => {
+  test('H8 tag checks get PATH (tbd\'s pinned node first), HOME, TMPDIR, LANG and TBD_SOCK only; no key, token or other variable of the daemon', async () => {
     const w = repoWorld({}, { withGit: false });
     const dump = path.join(w.root, 'env.txt');
     const tbx = path.join(w.root, 'tbx-env');
@@ -478,8 +478,10 @@ describe('tag checks', () => {
     const shellAdds = ['PWD', 'SHLVL', '_', 'OLDPWD'];
     const strip = (e) => Object.fromEntries(Object.entries(e).filter(([k]) => !shellAdds.includes(k)));
 
-    await w.doctor({ tbx, env: daemon }).run({ tag: 'acme/api' });
-    assert.deepEqual(strip(seen()), { PATH: daemon.PATH, HOME: w.home, TMPDIR: '/tmp/x', LANG: 'en_US.UTF-8', TBD_SOCK: path.join(w.tbHome, 'tbd.sock') });
+    // the launchd PATH may list another node first (homebrew): the checks run on tbd's own node, like the gates (D30)
+    const node = { path: path.join(w.root, 'pinned', 'bin', 'node'), version: 'v24.13.0' };
+    await w.doctor({ tbx, env: daemon, node }).run({ tag: 'acme/api' });
+    assert.deepEqual(strip(seen()), { PATH: `${path.join(w.root, 'pinned', 'bin')}:${daemon.PATH}`, HOME: w.home, TMPDIR: '/tmp/x', LANG: 'en_US.UTF-8', TBD_SOCK: path.join(w.tbHome, 'tbd.sock') });
 
     await w.doctor({ tbx, env: { ...daemon, TBD_SOCK: '/run/x.sock' } }).run({ tag: 'acme/api' });
     assert.equal(seen().TBD_SOCK, '/run/x.sock', 'an explicit TBD_SOCK is kept');
