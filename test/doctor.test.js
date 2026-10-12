@@ -412,6 +412,10 @@ describe('tag checks', () => {
     w.tag({ checks: { e2e: 'exec sleep 30' } });
     const hung = await w.doctor({ checkTimeoutMs: 1500 }).run({ tag: 'acme/api' });
     assert.match(w.check(hung, 'tag:acme/api:e2e').detail, /timed out after/);
+    // no pinned timeout: doctor takes the gates' own (tags.checkTimeoutMs: config gates.timeout_min here), never a fixed 10 min
+    w.store.config.gates = { timeout_min: { e2e: 0.025 } };
+    const same = await w.doctor().run({ tag: 'acme/api' });
+    assert.match(w.check(same, 'tag:acme/api:e2e').detail, /timed out after 0\.025 min/);
   });
 
   test('a missing tbx is a failed check, not a crash', async () => {

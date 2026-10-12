@@ -77,6 +77,17 @@ test('P5 gateTag: defaults filled; old shapes mapped at read time (checks.openap
   assert.deepEqual(both.protected, [...old.protected, 'src/keys/**'], 'R2 (Irfan 2026-10-11): a tag adds to the defaults, never drops one; no duplicates');
 });
 
+test('check timeouts: one resolver for gates and doctor --tag: tag timeout_min, else config, else the default, under the max hold', () => {
+  /** @type {[string, any, any, number][]} */
+  const rows = [
+    ['unit', {}, {}, 20], ['lint', {}, {}, 10], ['setup', {}, {}, 15], ['nope', {}, {}, 15],
+    ['unit', { timeout_min: { unit: 30 } }, { gates: { timeout_min: { unit: 25 } } }, 30],
+    ['unit', {}, { gates: { timeout_min: { unit: 25 } } }, 25],
+    ['unit', { timeout_min: { unit: 50 } }, { slots: { max_hold_min: 40 } }, 39],
+  ];
+  for (const [key, tag, config, min] of rows) assert.equal(tags.checkTimeoutMs(key, tag, config), min * 60_000, `${key} ${JSON.stringify([tag, config])}`);
+});
+
 test('T1 checkRules: plain files ≤ 8 KB together pass; a link, a missing file or > 8 KB → 400', async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tag-rules-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
