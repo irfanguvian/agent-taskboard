@@ -11,6 +11,8 @@
 ; process (srt): exec/fork, signals + task ports only inside this sandbox
 ; exec allowlist (v2): system + node + worktree node_modules. Map-exec rules sit at the end (later rule wins).
 (allow process-exec (subpath "/bin") (subpath "/usr/bin") (subpath "/usr/libexec") (subpath "${NODE_HOME}") (subpath "${WT}/node_modules") (subpath "${HOME}/.cache/prisma"))
+; git (D-0077): /usr/bin/git is the xcode-select shim; it runs git from the developer dir the link names (system files)
+(allow process-exec (subpath "${DEV_DIR}"))
 (allow process-fork)
 (allow process-info* (target same-sandbox))
 (allow signal (target same-sandbox))
@@ -66,6 +68,9 @@ ${DENY_PORTS}
   (subpath "${HOME}/.npm")
   (subpath "${HOME}/.cache/prisma")
 )
+; git (D-0077): the xcode-select link, its developer dir, xcrun's per-user cache (read only; the gate env sets
+; GIT_CONFIG_GLOBAL=/dev/null, so ~/.gitconfig is never needed)
+(allow file-read* (literal "/private/var/db/xcode_select_link") (subpath "${DEV_DIR}") (regex #"^/private/var/folders/[^/]+/[^/]+/T/xcrun_db$"))
 
 ; denyRead: phase-settings denyPaths read (TB_HOME, live dir, HOME secrets) — one source with the agent settings
 ${DENY_READ}

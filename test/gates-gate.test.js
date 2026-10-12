@@ -181,6 +181,27 @@ test('K5 sandbox: a check reading a fake secret (HOME/.ssh, the tbd token) or wr
   }
 });
 
+test('git in a check (D-0077): /usr/bin/git (the xcode-select shim) runs inside the gate; the global git config is never read', async () => {
+  fs.writeFileSync(path.join(process.env.HOME, '.gitconfig'), '[user]\n\temail = FAKE-GLOBAL@example.invalid\n');
+  try {
+    const probe = [
+      'cd "$TMPDIR" && git init -q r && git -C r -c user.email=t@example.invalid -c user.name=t -c commit.gpgsign=false commit -q --allow-empty -m x && echo "commits=$(git -C r rev-list --count HEAD)"',
+      'git config --global user.email; echo "global rc=$?"',
+      'cat "$HOME/.gitconfig" || echo GITCONFIG-DENIED',
+    ].join('; ');
+    const w = world({ tag: { checks: { unit: probe } } });
+    w.commit({ 'lib/sum.js': SUM_OK });
+    const r = await w.task();
+    const out = r.checks.find((c) => c.check === 'unit').tail;
+    assert.match(out, /^commits=1$/m, out);
+    assert.match(out, /^global rc=1$/m, 'no global config: GIT_CONFIG_GLOBAL=/dev/null');
+    assert.match(out, /GITCONFIG-DENIED/, 'the sandbox, not only the env, keeps ~/.gitconfig out');
+    assert.doesNotMatch(out, /FAKE-GLOBAL|unable to access|xcode-select/);
+  } finally {
+    fs.rmSync(path.join(process.env.HOME, '.gitconfig'), { force: true });
+  }
+});
+
 // ---- output caps + redaction -------------------------------------------------------------------------------------------
 test('output: 5 MB of output → tail ≤ 4 KB (head 1 KB + tail 3 KB), log .gz ≤ 1 MB ending with the tail; env_files values redacted, also split across writes', async () => {
   const big = "node -e \"process.stdout.write(require('crypto').randomBytes(3900000).toString('base64')); process.stdout.write('\\nSECRETV'); setTimeout(() => { process.stdout.write('ALUE-123 end\\n'); process.exitCode = 1; }, 200)\"";
