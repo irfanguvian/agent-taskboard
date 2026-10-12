@@ -6,6 +6,7 @@
   },
   "scripts": {
     "test": "node --test --test-concurrency=1 --test-timeout=120000 'test/*.test.js'",
+    "test:file": "sh -c 'test $# -gt 0 || { echo \"usage: npm run test:file -- <test files>\" >&2; exit 2; }; exec node --test --test-concurrency=1 --test-timeout=120000 \"$@\"' test:file",
     "lint": "./node_modules/.bin/oxlint && node scripts/hidden-chars.js",
     "typecheck": "./node_modules/.bin/tsc --noEmit -p ."
   },
