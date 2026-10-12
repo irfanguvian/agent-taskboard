@@ -13,13 +13,15 @@
 // by leading words, after keywords/VAR=value/env/timeout/nice/nohup/command wrappers, by basename, also inside
 // `sh -c '…'`) to `tbx heavy -- sh -c '<whole command>'`; pins jest --maxWorkers=2, playwright --workers=1.
 // No permissionDecision on a rewrite: the phase's permission rules still judge the rewritten command.
-// Best effort, split on shell operators without parsing quotes: the sandbox is the real wall (D35).
+// Best effort, split on shell operators without parsing quotes (redirects: outside quotes, D-0093): the sandbox is the
+// real wall (D35).
 const path = require('node:path');
 const { run, deny } = require('./io');
 
 const VERBS = 'new|add|set|done|move|rm|promote|assign|answer|approve|reject|scope|pass|resume|restart|cancel|tag|open|notify-test|doctor|gc';
 const STATUS = 'use `tbx status` for read-only system state';
 const SEP = /(&&|\|\||[;&|\n()`])/; // captured: split + join gives the command back unchanged
+const SEP_AT = new RegExp(SEP.source, 'y');
 // Words that run the next command (keywords, env/nice/timeout...), skipped with their options to find the command word.
 const WRAP = new Set(['time', 'exec', '!', '{', 'then', 'do', 'else', 'if', 'elif', 'while', 'until', 'env', 'command', 'nohup', 'timeout', 'nice']);
 const OPT_ARG = new Set(['-u', '-k', '-s', '-n']); // wrapper options with a separate value (env -u, timeout -k/-s, nice -n)
@@ -74,6 +76,38 @@ function rules(env) {
 function tokens(seg) {
   const re = /(?:[^\s'"\\]|\\.?|'[^']*(?:'|$)|"(?:[^"\\]|\\.?)*(?:"|$))+/g;
   return Array.from(seg.matchAll(re), (m) => ({ text: m[0].replace(/["'\\]/g, ''), from: m.index, to: m.index + m[0].length }));
+}
+
+// D-0093: cmd.split(SEP), but cut only outside quotes, so a quoted `()=>{x}` or `a>b` stays one word. null where this
+// reading of the quotes could part from the shell's (the caller then cuts at every SEP, as before: fail closed): an
+// open quote, a comment, a heredoc, $'…', a backtick, or $( ${ $[ inside "…" (bash honours '…' in "${x#'"'}").
+function cut(cmd) {
+  const out = [];
+  let from = 0;
+  for (let i = 0; i < cmd.length; i++) {
+    const c = cmd[i];
+    if (c === '\\') i++;
+    else if (c === "'") {
+      i = cmd.indexOf("'", i + 1);
+      if (i < 0) return null;
+    } else if (c === '"') {
+      for (i++; cmd[i] !== '"'; i++) {
+        if (i >= cmd.length || cmd[i] === '`' || (cmd[i] === '$' && '({['.includes(cmd[i + 1] ?? '-'))) return null;
+        if (cmd[i] === '\\') i++;
+      }
+    } else if (c === '#' || c === '`' || cmd.startsWith('<<', i) || cmd.startsWith("$'", i)) return null;
+    else {
+      SEP_AT.lastIndex = i;
+      const m = SEP_AT.exec(cmd);
+      if (m) {
+        out.push(cmd.slice(from, i), m[0]);
+        from = i + m[0].length;
+        i = from - 1;
+      }
+    }
+  }
+  out.push(cmd.slice(from));
+  return out;
 }
 
 // Index of the command word: past keywords, VAR=value (quoted values are one token) and wrappers with their options.
@@ -170,6 +204,28 @@ function redirectWhy(t, all, k, planning) {
   return null;
 }
 
+// D-0093: redirectWhy over cut(cmd) (a `>` inside quotes is no redirect) and over the scripts a shell (`sh -c`, also
+// behind xargs / find -exec / sudo / setsid) or eval runs: every word after -c or eval, plain quotes off; a word quoted
+// in parts or with a backslash loses every quote and backslash (fail closed).
+function redirects(cmd, planning, depth = 0) {
+  const all = cut(cmd) ?? cmd.split(SEP);
+  for (let k = 0; k < all.length; k += 2) {
+    const t = tokens(all[k]);
+    const why = redirectWhy(t, all, k, planning);
+    if (why) return why;
+    const h = head(t);
+    const s = t.findIndex((x, j) => j >= h && (SHELLS.has(base(x.text)) || x.text === 'eval'));
+    if (depth >= 3 || s < 0) continue;
+    const c = t[s].text === 'eval' ? s : t.findIndex((x, j) => j > s && /^-[a-z]*c[a-z]*$/i.test(x.text));
+    for (const x of c >= 0 ? t.slice(c + 1) : []) {
+      const raw = all[k].slice(x.from, x.to);
+      const r = redirects(/^('[^']*'|"[^"\\]*")$/.test(raw) ? raw.slice(1, -1) : x.text, planning, depth + 1);
+      if (r) return r;
+    }
+  }
+  return null;
+}
+
 // Why a simple command (words after the wrappers; env: it had VAR=value before them) is off limits, else null. A reader
 // with env vars in front (GIT_EXTERNAL_DIFF, GIT_CONFIG_*, LESSOPEN) can run a command: no reader then.
 function denyWhy(w, env = false) {
@@ -195,18 +251,18 @@ function planGitWhy(w, env) {
 const pin = (seg, flag, want, to) => (seg.match(flag) ? seg.replace(flag, want) : `${seg.slice(0, to)} ${want}${seg.slice(to)}`);
 
 // Walks the simple commands of cmd (and one level of `sh -c '…'` text per depth) → {heavy, deny, out: cmd with worker pins}.
-// planning: J16's git rules and the S2 redirect rule apply too.
+// planning: J16's git rules apply too. Redirects (and the S2 redirect rule): redirects().
 function scan(cmd, heavy, depth = 0, planning = false, working = false) {
   let isHeavy = false;
   let why = null;
-  const out = cmd.split(SEP).map((seg, i, all) => {
+  const out = cmd.split(SEP).map((seg, i) => {
     if (i % 2) return seg;
     const t = tokens(seg);
     const h = head(t);
     const w = t.slice(h).map((x) => x.text);
     if (heavy.some((p) => base(w[0] ?? '') === base(p[0]) && p.every((x, j) => !j || w[j] === x))) isHeavy = true;
     const env = t.slice(0, h).some((x) => /^\w+=/.test(x.text));
-    why ??= denyWhy(w, env) ?? (planning ? planGitWhy(w, env) : null) ?? (working && fetchRun(w) ? FETCH_RUN : null) ?? redirectWhy(t, all, i, planning);
+    why ??= denyWhy(w, env) ?? (planning ? planGitWhy(w, env) : null) ?? (working && fetchRun(w) ? FETCH_RUN : null);
     if (depth < 3 && SHELLS.has(base(w[0] ?? ''))) {
       const c = w.findIndex((x, j) => j && /^-[a-z]*c[a-z]*$/i.test(x));
       const inner = c > 0 ? t[h + c + 1] : null;
@@ -245,7 +301,8 @@ function guard(command, env = process.env) {
     return { deny: 'bash-guard: planning only reads: no export/declare or GIT_* variables (they make git run programs)' };
   }
   const r = scan(command, heavyList(env), 0, env.TB_PHASE === 'planning', env.TB_PHASE === 'working');
-  if (r.deny) return { deny: `bash-guard: ${r.deny}` };
+  const why = r.deny ?? redirects(command, env.TB_PHASE === 'planning');
+  if (why) return { deny: `bash-guard: ${why}` };
   // $TB_CODE is expanded by the agent's shell (the runner sets it), so a PATH-shadowed tbx cannot take the slot's place
   const out = r.heavy ? `${env.TB_CODE ? '"$TB_CODE/bin/tbx"' : 'tbx'} heavy -- sh -c '${r.out.replaceAll("'", "'\\''")}'` : r.out;
   return out === command ? null : { command: out };

@@ -286,6 +286,51 @@ test('S3 bash-guard: a glob redirect target is matched in linear time (no RegExp
   for (const c of ['echo hi > out.txt', 'echo hi > out*.log', 'echo hi > ?.md']) assert.equal(guard(c, {}), null, c);
 });
 
+test('D-0093 bash-guard: a `>` inside quotes is no redirect (quoted JS arrows pass); real redirects, quoted sh -c scripts and quoting it cannot read stay denied', () => {
+  for (const c of [
+    `node -e "require('net').connect(5432,'127.0.0.1').on('connect',()=>{console.log('OK')})"`,
+    `node -e 'require("fs").readdirSync(".").forEach((f)=>{console.log(f)})'`,
+    'node -e "console.log([1, 2, 3].filter(x=>x>1))"',
+  ]) {
+    for (const env of [{}, { TB_PHASE: 'planning' }]) assert.equal(guard(c, env), null, `${JSON.stringify(env)} ${c}`);
+  }
+  const DYN = /a redirect target the shell builds/;
+  const CFG = /Claude config/;
+  /** @type {[string, RegExp][]} */
+  const denied = [
+    ['echo hi > ~/.claude/settings.json', CFG],
+    ['echo hi >$HOME/.claude/x', CFG],
+    ['echo hi >{a,b}', DYN],
+    ['echo "a" >~/.claude/x', CFG],
+    ['echo "a\\"b" > ~/.claude/x', CFG],
+    // past the by-name rules: the redirect reader itself
+    ['echo hi >$HOME/x', DYN],
+    ['echo "a" >$F', DYN],
+    ["echo 'a=>b' >{a,b}", DYN],
+    ['echo "a\\"b" > $F', DYN],
+    ['echo "a" > C*.md', CFG],
+    ["sh -c 'true; echo > $F'", DYN], // sh runs the quoted script
+    ["sh -c -- 'true; echo > $F'", DYN],
+    [`sh -c 'x'"; echo > $F; "'y'`, DYN], // a script quoted in parts
+    ['echo "$(cat x > $F)"', DYN], // $( runs inside "…"
+    // eval, or a shell behind xargs / find -exec / sudo / setsid, runs the quoted script too
+    ["eval 'true; echo hi > $F'", DYN],
+    ["builtin eval 'true; > $F'", DYN],
+    ["xargs sh -c 'true; echo hi > $F'", DYN],
+    ["find . -exec sh -c 'true; echo hi > $F' \\;", DYN],
+    ["sudo sh -c 'true; echo hi > $F'", DYN],
+    ["setsid sh -c 'true; > $F'", DYN],
+    // fail closed: quoting the guard does not read is cut at every operator, as before
+    ['node -e "()=>{x}', DYN], // open quote
+    ["node -e '()=>{x}", DYN], // open single quote
+    [`cat <<E\nit's\nE\necho hi > $F\n'`, DYN], // a heredoc body is no quote; bash runs line 4, then fails
+    [`echo $'\\''\necho hi > $F\n'`, DYN], // $'\'' is one quote character; bash runs line 2, then fails
+    [`echo "\${x#'"'}"\necho > $F\n'`, DYN], // bash honours '…' inside "${…}", runs line 2, then fails on line 3
+    [`echo hi # it's\necho > $F\n'`, DYN], // a comment
+  ];
+  for (const [c, why] of denied) assert.match(guard(c, {})?.deny ?? 'allowed', why, c);
+});
+
 test('test isolation: isolatedEnv drops a parent tbd\'s TB_*, TBX_* and TBD_SOCK, so a nested test tbd never sends tbx to the parent', () => {
   const saved = { TBD_SOCK: process.env.TBD_SOCK, TBX_LEASE: process.env.TBX_LEASE };
   Object.assign(process.env, { TBD_SOCK: '/tmp/parent-tbd.sock', TBX_LEASE: 'parent-lease' });
