@@ -62,7 +62,8 @@ async function startTbd({ env = {}, files = {}, tbd = TBD, root: reuse = undefin
   let err = '';
   child.stderr.on('data', (c) => (err += c));
   const port = await new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`tbd did not start in 10 s: ${err}`)), 10_000);
+    // 30 s: under a self/taskboard gate this suite runs niced in the heavy slot (renice 10) and a boot can take > 10 s
+    const timer = setTimeout(() => reject(new Error(`tbd did not start in 30 s: ${err}`)), 30_000);
     child.stdout.on('data', (c) => {
       out += c;
       const m = /tbd listening (\d+)/.exec(out);
