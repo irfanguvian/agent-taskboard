@@ -15,7 +15,7 @@ process.on('exit', () => children.forEach((c) => c.kill('SIGKILL')));
 
 // Inherited env minus every TB_* / TBX_* var, plus the isolated paths and the tbd's test run key (SLOT_ROOT).
 function isolatedEnv({ home, tbHome, port, runKey = undefined }, extra = {}) {
-  const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^TBX?_/.test(k)));
+  const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^TB[DX]?_/.test(k))); // TB_, TBX_, TBD_SOCK: never a parent tbd's
   return { ...env, HOME: home, TB_HOME: tbHome, TB_PORT: String(port), TB_NOTIFY: '0', ...(runKey && { TBX_RUN: runKey }), ...extra };
 }
 

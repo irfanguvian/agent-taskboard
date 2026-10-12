@@ -285,3 +285,14 @@ test('S3 bash-guard: a glob redirect target is matched in linear time (no RegExp
   for (const c of ['cat x > C*.md', 'cat x > CLAU?E.md', 'cat x > a[b].md', `cat x > ${'?'.repeat(201)}`]) assert.match(guard(c, {})?.deny ?? 'allowed', /Claude config/, c);
   for (const c of ['echo hi > out.txt', 'echo hi > out*.log', 'echo hi > ?.md']) assert.equal(guard(c, {}), null, c);
 });
+
+test('test isolation: isolatedEnv drops a parent tbd\'s TB_*, TBX_* and TBD_SOCK, so a nested test tbd never sends tbx to the parent', () => {
+  const saved = { TBD_SOCK: process.env.TBD_SOCK, TBX_LEASE: process.env.TBX_LEASE };
+  Object.assign(process.env, { TBD_SOCK: '/tmp/parent-tbd.sock', TBX_LEASE: 'parent-lease' });
+  try {
+    const e = /** @type {Record<string, string | undefined>} */ (isolatedEnv({ home: '/h', tbHome: '/t', port: 1 }));
+    assert.deepEqual([e.TBD_SOCK, e.TBX_LEASE, e.TB_HOME], [undefined, undefined, '/t']);
+  } finally {
+    for (const [k, v] of Object.entries(saved)) if (v === undefined) delete process.env[k]; else process.env[k] = v;
+  }
+});
