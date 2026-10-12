@@ -179,12 +179,16 @@ describe('list', () => {
     }
     const calls = fs.readFileSync(log, 'utf8').split('ARGV ').slice(1);
     // S1 (P4 security review; was rev-parse + worktree remove run inside each worktree = 6): one prune per worktree whose
-    // ticket recorded its repo (t_done01, t_canc01), from that common dir; the orphan (no ticket) gets none
-    assert.equal(calls.length, 2, 'one worktree prune per worktree with a known repo');
+    // ticket recorded its repo (t_done01, t_canc01), from that common dir; the orphan (no ticket) gets none. P5 contract
+    // change (R1 M13: gc deletes tb branches + refs/tb): + one ref list of that repo per gc list (list, and remove's fresh one)
+    const ends = (c, s) => c.split('\n')[0].endsWith(s);
+    const PRUNE = ' worktree prune';
+    const REFS = ' for-each-ref --format=%(refname) refs/heads/tb refs/tb';
+    assert.deepEqual([calls.filter((c) => ends(c, PRUNE)).length, calls.filter((c) => ends(c, REFS)).length, calls.length], [2, 2, 4], 'one worktree prune per worktree with a known repo, one ref list per gc list');
     for (const c of calls) {
       const [argv, ...env] = c.split('\n').filter(Boolean);
       assert.ok(argv.startsWith(`${GIT_SAFE.join(' ')} `), argv);
-      assert.ok(argv.endsWith(' worktree prune') && argv.includes(`--git-dir ${w.tickets[0].common_dir}`) && !argv.includes(' -C '), `no git inside a worktree: ${argv}`);
+      assert.ok((argv.endsWith(PRUNE) || argv.endsWith(REFS)) && argv.includes(`--git-dir ${w.tickets[0].common_dir}`) && !argv.includes(' -C '), `no git inside a worktree: ${argv}`);
       const keys = env.map((l) => l.slice(4, l.indexOf('=')));
       assert.deepEqual(keys.filter((k) => !['PWD', 'SHLVL', '_', 'OLDPWD'].includes(k)).sort(), ['GIT_CONFIG_GLOBAL', 'GIT_CONFIG_NOSYSTEM', 'GIT_NO_REPLACE_OBJECTS', 'HOME', 'LANG', 'PATH', 'TMPDIR'].filter((k) => keys.includes(k)), 'no GITHUB_TOKEN or other daemon variable');
       assert.ok(env.includes('ENV GIT_CONFIG_GLOBAL=/dev/null') && env.includes('ENV GIT_CONFIG_NOSYSTEM=1'));
@@ -324,6 +328,40 @@ describe('remove', () => {
   });
 });
 
+// ---- P5 (contract R1 M13): tb branches + refs/tb ------------------------------------------------------------------
+describe('branches + refs', () => {
+  test('lists a cancelled ticket\'s tb/<id>-* branches (name checked, unmerged commits counted) and refs/tb/<id>/* of done / cancelled ones; deletes only confirmed ids, a checked-out branch after its worktree; never an active ticket\'s', async () => {
+    const w = world();
+    const commit = (msg) => git(w.dev, '-c', 'user.email=t@example.invalid', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', 'commit', '-q', '--allow-empty', '-m', msg);
+    git(w.dev, 'switch', '-q', '-c', 'tb/t_canc01-old-work');
+    commit('one');
+    commit('two');
+    git(w.dev, 'switch', '-q', 'main');
+    for (const b of ['tb/t_canc01-merged', 'tb/t_canc01-Bad_Name', 'tb/t_work01-x', 'tb/t_done01-x']) git(w.dev, 'branch', b, 'main');
+    for (const r of ['refs/tb/t_canc01/T1-a1', 'refs/tb/t_canc01/replan-1-wip', 'refs/tb/t_done01/replan-1', 'refs/tb/t_work01/T1-a1']) git(w.dev, 'update-ref', r, 'main');
+    git(path.join(w.tbHome, 'worktrees', 't_canc01'), 'switch', '-q', '-c', 'tb/t_canc01-wt'); // the cancelled ticket's worktree is on its branch
+    const refs = () => git(w.dev, 'for-each-ref', '--format=%(refname)').split('\n').filter(Boolean);
+
+    const items = (await w.gc.list({ limit: 100 })).items.filter((i) => i.kind === 'branch' || i.kind === 'refs');
+    assert.deepEqual(items.map((i) => [i.id, i.reason, i.bytes]), [
+      ['branch/tb/t_canc01-merged', 'ticket cancelled · 0 unmerged commits', null],
+      ['branch/tb/t_canc01-old-work', 'ticket cancelled · 2 unmerged commits', null],
+      ['branch/tb/t_canc01-wt', 'ticket cancelled · 0 unmerged commits', null],
+      ['refs/t_canc01', 'ticket cancelled · 2 refs', null],
+      ['refs/t_done01', 'ticket done · 1 ref', null],
+    ], 'no bad name, no active ticket\'s, no done ticket\'s branch');
+
+    const alone = await w.gc.remove({ ids: ['branch/tb/t_canc01-wt'] });
+    assert.deepEqual(alone.deleted, []);
+    assert.match(alone.skipped[0].reason, /checked out|used by worktree/, 'git refuses a branch its worktree still has');
+    const r = await w.gc.remove({ ids: ['branch/tb/t_canc01-wt', 'branch/tb/t_canc01-old-work', 'refs/t_canc01', 'worktree/t_canc01', 'refs/t_done01', 'branch/tb/t_canc01-Bad_Name', 'branch/tb/t_work01-x', 'refs/t_work01'] });
+    assert.deepEqual(r.deleted.map((d) => d.id), ['refs/t_canc01', 'worktree/t_canc01', 'refs/t_done01', 'branch/tb/t_canc01-wt', 'branch/tb/t_canc01-old-work'], 'branches last');
+    assert.deepEqual(r.skipped.map((s) => s.reason), Array(3).fill('not in the current gc list'));
+    assert.deepEqual(refs().filter((x) => x.includes('/tb/')).sort(), ['refs/heads/tb/t_canc01-Bad_Name', 'refs/heads/tb/t_canc01-merged', 'refs/heads/tb/t_done01-x', 'refs/heads/tb/t_work01-x', 'refs/tb/t_work01/T1-a1']);
+    assert.equal(w.intact(), true);
+  });
+});
+
 // ---- real tbd + tb ------------------------------------------------------------------------------------------------
 describe('e2e: GET/POST /api/gc and tb gc on a real tbd', () => {
   let t;
@@ -374,5 +412,7 @@ describe('e2e: GET/POST /api/gc and tb gc on a real tbd', () => {
     assert.equal((await tb('gc', '--delete')).code, 2);
     assert.equal((await tb('gc', '--delete', 'cache/x', '--limit', '5')).code, 2);
     assert.equal((await tb('gc', '--limit', '0')).code, 2);
+    const after = await tb('gc', '--after', 'zzz'); // a page cursor (a value), not eval chaos's --after switch
+    assert.deepEqual([after.code, after.stdout], [0, 'gc[0]: none\n']);
   });
 });

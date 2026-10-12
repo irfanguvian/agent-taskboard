@@ -33,17 +33,17 @@ test('phases: built needs all three files + a handler; prompt.md without them is
   assert.deepEqual({ built: phases.built('code', 'qa'), misconfigured: phases.misconfigured('code', 'qa') }, { built: false, misconfigured: false });
 });
 
-test('phases: default code dir has nothing built → POST /api/flows and promote refused 409', async (t) => {
+test('phases: default dir: code/working built (P5), other kinds not → POST /api/flows and promote refused 409', async (t) => {
   const tbd = await startTbd();
   t.after(() => tbd.stop());
-  for (const kind of ['code', 'research', 'brainstorm', 'design']) {
+  for (const kind of ['research', 'brainstorm', 'design']) {
     const r = await tbd.api('POST', '/api/flows', { text: 'do it', kind });
     assert.equal(r.status, 409);
     assert.deepEqual(r.json, { error: `kind ${kind} not built yet` });
   }
   assert.equal((await tbd.api('POST', '/api/flows', { text: 'do it', kind: 'poetry' })).status, 400);
   const { json } = await tbd.api('POST', '/api/reminders', { title: 'grow me' });
-  assert.equal((await tbd.api('POST', `/api/tickets/${json.reminder.id}/promote`, { kind: 'code' })).status, 409);
+  assert.equal((await tbd.api('POST', `/api/tickets/${json.reminder.id}/promote`, { kind: 'brainstorm' })).status, 409);
   assert.equal((await tbd.api('GET', '/api/state')).json.reminders.length, 1, 'refused promote keeps the reminder');
   assert.deepEqual(fs.readdirSync(path.join(tbd.tbHome, 'tickets')), []);
 });

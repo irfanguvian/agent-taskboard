@@ -25,7 +25,8 @@ let trusted = false; // tbd proved itself and the stream has not dropped since: 
 let wait = 1000; // reconnect backoff, ms (max 30 s)
 const ui = { drag: null, editing: null, tray: null, promote: null, pick: { kind: KINDS[0], tag: '' }, dirty: false, tags: [], tagsLoaded: false, locked: false,
   runs: new Map(), open: null, ticket: null, log: null, act: null, arm: null, // runs: id → `run` event; open: the drawer's flow id + its ticket, log tail, last action, Cancel / Approve armed
-  round: null, plan: null, drafts: new Map(), busy: new Map(), err: null }; // the open ticket's newest planning round and frozen plan, Clarify / Reject drafts (`${id}:${n}` → draft), planning action in flight (id → role), its refusal
+  round: null, plan: null, drafts: new Map(), busy: new Map(), err: null, // the open ticket's newest planning round and frozen plan, Clarify / Reject drafts (`${id}:${n}` → draft), planning action in flight (id → role), its refusal
+  csrf: null, ask: null, gates: null, ivs: null, fb: null, pass: null, phase: new Map() }; // P5: synchronizer token, the open working ask, gate / intervention pages + a feedback file (on demand), the pass check, Resume's phase pick (id → phase)
 
 // ---------- helpers ----------
 const $ = (s, r = document) => r.querySelector(s);
@@ -56,6 +57,7 @@ function el(tag, attrs, ...kids) {
 const BIDI = /[\u061C\u200B-\u200F\u202A-\u202E\u2060\u2066-\u2069\uFEFF]/g;
 const vis = s => String(s ?? '').replace(BIDI, c => `[U+${c.codePointAt(0).toString(16).toUpperCase().padStart(4, '0')}]`);
 const debounce = (fn, ms) => { let t; return () => { clearTimeout(t); t = setTimeout(fn, ms); }; };
+const isObj = v => v !== null && typeof v === 'object' && !Array.isArray(v);
 const safe = fn => { try { return fn(); } catch { return undefined; /* storage blocked */ } };
 
 // ---------- theme ----------
@@ -94,9 +96,11 @@ function toast(msg, { kind = 'error', title } = {}) {
   setTimeout(() => t.remove(), kind === 'error' ? 10000 : 7000);
 }
 
+// P5: every change sends the session's synchronizer token (X-TB-CSRF), read once per trusted connection.
 async function api(method, path, body) {
   if (!trusted) throw Object.assign(new Error('tbd is not reachable.'), { status: 0 });
-  const init = { method, headers: {} };
+  if (method !== 'GET' && !ui.csrf) ui.csrf = (await api('GET', '/api/session/csrf')).csrf;
+  const init = { method, headers: method === 'GET' ? {} : { 'X-TB-CSRF': ui.csrf } };
   if (body) { init.headers['Content-Type'] = 'application/json'; init.body = JSON.stringify(body); }
   let r;
   try {
@@ -177,6 +181,7 @@ async function reconnect() {
       ['Something else answers on this port, and this page stopped before sending it your session. When tbd is back, run ', el('code', null, 'tb open'), ' in Terminal.']);
   }
   trusted = true;
+  ui.csrf = null; // read again: tbd may have a new session since
   ui.runs.clear(); // the stream opens with every current run
   await load(); // events may have been missed while down
   if (!ui.locked) connect();
@@ -194,6 +199,7 @@ function connect() {
   es.addEventListener('reminder', refresh);
   es.addEventListener('ticket', refresh); // load() then re-reads the open drawer too
   es.addEventListener('run', onRun);
+  es.addEventListener('gate', onGate); // P5: {id, task, check, ok}: the open drawer reads its gates again
   es.addEventListener('system', e => {
     try { state.system = JSON.parse(e.data); renderHeader(); } catch { /* ignore malformed frame */ }
   });
@@ -551,7 +557,7 @@ function flowCard(f) {
       el('span', { class: 'chip kind' }, f.kind || DASH),
       f.tag && el('span', { class: 'chip tag', style: `--h:${hue(f.tag)}` }, f.tag),
       f.rework > 0 && el('span', { class: 'chip rework' }, `rework ${f.rework}`)),
-    wait && el('span', { class: 'chip wait' }, `waiting: ${wait}`),
+    wait && el('span', { class: 'chip wait' }, `waiting: ${wait}${wait === 'children' ? ` ${f.waiting.done ?? '?'}/${f.waiting.total ?? '?'}` : ''}`),
     run && runStats(run)));
 }
 
@@ -653,8 +659,13 @@ function drawerBody(f, ticket, error) {
         errLine(f.id, 'assign')),
       st === 'planning' && k.reject_comment && el('p', { class: 'hint' }, 'Your comment on the last plan: ', el('q', null, k.reject_comment)),
       st === 'planning' && k.must_ask && el('p', { class: 'hint' }, 'You asked for more: the planner asks you questions before it plans.'),
-      st === 'clarify' && (r?.kind === 'questions' && Array.isArray(r.questions) ? clarifyForm(f.id, r) : el('p', { class: 'hint' }, 'No open questions found.')),
+      st === 'clarify' && (k.clarify_origin?.phase === 'working' ? askPanel(f.id, k, ui.ask)
+        : r?.kind === 'questions' && Array.isArray(r.questions) ? clarifyForm(f.id, r) : el('p', { class: 'hint' }, 'No open questions found.')),
       st === 'plan_approval' && (plan || el('p', { class: 'hint' }, 'No plan found.')),
+      ['review', 'qa', 'final_gate'].includes(st) && stageActs(f.id, k),
+      isObj(k.work) && workView(f.id, k),
+      isObj(k.work) && gatesView(f.id),
+      k.interventions > 0 && ivsView(f.id),
       family(k),
     ],
     el('section', { id: 'runbox', class: 'runbox', 'aria-labelledby': 'run-h' }, ...runBox(f.id, ticket)),
@@ -681,7 +692,13 @@ function runBox(id, k) {
   const sure = armed(id, 'cancel'); // Cancel's confirm click
   const btn = (op, extra) => el('button', { type: 'button', class: `ghost${op === 'cancel' && sure ? ' armed' : ''}`, 'data-role': op,
     onclick: () => runAction(id, op), ...extra }, op === 'cancel' && sure ? 'Confirm cancel?' : OPS[op]);
+  // from blocked: the phase it blocked in, or an earlier one (tb resume --phase)
+  const at = s => FLOW_COLS.findIndex(([c]) => c === s);
+  const back = st === 'blocked' ? [...AGENT, 'final_gate'].filter(p => at(p) <= at(k.blocked_from) && !(p === 'qa' && k.kind === 'brainstorm')) : [];
   const acts = [
+    back.length > 1 && el('label', { class: 'pick' }, 'Resume in ',
+      el('select', { 'data-role': 'resume-phase', onchange: e => ui.phase.set(id, e.target.value) },
+        ...back.map(p => el('option', { value: p, selected: (ui.phase.get(id) ?? k.blocked_from) === p }, stateLabel(p))))),
     can && btn('resume', { disabled: live, title: live ? 'The run is live. Resume works once it ended.' : null }),
     can && btn('restart'),
     st && st !== 'done' && st !== 'cancelled' && btn('cancel'),
@@ -729,8 +746,10 @@ async function runAction(id, op) {
   ui.act = { id, op, at: Date.now(), state: 'sent' };
   renderRunBox();
   try {
-    await api('POST', `/api/tickets/${encodeURIComponent(id)}/${op}`, op === 'resume' ? {} : undefined);
+    const phase = ui.ticket?.state === 'blocked' && ui.phase.get(id);
+    await api('POST', `/api/tickets/${encodeURIComponent(id)}/${op}`, op === 'resume' ? (phase ? { phase } : {}) : undefined);
     ui.act.state = 'accepted';
+    ui.phase.delete(id);
   } catch (e) {
     Object.assign(ui.act, { state: 'refused', error: e.message });
     toast(e.message, { title: `${OPS[op]} refused` });
@@ -763,6 +782,7 @@ async function readOpen() {
     if (mine === openSeq && ui.open === id) {
       ui.round = j.round ?? null;
       ui.plan = j.plan ?? null;
+      ui.ask = j.ask ?? null;
       drawerBody(flowOf(id), ui.ticket = j.ticket);
     }
   } catch (e) {
@@ -773,7 +793,7 @@ const reloadOpen = debounce(readOpen, 200);
 
 async function openTicket(id) {
   const d = $('#drawer');
-  if (ui.open !== id) Object.assign(ui, { log: null, ticket: null, round: null, plan: null, arm: null, err: null });
+  if (ui.open !== id) Object.assign(ui, { log: null, ticket: null, round: null, plan: null, arm: null, err: null, ask: null, gates: null, ivs: null, fb: null, pass: null });
   ui.open = id;
   drawerBody(flowOf(id), ui.ticket);
   if (!d.open) d.showModal();
@@ -794,37 +814,55 @@ const SENT = { // button role → [label, label while sending, toast title, toas
   approve: ['Approve', 'Approving…', 'Approved', 'Setting up: branch, skills, setup command, child tickets.'],
   reject: ['Reject', 'Sending…', 'Rejected', 'The planner plans again with your comment.'],
   ask: ['Ask me more', 'Sending…', 'Asked for more', 'The planner asks you questions first.'],
+  // P5 (working): every one is a two-click action (armed first)
+  'work-answer': ['Send answer', 'Sending…', 'Answer sent', 'The same session goes on with it.'],
+  replan: ['Replan', 'Sending…', 'Replanning', 'The planner makes a new plan; done tasks it keeps stay done.'],
+  'scope-allow': ['Allow files', 'Sending…', 'Allowed', 'This task may touch them now; the same session goes on.'],
+  'scope-deny': ['Deny files', 'Sending…', 'Denied', 'The agent stays in scope or asks you again.'],
+  'allow-change': ['Allow change', 'Sending…', 'Change allowed', 'The working gate runs again with it allowed.'],
+  'deny-change': ['Deny change', 'Sending…', 'Change denied', 'A fix session reverts it.'],
+  rework: ['Send back', 'Sending…', 'Sent back', 'A fix task works on your feedback.'],
+  pass: ['Pass', 'Passing…', 'Passed', 'tbd recorded your pass.'],
+  'pass-check': ['Check sha', 'Checking…', '', ''],
 };
 const WAIT = {
   setup: 'Setting up the approved plan: branch, env files, skills, the setup command, child tickets.',
   setup_failed: 'Setup failed. The plan stays as approved. Fix the cause, then approve again.',
   assign_failed: 'Auto-assign failed. Fix the cause, then assign it.',
   blocker_cancelled: 'A ticket this one waits for was cancelled. Assign it to go on without it, or cancel this ticket.',
+  // P5: why working blocked (waiting.why says more), then Resume
+  infra: 'Blocked: a gate could not run (infra: a missing tool, a port in use, a timeout over the base run). Fix the cause, then Resume.',
+  integrity: 'Blocked: node_modules or an env file changed since setup (integrity). Check the worktree, then Resume.',
+  config: 'Blocked: the frozen plan or the tag does not match (config). Fix it, then Resume.',
+  work: 'Blocked: the gate stayed red after a resume and a fresh try. Read the gate below, then Resume or Restart.',
+  scope: 'Blocked: the agent asked again for files you denied. Replan or Resume.',
+  rework: 'Blocked: sent back more than twice. Resume resets the count.',
 };
+const BLOCKS = ['infra', 'integrity', 'config', 'work', 'scope', 'rework'];
 const code = s => el('code', null, vis(s));
 const none = () => el('p', { class: 'hint' }, 'None.');
 
 // While a request runs its buttons are aria-disabled, not disabled: keyboard focus stays on them across re-renders.
-function actBtn(id, role, onclick, { cls = 'ghost', label = SENT[role][0] } = {}) {
+function actBtn(id, role, onclick, { cls = 'ghost', label = undefined, sent = role, disabled = false } = {}) {
   const busy = ui.busy.get(id); // one request per ticket; other tickets stay usable
-  return el('button', { type: 'button', class: cls, 'data-role': role, 'aria-disabled': busy ? 'true' : null, onclick: () => { if (!ui.busy.has(id)) onclick(); } },
-    busy === role ? SENT[role][1] : label);
+  return el('button', { type: 'button', class: cls, 'data-role': role, disabled, 'aria-disabled': busy ? 'true' : null, onclick: () => { if (!ui.busy.has(id)) onclick(); } },
+    busy === role ? SENT[sent][1] : label ?? SENT[sent][0]);
 }
 const errLine = (id, ...roles) => ui.err?.id === id && roles.includes(ui.err.role) && el('p', { class: 'err' }, ui.err.text);
 
 // A refusal shows inline (ui.err) and as a toast: the toast region is the one that speaks it. → null when tbd took it,
 // else the refusal text (ui.err may be gone by then: a click elsewhere during the re-read resets it).
-async function post(id, op, body, role = op) {
+async function post(id, op, body, role = op, sent = role) {
   ui.busy.set(id, role);
   ui.err = null;
   redraw();
   try {
     await api('POST', `/api/tickets/${encodeURIComponent(id)}/${op}`, body);
-    toast(SENT[role][3], { kind: 'info', title: SENT[role][2] });
+    toast(SENT[sent][3], { kind: 'info', title: SENT[sent][2] });
     return null;
   } catch (e) {
     ui.err = { id, role, text: e.message };
-    toast(e.message, { title: `${SENT[role][0]} refused` });
+    toast(e.message, { title: `${SENT[sent][0]} refused` });
     return e.message;
   } finally {
     await readOpen(); // the fresh ticket first: with the old one the same buttons would work again (a 2nd click → 409)
@@ -834,12 +872,16 @@ async function post(id, op, body, role = op) {
 }
 
 // waiting reasons the drawer explains (manual, usage, memory…: the Waiting fact says enough)
+// P5: + why working blocked (infra, integrity, config…: waiting.why), children n/m, setup_failed "base red".
 function notice(id, w) {
-  const text = WAIT[w?.reason];
+  const text = w?.reason === 'children' ? `Waiting for its child tickets: ${w.done ?? '?'} of ${w.total ?? '?'} done or cancelled${w.blocked?.length ? `, ${w.blocked.length} blocked` : ''}. It finishes by itself after the last one.` : WAIT[w?.reason];
   if (!text) return null;
-  return el('div', { class: `notice${w.reason.endsWith('_failed') ? ' bad' : ''}` },
+  const why = w.error || w.why;
+  return el('div', { class: `notice${w.reason.endsWith('_failed') || BLOCKS.includes(w.reason) ? ' bad' : ''}` },
     el('p', null, w.reason === 'setup' && el('span', { class: 'spin', 'aria-hidden': 'true' }), text),
-    w.error && el('pre', { class: 'log', 'data-role': 'wait-error', tabindex: '0', 'aria-label': 'Error output, last part' }, vis(w.error)),
+    w.reason === 'setup_failed' && /base red/.test(w.error ?? '') && el('p', null, el('strong', null, 'The base branch is red: '),
+      'a check fails on base_sha itself, before any change. Fix main first (main stays green), then approve again.'),
+    why && el('pre', { class: 'log', 'data-role': 'wait-error', tabindex: '0', 'aria-label': 'Error output, last part' }, vis(why)),
     w.reason === 'setup_failed' && el('div', { class: 'acts' }, actBtn(id, 'approve', () => approve(id, true), { cls: 'primary', label: 'Approve again' })));
 }
 
@@ -860,6 +902,252 @@ function family(k) {
     kids.length && [el('h3', null, 'Child tickets', el('span', { class: 'count' }, `${done}/${kids.length} finished`)), el('ul', { class: 'kids' }, ...kids.map(row))],
   ].filter(Boolean);
   return parts.length ? el('section', { class: 'part', 'aria-label': 'Related tickets' }, ...parts) : null;
+}
+
+// ---------- working in the drawer (P5): asks, rework, pass, tasks, gates, your actions ----------
+// Contract "UI parity in P5": every tb verb and view of a working flow. Gates, interventions and feedback load on demand,
+// paged (GET …/gates, …/interventions, …/feedback/<n>); /api/state is unchanged. Every change is two clicks (armed, as
+// Cancel); pass at the final gate instead wants the short sha typed again. Agent text (questions, notes, file names,
+// gate output, why) reaches the DOM only as text (el() + vis()).
+const secs = ms => (Number.isFinite(ms) ? `${(ms / 1000).toFixed(ms < 10000 ? 1 : 0)} s` : DASH);
+const fact = (k, v) => (v == null || v === '' ? null : [el('dt', null, k), el('dd', null, ...[].concat(v))]);
+const enc = encodeURIComponent;
+
+function twoStep(id, op, send) {
+  if (!armed(id, op)) {
+    arm(id, op);
+    redraw();
+    setTimeout(redraw, 4000);
+    return;
+  }
+  if (early()) return;
+  ui.arm = null;
+  send();
+}
+function armBtn(id, op, role, send, { sent = role, cls = 'ghost', label = SENT[sent][0], disabled = false } = {}) {
+  const sure = armed(id, op);
+  return actBtn(id, role, () => twoStep(id, op, send), { cls: `${cls}${sure ? ' armed' : ''}`, label: sure ? `Confirm: ${label.toLowerCase()}?` : label, sent, disabled });
+}
+const replanBtn = id => armBtn(id, 'replan', 'replan', () => post(id, 'answer', { replan: true }, 'replan'));
+
+const ASKS = {
+  scope: 'Files outside the task', protected: 'A protected file changed', deps: 'Dependencies changed', policy: 'A change the plan does not allow',
+  NEEDS_CONTEXT: 'The agent needs context', TEST_DISPUTES_SPEC: 'A test disputes the spec', noop: 'Done without a change',
+};
+// M12: the open working ask (GET ticket's ask). scope / protected / deps: allow (scope only: RO6) or deny the files;
+// policy: allow or deny each change the gate named; a question: an answer. Replan always.
+function askPanel(id, k, a) {
+  const o = k.clarify_origin || {}, kind = a?.kind || o.class;
+  const files = Array.isArray(a?.files) ? a.files : [], changes = Array.isArray(a?.changes) ? a.changes : [];
+  let acts;
+  if (['scope', 'protected', 'deps'].includes(kind)) {
+    const cli = kind !== 'scope';
+    acts = [files.length ? el('ul', { class: 'plist' }, ...files.map(p => el('li', null, code(p)))) : none(),
+      cli && el('p', { class: 'hint' }, `Only the CLI can allow a ${kind} change: `, code(`tb scope ${id} --allow`), '. Deny works here.'),
+      el('div', { class: 'acts' },
+        armBtn(id, 'scope-allow', 'scope-allow', () => post(id, 'scope', { allow: true }, 'scope-allow'), { disabled: cli }),
+        armBtn(id, 'scope-deny', 'scope-deny', () => post(id, 'scope', { allow: false }, 'scope-deny')), replanBtn(id))];
+  } else if (kind === 'policy') {
+    acts = [changes.length ? el('ul', { class: 'plist' }, ...changes.map((c, i) => el('li', { class: 'change' }, code(c), el('span', { class: 'acts' },
+      armBtn(id, `allow:${i}`, `allow-change-${i}`, () => post(id, 'allow-change', { change: c }, `allow-change-${i}`, 'allow-change'), { sent: 'allow-change' }),
+      armBtn(id, `deny:${i}`, `deny-change-${i}`, () => post(id, 'deny-change', { change: c }, `deny-change-${i}`, 'deny-change'), { sent: 'deny-change' }))))) : none(),
+      el('div', { class: 'acts' }, replanBtn(id))];
+  } else {
+    const key = `${id}:w${k.round}`, d = draftOf(id, `w${k.round}`);
+    const box = el('textarea', { id: 'wa', rows: 3, maxLength: 10000, 'data-role': 'work-text', 'aria-describedby': d.errs.text ? 'wa-err' : null, oninput: e => { d.comment = e.target.value; } });
+    box.value = d.comment;
+    const send = () => {
+      if (!d.comment.trim()) {
+        d.errs.text = 'Write your answer first.';
+        redraw();
+        return $('#drawer [data-role="work-text"]')?.focus();
+      }
+      delete d.errs.text;
+      post(id, 'answer', { text: d.comment.trim() }, 'work-answer').then(err => { if (err == null) ui.drafts.delete(key); });
+    };
+    acts = [el('label', { for: 'wa' }, 'Your answer'), box, d.errs.text && el('p', { class: 'err', id: 'wa-err' }, d.errs.text),
+      el('div', { class: 'acts' }, armBtn(id, 'work-answer', 'work-answer', send, { cls: 'primary' }), replanBtn(id))];
+  }
+  return el('section', { class: 'part ask', 'aria-labelledby': 'ak-h' },
+    el('h3', { id: 'ak-h' }, ASKS[kind] || 'Question', o.task && el('span', { class: 'count' }, 'task ', vis(o.task))),
+    el('p', { class: 'ctext' }, vis(a?.question || a?.reason || o.why || '')),
+    a?.notes && el('p', { class: 'ctext' }, 'Notes: ', vis(a.notes)),
+    a?.online && el('p', { class: 'hint' }, 'The dependency build needs the network: the CLI allow builds it online.'),
+    ...acts,
+    errLine(id, 'work-answer', 'replan', 'scope-allow', 'scope-deny', ...changes.flatMap((_, i) => [`allow-change-${i}`, `deny-change-${i}`])));
+}
+
+// review / qa / final gate while unbuilt (K1 K2): pass it on or send it back. D26 park: pass = push OK.
+function stageActs(id, k) {
+  const st = k.state, parked = st === 'final_gate' && k.waiting?.reason === 'manual', merged = !!k.pr?.merged_at;
+  const next = st === 'review' && k.kind !== 'brainstorm' ? 'qa' : 'final_gate';
+  const d = draftOf(id, 'rw');
+  const box = el('textarea', { id: 'rw', rows: 3, maxLength: 65536, 'data-role': 'rework-text', 'aria-describedby': d.errs.rw ? 'rw-err' : null, oninput: e => { d.comment = e.target.value; } });
+  box.value = d.comment;
+  const back = () => {
+    if (!d.comment.trim()) {
+      d.errs.rw = 'Write what should change.';
+      redraw();
+      return $('#drawer [data-role="rework-text"]')?.focus();
+    }
+    delete d.errs.rw;
+    post(id, 'rework', { feedback: d.comment.trim() }, 'rework').then(err => { if (err == null) ui.drafts.delete(`${id}:rw`); });
+  };
+  return el('section', { class: 'part', 'aria-labelledby': 'sg-h' },
+    el('h3', { id: 'sg-h' }, `${stateLabel(st)}: your call`),
+    !merged && !parked && el('p', { class: 'hint' }, 'While this phase is not built you stand in for it: pass the work on, or send it back with feedback.'),
+    st !== 'final_gate' && el('div', { class: 'acts' }, armBtn(id, 'pass', 'pass', () => post(id, 'pass', {}, 'pass'), { cls: 'primary', label: `Pass to ${stateLabel(next)}` })),
+    parked && [el('p', null, 'The leak scan parked it here: passing is your push OK.'),
+      el('div', { class: 'acts' }, armBtn(id, 'pass', 'pass', () => post(id, 'pass', {}, 'pass'), { cls: 'primary', label: 'Push OK' }))],
+    st === 'final_gate' && !parked && !merged && passForm(id),
+    merged && el('p', { class: 'hint' }, 'Passed with ', code(String(k.pr.sha ?? '').slice(0, 12)), ` at ${when(k.pr.merged_at)}.`),
+    // parked = a BUILT final gate (D26): tbd refuses a rework there (409), so no send-back box
+    !merged && !parked && isObj(k.work) && [el('label', { for: 'rw' }, `Send back to working (sent back ${k.rework ?? 0} times; a 3rd time blocks it)`), box,
+      d.errs.rw && el('p', { class: 'err', id: 'rw-err' }, d.errs.rw), el('div', { class: 'acts' }, armBtn(id, 'rework', 'rework', back))],
+    errLine(id, 'pass', 'pass-check', 'rework'));
+}
+
+// D9: tbd checks the sha (GET …/pass?sha: every M15 check, nothing written); the confirm shows the full sha + its subject
+// and wants the short sha typed again.
+function passForm(id) {
+  if (ui.pass?.id !== id) ui.pass = { id, input: '', typed: '', got: null, err: null };
+  const p = ui.pass, short = p.got?.sha.slice(0, 7);
+  const sha = el('input', { id: 'ps', type: 'text', 'data-role': 'pass-sha', maxLength: 40, autocomplete: 'off', spellcheck: 'false', 'aria-describedby': 'ps-hint',
+    oninput: e => { p.input = e.target.value.trim(); if (p.got) { p.got = null; redraw(); } } }); // a new sha: checked again
+  sha.value = p.input;
+  const check = async () => {
+    if (!/^[0-9a-f]{7,40}$/.test(p.input)) {
+      p.err = 'Type 7-40 lowercase hex characters: the squash commit on the base branch.';
+      return redraw();
+    }
+    ui.busy.set(id, 'pass-check');
+    Object.assign(p, { err: null, got: null, typed: '' });
+    redraw();
+    try { p.got = await api('GET', `/api/tickets/${enc(id)}/pass?sha=${enc(p.input)}`); } catch (e) { p.err = e.message; }
+    ui.busy.delete(id);
+    redraw();
+  };
+  const typed = el('input', { id: 'pt', type: 'text', 'data-role': 'pass-typed', maxLength: 40, autocomplete: 'off', spellcheck: 'false',
+    oninput: e => { p.typed = e.target.value.trim(); const b = $('#drawer [data-role="pass"]'); if (b) b.disabled = p.typed !== short; } });
+  typed.value = p.typed;
+  return el('div', { class: 'part passform' },
+    el('label', { for: 'ps' }, 'Squash commit (sha)'),
+    el('div', { class: 'acts' }, sha, actBtn(id, 'pass-check', check, { label: 'Check sha' })),
+    el('p', { class: 'hint', id: 'ps-hint' }, 'tbd checks it is a commit on the base branch, after base_sha, touching a file the branch changed.'),
+    p.err && el('p', { class: 'err' }, p.err),
+    p.got && el('div', { class: 'notice' },
+      el('p', null, 'Commit ', code(p.got.sha)), el('p', { class: 'ctext' }, vis(p.got.subject || '(no subject)')),
+      el('label', { for: 'pt' }, `Type ${short} to confirm`), typed,
+      el('div', { class: 'acts' }, actBtn(id, 'pass', () => post(id, 'pass', { sha: p.got.sha }, 'pass').then(err => { if (err == null) ui.pass = null; }),
+        { cls: 'primary', label: 'Pass', disabled: p.typed !== short }))));
+}
+
+// Tasks (state, attempt, session mode, verified head), the gate state, base checks, unit ms, rework, replan hashes,
+// feedback-<n>.md on demand.
+function workView(id, k) {
+  const w = k.work, tasks = Array.isArray(w.tasks) ? w.tasks : [], g = isObj(w.gate) ? w.gate : null;
+  const mode = x => (x.status === 'red' ? (w.tries <= 1 ? 'resume' : 'fresh') : x.status === 'running' ? (x.session ? 'continue' : 'fresh') : x.status === 'pending' ? 'fresh' : DASH);
+  const base = isObj(k.base_checks) ? Object.entries(k.base_checks) : [];
+  const hashes = Array.isArray(k.plan_hashes) ? k.plan_hashes : [];
+  const fb = ui.fb?.id === id ? ui.fb : null;
+  return el('section', { class: 'part', 'aria-labelledby': 'wk-h' },
+    el('h3', { id: 'wk-h' }, 'Work', el('span', { class: 'count' }, `${tasks.filter(x => x.status === 'done').length}/${tasks.length} tasks done`)),
+    tasks.length ? el('table', { class: 'dtable wtable' }, el('caption', { class: 'sr' }, 'Tasks: state, attempt, session mode, verified head'),
+      el('thead', null, el('tr', null, ...['Task', 'State', 'Attempt', 'Mode', 'Head'].map(h => el('th', { scope: 'col' }, h)))),
+      el('tbody', null, ...tasks.map(x => el('tr', { class: x.id === w.task ? 'cur' : null, 'aria-current': x.id === w.task ? 'step' : null },
+        el('td', null, code(String(x.id))), el('td', null, el('span', { class: `chip st-${vis(x.status)}` }, vis(x.status))),
+        el('td', null, String(x.attempt ?? DASH)), el('td', null, mode(x)), el('td', null, x.head ? code(String(x.head).slice(0, 12)) : DASH))))) : none(),
+    el('dl', { class: 'facts' },
+      fact('Gate', g && `${vis(g.kind)} gate ${g.ok === undefined ? 'running' : g.ok ? 'green' : `red${g.class ? ` (${vis(g.class)})` : ''}`}${g.n ? ` · #${g.n}` : ''}`),
+      fact('Tries', String(w.tries ?? 0)), fact('Unit', w.unit_ms == null ? null : `${w.unit_ms} ms`),
+      fact('Base checks', base.length ? base.map(([c, x]) => el('span', { class: `chip ${x?.ok ? 'pass' : 'fail'}` }, `${vis(c)} ${x?.ok ? 'ok' : 'red'}${Number.isFinite(x?.ms) ? ` · ${secs(x.ms)}` : ''}`)) : null),
+      fact('Rework', String(k.rework ?? 0)),
+      fact('Plan hashes', hashes.length ? hashes.map(h => el('span', { class: `chip${h === k.plan_hash ? ' cur' : ''}`, title: h === k.plan_hash ? 'the current plan' : 'replaced' }, String(h).slice(0, 12))) : null)),
+    k.rework > 0 && el('div', { class: 'acts' }, el('span', { class: 'hint' }, 'Your feedback:'),
+      ...Array.from({ length: Math.min(k.rework, 10) }, (_, i) => el('button', { type: 'button', class: 'ghost', 'data-role': `fb-${i + 1}`, onclick: () => loadFeedback(id, i + 1) }, `rework ${i + 1}`))),
+    fb && (fb.error ? el('p', { class: 'hint' }, fb.error) : el('pre', { class: 'log', 'data-role': 'feedback', tabindex: '0', 'aria-label': `Your feedback, rework ${fb.n}` }, vis(fb.text))));
+}
+async function loadFeedback(id, n) {
+  try { ui.fb = { id, n, text: (await api('GET', `/api/tickets/${enc(id)}/feedback/${n}`)).text }; } catch (e) { ui.fb = { id, n, error: e.status === 404 ? `No feedback ${n} kept.` : e.message }; }
+  redraw();
+}
+
+// GateResults newest first, 5 a page (tbd caps a page at 64 KB): per check result, time, exit, flaky, full log link,
+// output tail; fail-first verdict + unproven tests, weakening, scope, schema / API changes, allowed_* used / unused, why.
+function gatesView(id) {
+  const g = ui.gates?.id === id ? ui.gates : null;
+  return el('section', { class: 'part', 'aria-labelledby': 'gt-h' },
+    el('div', { class: 'log-head' }, el('h3', { id: 'gt-h' }, 'Gates'),
+      el('button', { type: 'button', class: 'ghost', 'data-role': 'gates', onclick: () => loadGates(id) }, g ? 'Refresh' : 'Show gates')),
+    g && (g.error ? el('p', { class: 'hint' }, g.error) : g.items.length ? g.items.map((x, i) => gateItem(id, x, i === 0, x === g.items.find(y => y.gate === 'working'))) : el('p', { class: 'hint' }, 'No gate ran yet.')),
+    g?.next != null && el('div', { class: 'acts' }, el('button', { type: 'button', class: 'ghost', 'data-role': 'gates-more', onclick: () => loadGates(id, g.next) }, 'Older gates')));
+}
+async function loadGates(id, n) {
+  try {
+    const r = await api('GET', `/api/tickets/${enc(id)}/gates?limit=5${n == null ? '' : `&n=${n}`}`);
+    ui.gates = { id, items: [...(n != null && ui.gates?.id === id ? ui.gates.items : []), ...r.items], next: r.next };
+  } catch (e) { ui.gates = { id, items: [], next: null, error: e.message }; }
+  redraw();
+}
+const refreshGates = debounce(() => { if (ui.open && ui.gates?.id === ui.open) loadGates(ui.open); }, 500);
+function onGate(e) {
+  let d;
+  try { d = JSON.parse(e.data); } catch { return; }
+  if (d?.id === ui.open && ui.gates?.id === d.id) refreshGates();
+}
+
+function gateItem(id, x, newest, latestWorking) {
+  if (x.unreadable) return el('p', { class: 'hint' }, `Gate ${x.n}: unreadable.`);
+  const t = isObj(x.tests) ? x.tests : {}, sc = isObj(x.scope) ? x.scope : {}, checks = Array.isArray(x.checks) ? x.checks.filter(isObj) : [];
+  const list = (label, xs) => (Array.isArray(xs) && xs.length ? fact(label, xs.map(v => code(typeof v === 'string' ? v : v?.path ?? JSON.stringify(v)))) : null);
+  const changes = (label, xs) => (Array.isArray(xs) && xs.length ? [el('h4', null, label), el('ul', { class: 'plist' }, ...xs.filter(isObj).map(c => el('li', null,
+    code(`${c.op} ${c.ref}`), c.dir ? ` (${vis(c.dir)})` : '', ' ', el('span', { class: `chip ${c.allowed ? 'pass' : 'fail'}` }, c.allowed ? 'allowed' : 'not allowed'))))] : null);
+  const unused = new Set(Array.isArray(x.unused_allowed) ? x.unused_allowed : []);
+  const allowed = latestWorking && ui.plan ? [...(ui.plan.allowed_schema_changes ?? []), ...(ui.plan.allowed_api_changes ?? [])] : [];
+  const ff = String(t.failfirst ?? '');
+  return el('details', { class: `gate ${x.ok ? 'ok' : 'red'}`, open: newest },
+    el('summary', null, el('span', { class: 'did' }, `#${x.n}`), ` ${vis(x.gate)} gate`, x.task ? [' · ', code(x.task)] : '', x.attempt ? ` · attempt ${x.attempt}` : '', ' ',
+      el('span', { class: `chip ${x.ok ? 'pass' : 'fail'}` }, x.ok ? 'green' : `red${x.class ? `: ${vis(x.class)}` : ''}`), x.ms != null ? ` · ${secs(x.ms)}` : '', x.truncated ? ' · cut to fit' : ''),
+    checks.length ? el('table', { class: 'dtable ctable' }, el('caption', { class: 'sr' }, `Gate ${x.n}: checks`),
+      el('thead', null, el('tr', null, ...['Check', 'Result', 'Time', 'Exit', 'Log'].map(h => el('th', { scope: 'col' }, h)))),
+      el('tbody', null, ...checks.map(c => el('tr', null,
+        el('td', null, code(c.check ?? '?')),
+        el('td', null, el('span', { class: `chip ${c.ok ? 'pass' : 'fail'}` }, c.ok ? 'ok' : c.timed_out ? 'timed out' : 'red'), c.flaky && el('span', { class: 'chip warn' }, 'flaky')),
+        el('td', null, secs(c.ms)), el('td', null, c.exit == null ? DASH : String(c.exit)),
+        el('td', null, c.log ? el('a', { href: `/api/tickets/${enc(id)}/gates/${enc(x.n)}/log?check=${enc(c.check)}`, target: '_blank', rel: 'noopener' }, 'full log') : DASH))))) : null,
+    ...checks.filter(c => c.tail).map(c => el('details', { class: 'tail' }, el('summary', null, `${vis(c.check)}: output (first and last part)`),
+      el('pre', { class: 'log', tabindex: '0', 'aria-label': `${vis(c.check)} output` }, vis(c.tail)))),
+    el('dl', { class: 'facts' },
+      ff && ff !== 'n/a' && fact('Fail-first', el('span', { class: `chip ${ff.startsWith('proven') ? 'pass' : 'warn'}` }, vis(ff))),
+      list(ff.startsWith('unproven') ? 'Unproven tests' : 'Test files', t.files), list('Skips added', t.skips_added), list('Tests deleted', t.deleted),
+      list('Count drops', t.count_drops), list('Expects removed', t.expects_removed),
+      isObj(t.count) && (t.count.pre || t.count.head) ? fact('Test count', `${t.count.pre} → ${t.count.head}`) : null,
+      list('Outside scope', sc.outside), list('Protected', sc.protected), sc.deps && fact('Dependencies', 'changed'), list('Bad paths', sc.bad),
+      list('Migrations', x.migration), list('Flaky', checks.filter(c => c.flaky).map(c => c.check))),
+    changes('Schema changes', x.schema), changes('API changes', x.api),
+    allowed.length ? [el('h4', null, 'Allowed in the plan'), el('ul', { class: 'plist' }, ...allowed.map(a => el('li', null, code(a), ' ',
+      el('span', { class: `chip ${unused.has(a) ? 'warn' : 'pass'}` }, unused.has(a) ? 'unused' : 'used'))))] : null,
+    isObj(x.ask) && el('p', { class: 'hint' }, `It asked you: ${vis(x.ask.kind)}.`),
+    x.why && el('pre', { class: 'log', tabindex: '0', 'aria-label': `Gate ${x.n}: what it found` }, vis(x.why)));
+}
+
+// interventions.jsonl, oldest first, 20 a page: time, cli or ui, verb, task
+function ivsView(id) {
+  const v = ui.ivs?.id === id ? ui.ivs : null;
+  return el('section', { class: 'part', 'aria-labelledby': 'iv-h' },
+    el('div', { class: 'log-head' }, el('h3', { id: 'iv-h' }, 'Your actions'),
+      el('button', { type: 'button', class: 'ghost', 'data-role': 'ivs', onclick: () => loadIvs(id) }, v ? 'Refresh' : 'Show')),
+    v && (v.error ? el('p', { class: 'hint' }, v.error) : v.items.length ? el('table', { class: 'dtable' }, el('caption', { class: 'sr' }, 'Your actions on this flow'),
+      el('thead', null, el('tr', null, ...['Time', 'By', 'Action', 'Task'].map(h => el('th', { scope: 'col' }, h)))),
+      el('tbody', null, ...v.items.filter(isObj).map(x => el('tr', null, el('td', null, when(x.at) ?? DASH), el('td', null, vis(x.actor)), el('td', null, vis(x.verb)), el('td', null, x.task ? code(x.task) : DASH))))) : none()),
+    v?.next != null && el('div', { class: 'acts' }, el('button', { type: 'button', class: 'ghost', 'data-role': 'ivs-more', onclick: () => loadIvs(id, v.next) }, 'More')));
+}
+async function loadIvs(id, after) {
+  try {
+    const r = await api('GET', `/api/tickets/${enc(id)}/interventions?limit=20${after == null ? '' : `&after=${after}`}`);
+    ui.ivs = { id, items: [...(after != null && ui.ivs?.id === id ? ui.ivs.items : []), ...r.items], next: r.next };
+  } catch (e) { ui.ivs = { id, items: [], next: null, error: e.message }; }
+  redraw();
 }
 
 // Clarify: the newest questions round. Answers live in ui.drafts (per ticket + round): re-renders and opening another

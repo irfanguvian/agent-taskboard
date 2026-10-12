@@ -265,6 +265,15 @@ test('J16 bash-guard planning (TB_PHASE=planning): git that writes, leaves the r
   }
 });
 
+test('P5 D5 RO2 bash-guard working (TB_PHASE=working): npx, npm exec / x, pnpm dlx, yarn dlx denied (also behind env, timeout, sh -c); local bins and npm scripts pass; other phases unchanged', () => {
+  const W = { TB_PHASE: 'working' };
+  for (const c of ['npx prisma generate', 'npm exec -- jest', 'npm x tsc', 'pnpm dlx create-x', 'yarn dlx foo', 'env CI=1 npx jest', 'timeout 60 npx tsc', "sh -c 'npx -y evil'", 'cd a && /usr/local/bin/npx x', 'npm -y exec x', 'npm --yes exec x', 'npm init x', 'npm create x', 'yarn create x', 'pnpm create x', 'bun x x', 'pnpm --silent dlx x']) {
+    assert.match(guard(c, W)?.deny ?? 'allowed', /^bash-guard: npx, npm exec, pnpm dlx and yarn dlx fetch and run packages outside the lockfile/, c);
+  }
+  for (const c of ['./node_modules/.bin/prisma generate', 'npm test', 'npm run build -- --watch=false', 'npm ci', 'echo npx', 'constructor x']) assert.equal(guard(c, W)?.deny, undefined, c);
+  for (const env of [{ TB_PHASE: 'planning' }, { TB_PHASE: 'qa' }, {}]) assert.equal(guard('npx jest', env)?.deny, undefined, JSON.stringify(env));
+});
+
 test('S3 bash-guard: a glob redirect target is matched in linear time (no RegExp from agent text); C*.md still denied, plain files pass', () => {
   for (const tail of ['z', 'md']) { // ...z: no match; ...md: could be claude.md → denied
     const c = `echo hi > ${'*'.repeat(40)}${tail}`;

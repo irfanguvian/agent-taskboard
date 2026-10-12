@@ -48,6 +48,10 @@ const SPEC = {
   'review>final_gate:you': 'bs',
   'qa>final_gate:you': 'qa',
   'final_gate>done:you': '*',
+  // P5 K1 (contract change, §3b delta): `tb rework` while review / qa / final_gate is unbuilt
+  'review>working:you': '*',
+  'qa>working:you': 'qa',
+  'final_gate>working:you': '*',
 };
 for (const s of ACTIVE) SPEC[`${s}>blocked:runner`] = '*';
 for (const p of PHASES) SPEC[`blocked>${p}:you`] = p === 'qa' ? 'qa' : '*';

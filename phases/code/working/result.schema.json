@@ -1,0 +1,35 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["status", "commit", "tests_added", "notes"],
+  "properties": {
+    "status": { "type": "string", "enum": ["done", "NEEDS_CONTEXT", "NEEDS_SCOPE", "TEST_DISPUTES_SPEC"] },
+    "commit": { "type": ["string", "null"], "maxLength": 64 },
+    "tests_added": {
+      "type": "array",
+      "maxItems": 50,
+      "items": { "type": "string", "maxLength": 300, "pattern": "^(?!/)(?!(?:.*/)?\\.\\.(?:/|$))[^\\u0000-\\u001f\\u007f\\u061c\\u200b-\\u200f\\u202a-\\u202e\\u2060\\u2066-\\u2069\\ufeff]+$" }
+    },
+    "notes": { "type": "string", "maxLength": 4096 },
+    "needs_scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["files", "reason"],
+      "properties": {
+        "files": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 50,
+          "items": { "type": "string", "maxLength": 300, "pattern": "^(?!/)(?!(?:.*/)?\\.\\.(?:/|$))[^\\u0000-\\u001f\\u007f\\u061c\\u200b-\\u200f\\u202a-\\u202e\\u2060\\u2066-\\u2069\\ufeff]+$" }
+        },
+        "reason": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "packages": {
+          "type": "array",
+          "maxItems": 20,
+          "items": { "type": "string", "maxLength": 200, "pattern": "^(?:@[a-z0-9][a-z0-9._~-]{0,100}\\/)?[a-z0-9][a-z0-9._~-]{0,100}@(?:[*xX]|[\\^~<>=|]*\\d[0-9A-Za-z.^~<>=|*+-]{0,63})$" }
+        }
+      }
+    },
+    "question": { "type": "string", "maxLength": 4096 }
+  }
+}

@@ -51,29 +51,32 @@ test('Bash: heavy commands are denied below 25% free; light commands and 25%+ pa
   assert.equal(hook(bash('npm test'), '25').out, null);
 });
 
-test('Agent: at most 3 at once, each extra one needs 40% free; only the same agent stopping frees its place', (t) => {
+test('Agent: at most 4 at once, each extra one needs 40% free; only the same agent stopping frees its place', (t) => {
   const { hook, start } = setup(t);
   assert.equal(hook(agent, '60').out, null, '1st');
   assert.match(hook(agent, '39').out?.permissionDecisionReason, /^RAM: parallel subagent #2 needs 40% free \(39% now\)/);
   assert.equal(hook(agent, '40').out, null, '2nd at 40%');
   assert.match(hook(agent, '39').out?.permissionDecisionReason, /^RAM: parallel subagent #3 needs 40% free \(39% now\)/);
   assert.equal(hook(agent, '40').out, null, '3rd at 40%');
-  assert.match(hook(agent, '90').out?.permissionDecisionReason, /^D-0039: 3 subagents already run \(max 3\)/, '4th');
+  assert.match(hook(agent, '39').out?.permissionDecisionReason, /^RAM: parallel subagent #4 needs 40% free \(39% now\)/);
+  assert.equal(hook(agent, '40').out, null, '4th at 40%');
+  assert.match(hook(agent, '90').out?.permissionDecisionReason, /^D-0047: 4 subagents already run \(max 4\)/, '5th');
   start('a1');
   start('a2');
   start('a3');
-  assert.equal(hook(agent, '90').out?.permissionDecision, 'deny', 'all 3 started');
+  start('a4');
+  assert.equal(hook(agent, '90').out?.permissionDecision, 'deny', 'all 4 started');
   hook({ hook_event_name: 'SubagentStop', agent_id: 'other' });
   assert.equal(hook(agent, '90').out?.permissionDecision, 'deny', 'another agent stopping frees nothing');
   hook({ hook_event_name: 'SubagentStop', agent_id: 'a1' });
   assert.equal(hook(agent, '90').out, null, 'a1 stopped: one place free');
 });
 
-test('parallel Agent calls: 4 hooks at once → exactly 3 allowed (lock)', async (t) => {
+test('parallel Agent calls: 5 hooks at once → exactly 4 allowed (lock)', async (t) => {
   const { parallel, files } = setup(t);
-  const got = await parallel(4);
-  assert.deepEqual(got.sort(), ['allow', 'allow', 'allow', 'deny']);
-  assert.equal(files().filter((f) => f.startsWith('res-')).length, 3);
+  const got = await parallel(5);
+  assert.deepEqual(got.sort(), ['allow', 'allow', 'allow', 'allow', 'deny']);
+  assert.equal(files().filter((f) => f.startsWith('res-')).length, 4);
 });
 
 test('stale places free themselves: a reservation after 1 min, a started agent after 15 min without transcript writes', (t) => {
@@ -92,7 +95,8 @@ test('stale places free themselves: a reservation after 1 min, a started agent a
   age(20 * 60_000);
   assert.equal(hook(agent).out, null, 'a2 silent 20 min: stale; a1 transcript fresh: live');
   assert.equal(hook(agent).out, null, 'a1 + 2 new: 3rd place');
-  assert.equal(hook(agent).out?.permissionDecision, 'deny', 'a1 + 2 new = 3: full');
+  assert.equal(hook(agent).out, null, 'a1 + 3 new: 4th place');
+  assert.equal(hook(agent).out?.permissionDecision, 'deny', 'a1 + 3 new = 4: full');
 });
 
 test('Agent below 25% free is denied and reserves nothing; TeamCreate and Workflow are always denied', (t) => {

@@ -1,0 +1,88 @@
+{
+  "kind": "plan",
+  "summary": "Drop User.nickname: the column (a new migration; SQLite redefines the User table), UserDto.nickname in the API, and every use in seed, service, tests and README. The column data is lost (Irfan agreed).",
+  "acceptance": [
+    {
+      "id": "A1",
+      "text": "User has no nickname column: prisma/schema.prisma drops it and a new migration under prisma/migrations redefines the User table without it",
+      "type": "new"
+    },
+    {
+      "id": "A2",
+      "text": "GET /users and GET /users/:id answer without nickname (UserDto has no nickname)",
+      "type": "new"
+    },
+    {
+      "id": "A3",
+      "text": "Every other User column, DTO field and endpoint answers as before; npm run db:test:reset works",
+      "type": "preserve"
+    }
+  ],
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "drop User.nickname (schema, migration, API, seed, tests)",
+      "files": [
+        "prisma/schema.prisma",
+        "prisma/seed.ts",
+        "src/users/users.dto.ts",
+        "src/users/users.service.ts",
+        "test/users.e2e-spec.ts",
+        "README.md"
+      ],
+      "modules": [
+        "prisma",
+        "src/users",
+        "test"
+      ],
+      "blocked_by": [],
+      "acceptance": [
+        "A1",
+        "A2",
+        "A3"
+      ],
+      "type": "new",
+      "test_cmd": "npm run test:e2e -- test/users.e2e-spec.ts",
+      "steps": [
+        "In test/users.e2e-spec.ts make the GET /users/:id test expect the user without nickname (toEqual {id, email, name}) and drop nickname from the GET /users first-page toMatchObject; change only nickname lines",
+        "Run npm run test:e2e -- test/users.e2e-spec.ts: red",
+        "Remove nickname from model User in prisma/schema.prisma; write the new migration prisma/migrations/<timestamp>_drop_user_nickname/migration.sql from ./node_modules/.bin/prisma migrate diff --from-migrations prisma/migrations --to-schema prisma/schema.prisma --script",
+        "Remove nickname from prisma/seed.ts, from UserDto in src/users/users.dto.ts, from the select in src/users/users.service.ts and from the README ER diagram",
+        "Run npm run test:e2e -- test/users.e2e-spec.ts: green; then npm run typecheck, npm test and npm run db:test:reset"
+      ]
+    }
+  ],
+  "allowed_schema_changes": [
+    "drop User.nickname"
+  ],
+  "allowed_api_changes": [
+    "remove UserDto.nickname"
+  ],
+  "skills": [],
+  "ui": null,
+  "children": [],
+  "facts": [
+    "prisma/schema.prisma: User.nickname is String? (nullable)",
+    "prisma/seed.ts: every 3rd user gets nickname nick<n>",
+    "src/users/users.dto.ts: UserDto.nickname is in the GET /users and GET /users/:id responses",
+    "test/users.e2e-spec.ts: two tests assert nickname nick1",
+    "prisma/migrations/20261007134900_init/migration.sql: SQLite; a dropped column means a table redefine (new_User, copy, drop, rename)"
+  ],
+  "decisions": [
+    {
+      "id": "R1Q1",
+      "text": "May the data in User.nickname be lost? → yes: drop it, no backup",
+      "source": "answer:R1Q1"
+    },
+    {
+      "id": "R1Q2",
+      "text": "Does any API client read nickname? → none: remove it now, no deprecation step",
+      "source": "answer:R1Q2"
+    },
+    {
+      "id": "D1",
+      "text": "The migration SQL comes from prisma migrate diff, not written by hand",
+      "source": "planner"
+    }
+  ]
+}

@@ -8,14 +8,30 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const store = require('./lib/store');
-const { createServer, ready } = require('./lib/http');
+const { createServer, ready, onCheck } = require('./lib/http');
 const { createNotifier } = require('./lib/notify');
 const { createMonitor } = require('./lib/monitor');
 const doctor = require('./lib/doctor');
 const { createSlots } = require('./lib/slots');
 const { createRunner } = require('./lib/runner');
 const planning = require('./lib/planning'); // registers the code/planning handler + seed (P4)
+const working = require('./lib/working'); // registers the code/working handler, seed + next hook (P5)
+const pass = require('./lib/pass');
 const metrics = require('./lib/metrics');
+
+// P5 Wire: lib/gates loads with the first gate job, never at boot (RAM). First wins: a test preload's fakes stay.
+// Each finished gate check → SSE `gate` {id, task, check, ok}; the gates never require http.
+let gatesLib;
+const G = () => (gatesLib ??= require('./lib/gates'));
+const live = (o) => ({ ...o, onCheck: onCheck(o) });
+working.setGates({
+  runTaskGate: (o) => G().runTaskGate(live(o)),
+  runWorkingGate: (o) => G().runWorkingGate(live(o)),
+  runBaseChecks: (o) => G().runBaseChecks(o),
+  captureOpenapiBase: (o) => G().captureOpenapiBase(o),
+  restoreSwap: (t, wt) => G().restoreSwap(t, wt),
+  runDepsSetup: (o) => G().runDepsSetup(o),
+});
 
 function die(msg) {
   console.error(`error: ${msg}`);
@@ -45,6 +61,7 @@ async function stop(code = 0) {
   monitor?.stop();
   server.close();
   server.closeAllConnections();
+  await working.stop(); // gate jobs aborted (shutdown) + killed: their gates run again after the restart
   await runner?.stop(); // runs keep going: the next tbd re-attaches them
   await slots?.stop();
   await store.flush();
@@ -74,7 +91,9 @@ function boot() {
   monitor.start();
   doctor.start({ notifier, monitor }); // login re-check every 30 min and after a wake
   // socket before "tbd listening": tbx and hooks can talk once it is printed
-  slots.start().then(() => {
+  // gates and children deny tbd's own port: the bound one (TB_PORT=0 picks any free port)
+  process.env.TB_PORT = String(/** @type {import('node:net').AddressInfo} */ (server.address()).port);
+  slots.start().then(async () => {
     runner = createRunner({
       store, slots, tbHome: process.env.TB_HOME || path.join(os.homedir(), '.taskboard'), port: /** @type {import('node:net').AddressInfo} */ (server.address()).port,
       system: () => monitor?.snapshot() ?? null, alert: notifier.alert, probe: () => monitor.probeNet(), // D31: timeout + breaker
@@ -82,6 +101,9 @@ function boot() {
     });
     planning.lostSetups(runner.alert); // an approve's setup dies with its tbd: waiting setup → setup_failed (J12)
     monitor.on('wake', (e) => runner.wake(e)); // §8 sleep: the OS wake carries the slept time; a wall jump alone is a hint
+    await working.boot(); // P5: pre-P5 working tickets get a work cursor; a swap left by a killed tbd is restored first
+    pass.watch({ alert: runner.alert }); // parents waiting on children: one alert per newly blocked child
+    await pass.boot().catch((e) => console.error(`tbd: children recount: ${e.message}`)); // a finish lost to a stop
     runner.start(); // re-attaches live leases, then starts runs (after the socket: TBX_RUN keys work from the first second)
     ready(notifier, monitor, runner); // throws on an unreadable session file: caught below, clean stop(1)
     console.log(`tbd listening ${/** @type {import('node:net').AddressInfo} */ (server.address()).port}`);

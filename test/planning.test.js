@@ -33,7 +33,8 @@ const QUESTIONS = { kind: 'questions', round: 1, questions: [{ id: 'Q1', questio
 const PLAN = {
   kind: 'plan', summary: 'Paginate GET /users', acceptance: [{ id: 'A1', text: 'returns 20 per page', type: 'new' }],
   tasks: [{ id: 'T1', title: 'cursor pagination', files: ['src/users.js'], modules: ['src'], blocked_by: [], acceptance: ['A1'], type: 'new', test_cmd: 'npm test', steps: ['add cursor'] }],
-  allowed_schema_changes: [], allowed_api_changes: ['GET /users: add optional cursor'], skills: ['learning'], ui: null,
+  // P5 K10 (contract change; was free text 'GET /users: add optional cursor'): allowed_* follow the change grammar
+  allowed_schema_changes: [], allowed_api_changes: ['optional UserDto.cursor'], skills: ['learning'], ui: null,
   children: [{ id: 'C1', title: 'docs', text: 'document paging', blocked_by: ['parent'] }, { id: 'C2', title: 'client', text: 'use paging', blocked_by: ['C1'] }],
   facts: ['README.md: users list has no paging'], decisions: [],
 };
@@ -488,12 +489,15 @@ test('J15 J16 J17 runner: a rule broken at base_sha → resumed once with the re
   assert.deepEqual(json(tk(tbd, 't_rule01', 'decisions.json')), [L1], 'J17: locked L1 merged though the plan left it out');
   // J16 seed: the ## Tag block (folder tags too, no base)
   const seed = prompt('t_rule01', 1);
-  assert.ok(seed.includes('## Tag\n\ntag: acme/api (git, base main)\nchecks: unit = npm test, lint = npm run lint\ncontext files: docs/arch.md\ndefault skills: learning\ninstalled skills: learning\n\n## System now'), seed);
-  assert.ok(prompt('t_fold01', 1).includes('## Tag\n\ntag: acme/notes (folder)\nchecks: (none)\ncontext files: (none)\ndefault skills: (none)\ninstalled skills: learning\n'));
+  // P5 (contract change; the block had no gate facts): + test scripts, protected, generated (the planner's modules rule)
+  const gate = 'test scripts (test_cmd may run): ^test(:|$)\nprotected: package.json, .npmrc, tsconfig*.json, jest.config.*, vitest.config.*, babel.config.*, .swcrc, nest-cli.json, prisma.config.ts, test/utils/**, test/helpers/**\ngenerated: (none)';
+  assert.ok(seed.includes(`## Tag\n\ntag: acme/api (git, base main)\nchecks: unit = npm test, lint = npm run lint\n${gate}\ncontext files: docs/arch.md\ndefault skills: learning\ninstalled skills: learning\n\n## System now`), seed);
+  assert.ok(prompt('t_fold01', 1).includes(`## Tag\n\ntag: acme/notes (folder)\nchecks: (none)\n${gate}\ncontext files: (none)\ndefault skills: (none)\ninstalled skills: learning\n`));
   // J15 J16: the run gets TB_PHASE (bash-guard) and TB_PLAN_CTX (plan-check hook) = runs/1.plan-ctx.json, tbd's ctx
   const d = tbd.dumps().find((x) => x.prompt === seed);
   assert.deepEqual([d.env.TB_PHASE, d.env.TB_PLAN_CTX], ['planning', tk(tbd, 't_rule01', 'runs', '1.plan-ctx.json')]);
-  assert.deepEqual(json(d.env.TB_PLAN_CTX), { locked: [L1], must_ask: false, skills: ['learning'], base_sha: base, cwd: wtRule });
+  // P5 RO4 (contract change; was without test_scripts): the tag's test_scripts regex (default) rides along for the hook
+  assert.deepEqual(json(d.env.TB_PLAN_CTX), { locked: [L1], must_ask: false, skills: ['learning'], base_sha: base, cwd: wtRule, test_scripts: '^test(:|$)' });
 
   // J16: the run wrote to its worktree → Blocked, its result not kept, one alert naming the file
   const k = read(tbd, 't_dirt02');

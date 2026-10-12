@@ -1,0 +1,102 @@
+(version 1)
+; tbd gate profile v2 (contract K5+RO1; text, probes and timings: .omc/handoffs/p5-spike.md, Irfan approved 2026-10-10).
+; Base: anthropic-experimental/sandbox-runtime (Claude Code Seatbelt), src/sandbox/macos-sandbox-utils.ts
+; generateSandboxProfile() @ cdade68db6fb8d9a5f30516e52711127b886720b, Apache-2.0 (open source, public repo).
+; Rendered per gate by lib/gates/run.js profile(): each $-brace placeholder = a real absolute path (or a port); DENY_*
+; and OTHER_WORKTREES = rendered filter lists (phase-settings denyPaths: the one deny source). Variants by line tag:
+; "; @test" = test/check only, "; @setup" = setup + setupnet (RO2 step 2, base checks, OpenAPI base), "; @net" =
+; setupnet only (RO2 step 1: npm ci --ignore-scripts). Later rule wins: order is part of the policy.
+(deny default (with message "tbgate"))
+
+; process (srt): exec/fork, signals + task ports only inside this sandbox
+; exec allowlist (v2): system + node + worktree node_modules. Map-exec rules sit at the end (later rule wins).
+(allow process-exec (subpath "/bin") (subpath "/usr/bin") (subpath "/usr/libexec") (subpath "${NODE_HOME}") (subpath "${WT}/node_modules") (subpath "${HOME}/.cache/prisma"))
+(allow process-fork)
+(allow process-info* (target same-sandbox))
+(allow signal (target same-sandbox))
+(allow mach-priv-task-port (target same-sandbox))
+(deny process-exec (literal "/bin/launchctl") (literal "/usr/bin/open") (literal "/usr/bin/osascript"))
+(allow user-preference-read)
+
+; mach-lookup allowlist (srt minus audio/fonts/power/notification/launchservicesd/lsd.mapdb/SecurityServer)
+(allow mach-lookup
+  (global-name "com.apple.logd")
+  (global-name "com.apple.system.logger")
+  (global-name "com.apple.system.opendirectoryd.libinfo")
+  (global-name "com.apple.system.opendirectoryd.membership")
+  (global-name "com.apple.bsd.dirhelper")
+  (global-name "com.apple.securityd.xpc")
+)
+(deny appleevent-send)
+(deny lsopen)
+
+(allow ipc-posix-shm)
+(allow ipc-posix-sem)
+(allow iokit-get-properties)
+(allow system-socket (require-all (socket-domain AF_SYSTEM) (socket-protocol 2)))
+(allow sysctl-read)
+(allow sysctl-write (sysctl-name "kern.tcsm_enable"))
+
+; devices
+(allow file-ioctl (literal "/dev/null") (literal "/dev/zero") (literal "/dev/random") (literal "/dev/urandom") (literal "/dev/dtracehelper") (literal "/dev/tty"))
+(allow file-read* file-write-data (literal "/dev/null") (literal "/dev/zero") (literal "/dev/random") (literal "/dev/urandom") (literal "/dev/tty") (literal "/dev/dtracehelper"))
+
+; network: local bind ok; outbound only localhost, minus tbd port + 5432 + tag deny_ports (later rule wins)
+(allow network-bind (local ip "*:*"))
+(allow network-inbound (local ip "*:*"))
+(allow network-outbound (remote ip "localhost:*"))
+(deny network-outbound (remote ip "localhost:${TBD_PORT}"))
+(deny network-outbound (remote ip "localhost:5432"))
+${DENY_PORTS}
+; setupnet only (RO2 step 1, npm ci --ignore-scripts): outbound 443 any host + DNS
+(allow network-outbound (remote ip "*:443")) ; @net
+(allow mach-lookup (global-name "com.apple.dnssd.service")) ; @net
+(allow network-outbound (remote unix-socket (literal "/private/var/run/mDNSResponder"))) ; @net
+(allow system-socket (socket-domain AF_UNIX)) ; @net
+
+; read allowlist: system + node + npm cache; dirs stat-able everywhere (realpath walks)
+(allow file-read-metadata (vnode-type DIRECTORY))
+(allow file-read* (literal "/"))
+(allow file-read*
+  (subpath "/usr") (subpath "/bin") (subpath "/sbin") (subpath "/System") (subpath "/Library/Apple")
+  (subpath "/private/etc") (subpath "/private/var/db/timezone") (subpath "/private/var/db/dyld") (subpath "/private/var/select")
+  (literal "/etc") (literal "/tmp") (literal "/var")
+  (subpath "/dev")
+  (subpath "${NODE_HOME}")
+  (subpath "${HOME}/.npm")
+  (subpath "${HOME}/.cache/prisma")
+)
+
+; denyRead: phase-settings denyPaths read (TB_HOME, live dir, HOME secrets) — one source with the agent settings
+${DENY_READ}
+
+; NPM_CONFIG_USERCONFIG: empty file, read-only
+(allow file-read* (literal "${EMPTY_NPMRC}"))
+
+; unix sockets: gate tmp only (tsx IPC pipe). tbd.sock stays denied.
+(allow system-socket (socket-domain AF_UNIX))
+(allow network-bind (local unix-socket (subpath "${GTMP}")))
+(allow network-outbound (remote unix-socket (subpath "${GTMP}")))
+
+; worktree + gate tmp: read + write (re-allowed after the TB_HOME deny)
+(allow file-read* file-write* (subpath "${WT}") (subpath "${GTMP}"))
+; other tickets: belt (TB_HOME deny covers them). Rendered list, never the own WT.
+(deny file-read* file-write* (subpath "${TB_HOME}/tickets") ${OTHER_WORKTREES})
+; .git (linked-worktree pointer file, or dir) never written by gates
+(deny file-write* (subpath "${WT}/.git"))
+; denyWrite: phase-settings denyPaths write (the agent's write denies + env files + the tag's git dir)
+${DENY_WRITE}
+
+; npm logs (all variants); cacache only setup/base
+(allow file-write* (subpath "${HOME}/.npm/_logs"))
+; test/check variant: node_modules read-only except .cache + .prisma (M1 mirror; exec/map still denied there)
+(deny file-write* (subpath "${WT}/node_modules")) ; @test
+(allow file-write* (subpath "${WT}/node_modules/.cache") (subpath "${WT}/node_modules/.prisma")) ; @test
+(allow file-write* (subpath "${HOME}/.npm/_cacache")) ; @setup
+; prebuild-install access(~/.npm, W_OK) check only; _prebuilds stays read-only
+(allow file-write-data (literal "${HOME}/.npm")) ; @setup
+; LAST (later rule wins): no exec, no executable mmap/dlopen from any root the gate can write.
+; file-map-executable falls back to file-read-data when no rule names it, so read-allowed writable roots must deny it here.
+(deny file-map-executable (subpath "${WT}") (subpath "${GTMP}") (subpath "${HOME}/.npm"))
+(allow file-map-executable (subpath "${WT}/node_modules"))
+(deny process-exec file-map-executable (subpath "${WT}/node_modules/.cache") (subpath "${WT}/node_modules/.prisma"))

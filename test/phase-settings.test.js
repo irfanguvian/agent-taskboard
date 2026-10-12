@@ -29,7 +29,7 @@ const EXPECTED = {
   'research/planning': [[...GIT, ...WEB], []], // §5: + WebSearch, WebFetch for research and brainstorm
   'brainstorm/planning': [[...GIT, ...WEB], []],
   'design/planning': [GIT, []],
-  'code/working': [[...RO, W(CTX.WORKTREE), 'Bash', 'Agent'], [CTX.WORKTREE]], // tasks in the worktree, ≤3 subagents (§6)
+  'code/working': [[...RO, W(CTX.WORKTREE), 'Bash'], [CTX.WORKTREE]], // tasks in the worktree; P5 K15 (contract change; was + Agent): no subagents
   'research/working': [[...RO, W(CTX.OUT_DIR), ...WEB, 'Agent'], [CTX.OUT_DIR]], // one session, ≤3 subagents, only out/
   'brainstorm/working': [[...RO, W(CTX.OUT_DIR), ...WEB, 'Agent'], [CTX.OUT_DIR]], // research variant
   'design/working': [[...RO, W(CTX.OUT_DIR), 'Agent'], [CTX.OUT_DIR]],
@@ -54,7 +54,9 @@ test('phase-settings: one template per §5/§6 phase, allow == table, prompt.md 
       found.push(`${kind}/${phase}`);
       // P4 (contract change; was settings.json only everywhere): code/planning is built (D9: prompt.md + settings.json +
       // result.schema.json + its handler), landed after the fable evals passed 3/3 and golden A scored 4/5 (AC1 AC9)
-      assert.deepEqual(fs.readdirSync(path.join(REPO, 'phases', kind, phase)), `${kind}/${phase}` === 'code/planning' ? ['prompt.md', 'result.schema.json', 'settings.json'] : ['settings.json'], `${kind}/${phase}`);
+      // P5 (contract change; was settings.json only): code/working gains its result.schema.json (P5d: prompt.md landed, code/working is built)
+      const want = { 'code/planning': ['prompt.md', 'result.schema.json', 'settings.json'], 'code/working': ['prompt.md', 'result.schema.json', 'settings.json'] };
+      assert.deepEqual(fs.readdirSync(path.join(REPO, 'phases', kind, phase)), want[`${kind}/${phase}`] ?? ['settings.json'], `${kind}/${phase}`);
     }
   }
   assert.deepEqual(found.sort(), Object.keys(EXPECTED).sort());
@@ -124,8 +126,21 @@ test('phase-settings: hooks wired by absolute path; sandbox kept on, localhost o
   assert.deepEqual(render('code', 'planning', { ...CTX, TB_HOME: live }).sandbox.filesystem.denyRead, [live]);
 });
 
+// P5 M1 (contract change; code/working had no node_modules rules): the spike's char-class rules (p5-spike.md, run 2): an
+// Edit deny becomes a sandbox write deny too, so node_modules/** would block .cache/.prisma; only non-dot entries, .bin
+// and .package-lock.json are denied; env files (ctx.ENV_FILES) are denied in both layers
+test('phase-settings: code/working M1 node_modules + env-file denies, .cache / .prisma left writable; D34 trailer off', () => {
+  const s = render('code', 'working', { ...CTX, ENV_FILES: ['.env.test'] });
+  const nm = `${CTX.WORKTREE}/node_modules`;
+  const edit = [`${nm}/[a-zA-Z0-9@_-]*`, `${nm}/[a-zA-Z0-9@_-]*/**`, `${nm}/.bin`, `${nm}/.bin/**`, `${nm}/.package-lock.json`, `${CTX.WORKTREE}/.env.test`].map((p) => `Edit(/${p})`);
+  assert.deepEqual(s.permissions.deny.filter((r) => r.includes('node_modules') || r.includes('.env.test')), edit);
+  assert.deepEqual(s.sandbox.filesystem.denyWrite.filter((p) => p.includes('node_modules') || p.includes('.env.test')), [`${nm}/[a-zA-Z0-9@_-]*`, `${nm}/.bin`, `${nm}/.package-lock.json`, `${CTX.WORKTREE}/.env.test`]);
+  assert.ok(![...s.permissions.deny, ...s.sandbox.filesystem.denyWrite].some((r) => /node_modules\/\*\*|node_modules\)$|\.cache|\.prisma/.test(r)), 'no rule covers node_modules/.cache or .prisma');
+  assert.deepEqual(s.attribution, { commit: '', pr: '' });
+});
+
 test('phase-settings: --tools from allow (Edit brings Write); read-only phases get no write tool', () => {
-  assert.deepEqual(tools(render('code', 'working', CTX)), ['Read', 'Glob', 'Grep', 'Edit', 'Write', 'Bash', 'Agent']);
+  assert.deepEqual(tools(render('code', 'working', CTX)), ['Read', 'Glob', 'Grep', 'Edit', 'Write', 'Bash']); // P5 K15 (contract change): no Agent
   assert.deepEqual(tools(render('code', 'planning', CTX)), ['Read', 'Glob', 'Grep', 'Bash']);
   assert.deepEqual(tools(render('research', 'review', CTX)), ['Read', 'Glob', 'Grep']);
 });
@@ -152,4 +167,18 @@ test('phase-settings: bad ctx or phase name is refused, nothing rendered', () =>
   for (const [kind, phase] of [['..', 'working'], ['code', '../planning'], ['code', 'nope'], ['Code', 'working']]) {
     assert.throws(() => render(kind, phase, CTX), /phase-settings:/, `${kind}/${phase}`);
   }
+});
+
+// D-0059: TB_EVAL_DENY_READ (golden harness) denies the real repo to Bash (sandbox) and the file tools (Read), dev TB_HOME only
+test('phase-settings: TB_EVAL_DENY_READ denies a path in sandbox + Read for a dev TB_HOME, is ignored for the live one, rejects a bad path', () => {
+  const was = process.env.TB_EVAL_DENY_READ;
+  const withKnob = (v, ctx) => { process.env.TB_EVAL_DENY_READ = v; try { return render('code', 'working', ctx); } finally { if (was === undefined) delete process.env.TB_EVAL_DENY_READ; else process.env.TB_EVAL_DENY_READ = was; } };
+  const s = withKnob('/r/one:/r/two', CTX);
+  assert.deepEqual(s.sandbox.filesystem.denyRead.slice(-2), ['/r/one', '/r/two']);
+  for (const p of ['/r/one', '/r/two']) assert.ok(s.permissions.deny.includes(`Read(/${p}/**)`), p);
+  const live = path.join(os.homedir(), '.taskboard');
+  const l = withKnob('/r/one', { ...CTX, TB_HOME: live });
+  assert.deepEqual(l.sandbox.filesystem.denyRead, [live]);
+  assert.ok(!l.permissions.deny.includes('Read(//r/one/**)'));
+  for (const bad of ['rel/x', '/r/../x', '/r/*', '/r/x/']) assert.throws(() => withKnob(bad, CTX), /TB_EVAL_DENY_READ/, bad);
 });

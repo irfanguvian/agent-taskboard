@@ -132,5 +132,6 @@ function phaseFixture(dir, spec) {
 
 const FAKE_HANDLERS = `--require ${path.join(__dirname, 'fake-handlers.js')}`;
 const SLOT_ROOT = `--require ${path.join(__dirname, 'slot-root.js')}`; // test process may take slot leases
+const FAKE_GATES = `--require ${path.join(__dirname, 'fake-gates.js')}`; // P5a: scripted gates for lib/working.js (after RUN_SPY)
 
-module.exports = { startTbd, runTb, request, isolatedEnv, phaseFixture, PHASE_FILES, FAKE_HANDLERS, SLOT_ROOT, REPO, TBD };
+module.exports = { startTbd, runTb, request, isolatedEnv, phaseFixture, PHASE_FILES, FAKE_HANDLERS, SLOT_ROOT, FAKE_GATES, REPO, TBD };

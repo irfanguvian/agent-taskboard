@@ -21,7 +21,7 @@ process.env.TB_HOME = path.join(root, 'tbhome');
 delete process.env.TB_TZ;
 fs.mkdirSync(process.env.HOME);
 const store = require('../lib/store');
-const { createMonitor } = require('../lib/monitor');
+const { createMonitor, watchTree } = require('../lib/monitor');
 const { createNotifier } = require('../lib/notify');
 const { createServer, ready } = require('../lib/http');
 store.init();
@@ -84,6 +84,17 @@ test('AC1 failed commands → null fields, no throw; other signals still read', 
   assert.deepEqual([s.pressure, s.level, s.ram_total, s.ram_used, s.claude_rss], [null, null, null, null, null]);
   assert.equal(s.avail, AVAIL);
   assert.equal(s.disk_free, 30 * GB);
+});
+
+test('P5 t:gate peak_rss_mb: watchTree(pid) keeps the largest tree RSS a 5 s sample saw (the pid + its descendants); a pid never seen → null', async () => {
+  const w = world();
+  const stop = watchTree(200); // ps.txt: claude 200 → zsh 201 → node 202, and claude 203 under 200
+  const never = watchTree(99999);
+  await w.mon.sample();
+  w.out.ps = read('ps.txt').replace(/^ +202 +201 +120000/m, '  202   201  10000'); // smaller later: the peak stays
+  await w.tick();
+  assert.equal(stop(), Math.round(((300000 + 40000 + 120000 + 500000) * 1024) / 2 ** 20));
+  assert.equal(never(), null);
 });
 
 test('AC1 pmset + Docker every 60 s, the rest every 5 s; change event only when the header view changes', async () => {

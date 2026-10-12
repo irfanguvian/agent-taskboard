@@ -1,0 +1,108 @@
+diff --git a/README.md b/README.md
+index 35824a2..cb77933 100644
+--- a/README.md
++++ b/README.md
+@@ -5,7 +5,7 @@ Small shop API. NestJS 12, Prisma 7, SQLite.
+ ```mermaid
+ erDiagram
+   User ||--o{ Order : places
+-  User { int id string email string name string nickname datetime createdAt }
++  User { int id string email string name datetime createdAt }
+   Order { int id int userId int totalMinor string status datetime createdAt }
+ ```
+ 
+diff --git a/prisma/migrations/20261010000000_drop_user_nickname/migration.sql b/prisma/migrations/20261010000000_drop_user_nickname/migration.sql
+new file mode 100644
+index 0000000..5a64df5
+--- /dev/null
++++ b/prisma/migrations/20261010000000_drop_user_nickname/migration.sql
+@@ -0,0 +1,16 @@
++-- RedefineTables
++PRAGMA defer_foreign_keys=ON;
++PRAGMA foreign_keys=OFF;
++CREATE TABLE "new_User" (
++    "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
++    "email" TEXT NOT NULL,
++    "name" TEXT NOT NULL,
++    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
++);
++INSERT INTO "new_User" ("createdAt", "email", "id", "name") SELECT "createdAt", "email", "id", "name" FROM "User";
++DROP TABLE "User";
++ALTER TABLE "new_User" RENAME TO "User";
++CREATE UNIQUE INDEX "User_email_key" ON "User"("email");
++PRAGMA foreign_keys=ON;
++PRAGMA defer_foreign_keys=OFF;
++
+diff --git a/prisma/schema.prisma b/prisma/schema.prisma
+index ff7b626..ec88d72 100644
+--- a/prisma/schema.prisma
++++ b/prisma/schema.prisma
+@@ -11,7 +11,6 @@ model User {
+   id        Int      @id @default(autoincrement())
+   email     String   @unique
+   name      String
+-  nickname  String?
+   createdAt DateTime @default(now())
+   orders    Order[]
+ }
+diff --git a/prisma/seed.ts b/prisma/seed.ts
+index c9a1950..1c29ecc 100644
+--- a/prisma/seed.ts
++++ b/prisma/seed.ts
+@@ -14,7 +14,6 @@ const users = Array.from({ length: USERS }, (_, i) => ({
+   id: i + 1,
+   email: `user${i + 1}@example.test`,
+   name: `User ${i + 1}`,
+-  nickname: i % 3 === 0 ? `nick${i + 1}` : null,
+   createdAt: new Date(start + i * DAY),
+ }));
+ 
+diff --git a/src/users/users.dto.ts b/src/users/users.dto.ts
+index 106f9c1..695defd 100644
+--- a/src/users/users.dto.ts
++++ b/src/users/users.dto.ts
+@@ -4,7 +4,6 @@ export class UserDto {
+   @ApiProperty() id: number;
+   @ApiProperty() email: string;
+   @ApiProperty() name: string;
+-  @ApiProperty({ type: String, nullable: true }) nickname: string | null;
+ }
+ 
+ export class UserPageDto {
+diff --git a/src/users/users.service.ts b/src/users/users.service.ts
+index 2eb7c79..65ef6a6 100644
+--- a/src/users/users.service.ts
++++ b/src/users/users.service.ts
+@@ -2,7 +2,7 @@ import { Injectable, NotFoundException } from '@nestjs/common';
+ import { PageQueryDto, pageArgs, toPage } from '../common/pagination.js';
+ import { PrismaService } from '../prisma/prisma.service.js';
+ 
+-const select = { id: true, email: true, name: true, nickname: true } as const;
++const select = { id: true, email: true, name: true } as const;
+ 
+ @Injectable()
+ export class UsersService {
+diff --git a/test/users.e2e-spec.ts b/test/users.e2e-spec.ts
+index fde436e..4eaeb78 100644
+--- a/test/users.e2e-spec.ts
++++ b/test/users.e2e-spec.ts
+@@ -27,7 +27,6 @@ describe('users (e2e)', () => {
+       id: 1,
+       email: 'user1@example.test',
+       name: 'User 1',
+-      nickname: 'nick1',
+     });
+     expect(body.nextCursor).toBe(21);
+   });
+@@ -58,9 +57,9 @@ describe('users (e2e)', () => {
+     expect(small).toBeLessThanOrEqual(3);
+   });
+ 
+-  it('GET /users/:id returns the user with nickname', async () => {
++  it('GET /users/:id returns the user without nickname', async () => {
+     const { body } = await get('/users/1').expect(200);
+-    expect(body).toEqual({ id: 1, email: 'user1@example.test', name: 'User 1', nickname: 'nick1' });
++    expect(body).toEqual({ id: 1, email: 'user1@example.test', name: 'User 1' });
+   });
+ 
+   it('GET /users/:id returns 404 for an unknown user', async () => {

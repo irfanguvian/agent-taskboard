@@ -247,6 +247,20 @@ async function round(env, id, tbArgs) {
   return r;
 }
 
+// Runs tbd leaves alive (a tbd stop never kills runs): only a process whose argv names our TB_HOME, its own group.
+function reapRuns(tbHome, ids) {
+  for (const id of ids) {
+    const l = ticketOf(path.join(tbHome, 'tickets', id)).lease;
+    if (!l?.pid || l.exit) continue;
+    let cmd = '';
+    try { cmd = execFileSync('/bin/ps', ['-o', 'command=', '-p', String(l.pid)], { encoding: 'utf8', timeout: 5000 }); } catch { /* gone */ }
+    if (cmd.includes(tbHome)) {
+      console.log(`eval: ${id}: run pid ${l.pid} still alive: SIGKILL its group`);
+      try { process.kill(-(l.pgid ?? l.pid), 'SIGKILL'); } catch { /* gone */ }
+    }
+  }
+}
+
 // ---- deterministic checks (planner-evals.md, sandbox-traps.md Ticket A) -------------------------------------------
 const chk = (name, ok, evidence) => ({ name, ok: !!ok, evidence: String(evidence) });
 const schemaFails = (r) => r.metrics.filter((l) => l.exit === 'schema_fail').length;
@@ -534,17 +548,7 @@ async function main() {
       console.log(`eval: report ${o.out}`);
     }
     await tbd.stop({ keep: true }).catch((e) => console.log(`eval: tbd stop: ${e.message}`));
-    // runs tbd leaves alive (a tbd stop never kills runs): only a process whose argv names our TB_HOME, its own group
-    for (const id of Object.values(ids)) {
-      const l = ticketOf(path.join(tbHome, 'tickets', id)).lease;
-      if (!l?.pid || l.exit) continue;
-      let cmd = '';
-      try { cmd = execFileSync('/bin/ps', ['-o', 'command=', '-p', String(l.pid)], { encoding: 'utf8', timeout: 5000 }); } catch { /* gone */ }
-      if (cmd.includes(tbHome)) {
-        console.log(`eval: ${id}: run pid ${l.pid} still alive: SIGKILL its group`);
-        try { process.kill(-(l.pgid ?? l.pid), 'SIGKILL'); } catch { /* gone */ }
-      }
-    }
+    reapRuns(tbHome, Object.values(ids));
     const wts = Object.values(ids).map((id) => ticketOf(path.join(tbHome, 'tickets', id)).worktree).filter((w) => typeof w === 'string' && w.startsWith(root + path.sep));
     if (o.keep) {
       console.log(`eval: kept ${root}${wts.length ? `; later: ${wts.map((w) => `git -C ${SANDBOX} worktree remove --force ${w}`).join(' && ')} && rm -rf ${root}` : ''}`);
@@ -560,7 +564,12 @@ async function main() {
   process.exitCode = ok ? 0 : 1;
 }
 
-main().catch((e) => {
-  console.log(`eval: error: ${e.message}`);
-  process.exitCode = 1;
-});
+// shared with scripts/golden-working.js (P5d goldens): tbd run artifacts, git, report bits
+module.exports = { SANDBOX, arr, sleep, readJson, write, git, events, runNs, runInfo, metricLines, ticketOf, reapRuns, chk, fence, details, usd, costOf, cell };
+
+if (require.main === module) {
+  main().catch((e) => {
+    console.log(`eval: error: ${e.message}`);
+    process.exitCode = 1;
+  });
+}

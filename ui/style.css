@@ -326,6 +326,32 @@ main { max-width: 1560px; margin: 0 auto; padding: 22px 24px 56px; }
 .kin { display: grid; gap: 6px; width: 100%; padding: 8px 10px; border: 0; border-radius: 6px; text-align: left; cursor: pointer; background: var(--bay); }
 .kin:hover { box-shadow: 0 0 0 1px var(--mute); }
 
+/* working parts of the drawer (P5): ask panel, pass / rework, tasks, gates, your actions */
+.sheet input[type="text"], .pick select { min-height: 32px; padding: 0 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); }
+.sheet input[type="text"] { flex: 1 1 14rem; min-width: 0; font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.pick { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--mute); }
+.ask { padding: 10px 12px 12px; border-radius: 6px; border-left: 4px solid var(--accent); background: var(--you-bg); }
+.ask code, .gate code, .wtable code, .passform code, .part .plist code { padding: 1px 5px; border-radius: 4px; background: var(--chip-bg); font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
+.ask .change { display: grid; gap: 6px; }
+.acts .ghost.armed, .ask .ghost.armed { background: var(--red); border-color: var(--red); color: var(--on-red); font-weight: 700; }
+.chip.pass { background: transparent; color: var(--green); box-shadow: inset 0 0 0 1px currentColor; font-weight: 600; }
+.chip.fail { background: var(--blocked-bg); color: var(--red); font-weight: 600; }
+.chip.warn { background: var(--amber-bg); color: var(--ink); font-weight: 600; }
+.chip.cur { background: var(--ink); color: var(--bg); }
+.wtable td, .ctable td { vertical-align: middle; }
+.wtable tr.cur td { background: var(--you-bg); }
+.wtable tr.cur td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+.chip.st-done { color: var(--green); background: transparent; box-shadow: inset 0 0 0 1px currentColor; }
+.chip.st-red { color: var(--red); background: var(--blocked-bg); }
+.chip.st-running, .chip.st-gating { color: var(--steel); background: transparent; box-shadow: inset 0 0 0 1px currentColor; }
+.ctable td:last-child { width: auto; }
+.ctable a { color: var(--steel); }
+.gate { display: grid; gap: 8px; padding: 8px 12px; border-radius: 6px; background: var(--bay); box-shadow: inset 4px 0 0 var(--green); }
+.gate.red { box-shadow: inset 4px 0 0 var(--red); }
+.gate > summary, .tail > summary { cursor: pointer; padding: 4px 0; overflow-wrap: anywhere; }
+.gate .log { max-height: 20rem; background: var(--strip); }
+.gate .dtable td { border-top-color: var(--line); }
+
 /* toasts */
 .toasts { position: fixed; right: 16px; bottom: 16px; z-index: 30; display: grid; gap: 8px; width: min(400px, calc(100vw - 32px)); }
 .toast {

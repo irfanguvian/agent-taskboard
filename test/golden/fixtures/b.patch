@@ -1,0 +1,81 @@
+diff --git a/src/users/users.dto.ts b/src/users/users.dto.ts
+index 106f9c1..2e07ed6 100644
+--- a/src/users/users.dto.ts
++++ b/src/users/users.dto.ts
+@@ -7,7 +7,18 @@ export class UserDto {
+   @ApiProperty({ type: String, nullable: true }) nickname: string | null;
+ }
+ 
++export class LatestOrderDto {
++  @ApiProperty() id: number;
++  @ApiProperty({ description: 'integer minor units' }) totalMinor: number;
++  @ApiProperty() status: string;
++  @ApiProperty() createdAt: Date;
++}
++
++export class UserListItemDto extends UserDto {
++  @ApiProperty({ type: LatestOrderDto, nullable: true }) latestOrder: LatestOrderDto | null;
++}
++
+ export class UserPageDto {
+-  @ApiProperty({ type: [UserDto] }) data: UserDto[];
++  @ApiProperty({ type: [UserListItemDto] }) data: UserListItemDto[];
+   @ApiProperty({ type: Number, nullable: true }) nextCursor: number | null;
+ }
+diff --git a/src/users/users.service.spec.ts b/src/users/users.service.spec.ts
+new file mode 100644
+index 0000000..a6c1058
+--- /dev/null
++++ b/src/users/users.service.spec.ts
+@@ -0,0 +1,22 @@
++import { UsersService } from './users.service.js';
++
++describe('UsersService.list', () => {
++  it('returns each user with latestOrder from the same findMany, null without orders', async () => {
++    const order = { id: 7, totalMinor: 1234, status: 'paid', createdAt: new Date('2026-01-08T00:00:00Z') };
++    const calls: unknown[] = [];
++    const prisma = {
++      user: {
++        findMany: async (args: unknown) => {
++          calls.push(args);
++          return [
++            { id: 1, email: 'a@example.test', name: 'A', nickname: null, orders: [order] },
++            { id: 2, email: 'b@example.test', name: 'B', nickname: null, orders: [] },
++          ];
++        },
++      },
++    };
++    const page = await new UsersService(prisma as never).list({ limit: 20 });
++    expect(page.data.map((u) => (u as { latestOrder?: unknown }).latestOrder)).toEqual([order, null]);
++    expect(calls).toHaveLength(1);
++  });
++});
+diff --git a/src/users/users.service.ts b/src/users/users.service.ts
+index 2eb7c79..f813636 100644
+--- a/src/users/users.service.ts
++++ b/src/users/users.service.ts
+@@ -10,11 +10,22 @@ export class UsersService {
+ 
+   async list(query: PageQueryDto) {
+     const rows = await this.prisma.user.findMany({
+-      select,
++      // each user's newest order, loaded with the page (one relation query for the whole page, never one per user)
++      select: {
++        ...select,
++        orders: {
++          orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
++          take: 1,
++          select: { id: true, totalMinor: true, status: true, createdAt: true },
++        },
++      },
+       orderBy: { id: 'asc' },
+       ...pageArgs(query),
+     });
+-    return toPage(rows, query.limit);
++    return toPage(
++      rows.map(({ orders, ...user }) => ({ ...user, latestOrder: orders[0] ?? null })),
++      query.limit,
++    );
+   }
+ 
+   async get(id: number) {

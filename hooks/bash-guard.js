@@ -7,6 +7,8 @@
 // redirects into it; .claude/ stays off limits whole. J16 (P4e): in planning (TB_PHASE), git only reads: no option
 // that writes a file, leaves the repo, runs a program or a pager, no VAR=value in front, and no redirect into a file
 // (S2 belt). S3: no RegExp is built from agent text; main() denies a check that runs past 3 s (fail closed, io.run).
+// P5 (D5, RO2): in working, no npx / npm exec / pnpm dlx / yarn dlx: they fetch and run a package outside the lockfile
+// (a dependency is Irfan's call: NEEDS_SCOPE with packages); local tools run as ./node_modules/.bin/<tool> or npm scripts.
 // Rewrites (updatedInput) a command whose simple commands start with a TB_HEAVY prefix (JSON array, matched
 // by leading words, after keywords/VAR=value/env/timeout/nice/nohup/command wrappers, by basename, also inside
 // `sh -c '…'`) to `tbx heavy -- sh -c '<whole command>'`; pins jest --maxWorkers=2, playwright --workers=1.
@@ -37,6 +39,11 @@ const READ_BAD = ['output', 'ext-diff', 'open-files-in-pager'];
 const PLAN_BAD = [...READ_BAD, 'no-index', 'textconv', 'config-env', 'exec-path'];
 const PLAN_GIT_TOP = /^(-c|-p$|--paginate$)/;
 const PLAN_REDIRECT = 'planning only reads: no redirect into a file (only > /dev/null, 2>&1); read the output directly';
+const FETCH_RUN = 'npx, npm exec, pnpm dlx and yarn dlx fetch and run packages outside the lockfile; run ./node_modules/.bin/<tool> or an npm script, or return NEEDS_SCOPE with the package';
+// the command words fetch a package and run it: npx, pnpx, bunx; <pm> [-flags] exec | x | dlx | init | create (npm init <x>
+// and create fetch too; plain `npm init` is harmless, denied anyway: fail closed)
+const FETCHERS = { npm: ['exec', 'x', 'init', 'create'], pnpm: ['dlx', 'create'], yarn: ['dlx', 'create'], bun: ['x', 'create'] };
+const fetchRun = (w) => ['npx', 'pnpx', 'bunx'].includes(base(w[0] ?? '')) || !!(Object.hasOwn(FETCHERS, base(w[0] ?? '')) && FETCHERS[base(w[0])].includes(w.slice(1).find((x) => !x.startsWith('-'))));
 const GIT_ARG = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--config-env']); // global options taking the next word
 const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const base = (s) => s.slice(s.lastIndexOf('/') + 1);
@@ -189,7 +196,7 @@ const pin = (seg, flag, want, to) => (seg.match(flag) ? seg.replace(flag, want) 
 
 // Walks the simple commands of cmd (and one level of `sh -c '…'` text per depth) → {heavy, deny, out: cmd with worker pins}.
 // planning: J16's git rules and the S2 redirect rule apply too.
-function scan(cmd, heavy, depth = 0, planning = false) {
+function scan(cmd, heavy, depth = 0, planning = false, working = false) {
   let isHeavy = false;
   let why = null;
   const out = cmd.split(SEP).map((seg, i, all) => {
@@ -199,7 +206,7 @@ function scan(cmd, heavy, depth = 0, planning = false) {
     const w = t.slice(h).map((x) => x.text);
     if (heavy.some((p) => base(w[0] ?? '') === base(p[0]) && p.every((x, j) => !j || w[j] === x))) isHeavy = true;
     const env = t.slice(0, h).some((x) => /^\w+=/.test(x.text));
-    why ??= denyWhy(w, env) ?? (planning ? planGitWhy(w, env) : null) ?? redirectWhy(t, all, i, planning);
+    why ??= denyWhy(w, env) ?? (planning ? planGitWhy(w, env) : null) ?? (working && fetchRun(w) ? FETCH_RUN : null) ?? redirectWhy(t, all, i, planning);
     if (depth < 3 && SHELLS.has(base(w[0] ?? ''))) {
       const c = w.findIndex((x, j) => j && /^-[a-z]*c[a-z]*$/i.test(x));
       const inner = c > 0 ? t[h + c + 1] : null;
@@ -207,7 +214,7 @@ function scan(cmd, heavy, depth = 0, planning = false) {
       const raw = seg.slice(inner.from, inner.to);
       const q = /^['"]/.test(raw) ? 1 : 0;
       const end = q && raw.length > 1 && raw.endsWith(raw[0]) ? raw.length - 1 : raw.length;
-      const r = scan(raw.slice(q, end), heavy, depth + 1, planning);
+      const r = scan(raw.slice(q, end), heavy, depth + 1, planning, working);
       isHeavy ||= r.heavy;
       why ??= r.deny;
       return seg.slice(0, inner.from + q) + r.out + seg.slice(inner.from + end);
@@ -237,7 +244,7 @@ function guard(command, env = process.env) {
   if (env.TB_PHASE === 'planning' && /(^|[\s;&|(`])(export|declare|typeset|readonly)\b|\bGIT_\w*=/.test(command)) {
     return { deny: 'bash-guard: planning only reads: no export/declare or GIT_* variables (they make git run programs)' };
   }
-  const r = scan(command, heavyList(env), 0, env.TB_PHASE === 'planning');
+  const r = scan(command, heavyList(env), 0, env.TB_PHASE === 'planning', env.TB_PHASE === 'working');
   if (r.deny) return { deny: `bash-guard: ${r.deny}` };
   // $TB_CODE is expanded by the agent's shell (the runner sets it), so a PATH-shadowed tbx cannot take the slot's place
   const out = r.heavy ? `${env.TB_CODE ? '"$TB_CODE/bin/tbx"' : 'tbx'} heavy -- sh -c '${r.out.replaceAll("'", "'\\''")}'` : r.out;

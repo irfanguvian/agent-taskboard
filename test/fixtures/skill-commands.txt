@@ -42,9 +42,9 @@
 0 | tb tag add acme/api --type folder --path "$TB_HOME"
 0 | tb tag add acme/web --type git --path "$TB_HOME" --base main => ^added: tag acme/web · git ·
 0 | tb tag list
-# exit 1: kind not built yet (nothing is built in P1)
-1 | tb new "Add retry to the sync job" -f code -t acme/api => kind code not built yet
-1 | tb promote t_u1v2w3 -f code -t acme/api => kind code not built yet
+# exit 1: kind not built yet (brainstorm is unbuilt)
+1 | tb new "Add retry to the sync job" -f brainstorm -t acme/api => kind brainstorm not built yet
+1 | tb promote t_u1v2w3 -f brainstorm -t acme/api => kind brainstorm not built yet
 0 | tb new "Call the dentist" --status later
 0 | tb new "Plan the offsite" --status later --tag acme/api
 0 | tb set "Plan the offsite" --tag none => ^updated:

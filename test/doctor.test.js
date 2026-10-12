@@ -422,6 +422,21 @@ describe('tag checks', () => {
     assert.match(c.detail, /nope not found/);
   });
 
+  test('P5 T1 doctor --tag re-checks the tag rules: plain files ≤ 8 KB pass; a link, or more than 8 KB, fails the rules check', async () => {
+    const w = repoWorld();
+    const rule = path.join(w.root, 'rules.md');
+    fs.writeFileSync(rule, '# rules\n');
+    w.tag({ rules: [rule] });
+    assert.equal((await w.tagChecks()).find((c) => c.name === 'tag:acme/api:rules')?.ok, true);
+    const link = path.join(w.root, 'rules-link.md');
+    fs.symlinkSync(rule, link);
+    w.tag({ rules: [link] });
+    assert.match((await w.tagChecks()).find((c) => c.name === 'tag:acme/api:rules' && !c.ok)?.detail ?? '', /not a plain file/);
+    fs.writeFileSync(rule, 'x'.repeat(8193));
+    w.tag({ rules: [rule] });
+    assert.match((await w.tagChecks()).find((c) => c.name === 'tag:acme/api:rules' && !c.ok)?.detail ?? '', /at most 8192/);
+  });
+
   test('H3 a check that prints 3 MB (or 20 MB and fails) is judged by its exit code, not killed on maxBuffer; doctor.json keeps only the last 4 KB', async () => {
     const w = repoWorld({}, { withGit: false });
     const tmp = fs.mkdtempSync(path.join(w.root, 'tmp-'));

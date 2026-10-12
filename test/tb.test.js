@@ -208,7 +208,7 @@ test('open --print: a one-time unlock URL that sets the session cookie once (fix
   assert.equal((await tb('open', 'now')).code, 2);
 }));
 
-test('tag add/list round trip; new -f and promote surface the "not built yet" refusal', () => withBoard(async (t, tb) => {
+test('tag add/list round trip; new -f and promote of an unbuilt kind surface the "not built yet" refusal', () => withBoard(async (t, tb) => {
   assert.match((await tb('tag', 'list')).stdout, /^tags\[0\]: none$/m);
   const add = await tb('tag', 'add', 'acme/api', '--type', 'folder', '--path', t.tbHome);
   assert.equal(add.code, 0, add.stdout);
@@ -220,19 +220,19 @@ test('tag add/list round trip; new -f and promote surface the "not built yet" re
   assert.equal(badName.code, 1);
   assert.match(badName.stdout, /^error: tag name must look like/m);
 
-  const flow = await tb('new', 'Add retry to the sync job', '-f', 'code', '-t', 'acme/api');
+  const flow = await tb('new', 'Add retry to the sync job', '-f', 'brainstorm', '-t', 'acme/api');
   assert.equal(flow.code, 1);
-  assert.match(flow.stdout, /^error: kind code not built yet$/m);
+  assert.match(flow.stdout, /^error: kind brainstorm not built yet$/m);
   assert.equal((await state(t)).flows.length, 0);
 
-  const promote = await tb('promote', 't_q7r8s9', '-f', 'code', '-t', 'acme/api');
+  const promote = await tb('promote', 't_q7r8s9', '-f', 'brainstorm', '-t', 'acme/api');
   assert.equal(promote.code, 1);
   assert.match(promote.stdout, /not built yet/);
   assert.ok((await stored(t)).some(r => r.id === 't_q7r8s9'), 'a refused promote must keep the reminder');
 
-  assert.equal((await tb('promote', 't_q7r8s9', '-f', 'code')).code, 2); // -t missing
+  assert.equal((await tb('promote', 't_q7r8s9', '-f', 'brainstorm')).code, 2); // -t missing
   assert.equal((await tb('new', 'x', '-f', 'nope')).code, 2);
-  assert.equal((await tb('new', 'x', '-f', 'code', '--due', '2030-01-01')).code, 2); // reminder flag on a flow
+  assert.equal((await tb('new', 'x', '-f', 'brainstorm', '--due', '2030-01-01')).code, 2); // reminder flag on a flow
   assert.equal((await tb('new', 'x', '--fix-of', 't_q7r8s9')).code, 2); // --fix-of needs -f
 }));
 

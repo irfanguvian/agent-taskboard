@@ -1,0 +1,45 @@
+{
+  "kind": "plan",
+  "summary": "GET /users items gain latestOrder: the user's newest order or null. The page keeps a constant number of queries whatever its size.",
+  "acceptance": [
+    { "id": "A1", "text": "Each GET /users item has latestOrder {id, totalMinor, status, createdAt}: that user's newest order by createdAt (a tie: the higher id), or null when the user has no orders", "type": "new" },
+    { "id": "A2", "text": "Constant query count: GET /users runs the same number of queries whatever the page size (test/users.e2e-spec.ts 'GET /users runs the same number of queries whatever the page size' stays green, unchanged)", "type": "preserve" },
+    { "id": "A3", "text": "GET /users pagination (cursor, limit default 20, max 100) and GET /users/:id answer as before", "type": "preserve" }
+  ],
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "latestOrder on GET /users items",
+      "files": ["src/users/users.service.ts", "src/users/users.dto.ts", "src/users/users.service.spec.ts"],
+      "modules": ["src/users", "test"],
+      "blocked_by": [],
+      "acceptance": ["A1", "A2", "A3"],
+      "type": "new",
+      "test_cmd": "npm test -- src/users/users.service.spec.ts",
+      "steps": [
+        "In src/users/users.service.spec.ts add the unit test \"list returns each user's latestOrder\": UsersService.list gives each item latestOrder, the user's newest order or null. It fails now: list() returns no latestOrder",
+        "Run npm test -- src/users/users.service.spec.ts: red",
+        "In UsersService.list add latestOrder to each item: the user's newest order (createdAt desc, then id desc) as {id, totalMinor, status, createdAt}, or null",
+        "In src/users/users.dto.ts add LatestOrderDto and a list item DTO (UserDto plus a nullable latestOrder) for UserPageDto.data; GET /users/:id keeps UserDto",
+        "Run npm test -- src/users/users.service.spec.ts: green",
+        "Run npm run typecheck and npm test: green"
+      ]
+    }
+  ],
+  "allowed_schema_changes": [],
+  "allowed_api_changes": [],
+  "skills": [],
+  "ui": null,
+  "children": [],
+  "facts": [
+    "src/users/users.service.ts: UsersService.list runs one user.findMany per page (select id, email, name, nickname; pageArgs + toPage)",
+    "prisma/schema.prisma: Order has @@index([userId, createdAt]) already",
+    "test/users.e2e-spec.ts: 'GET /users runs the same number of queries whatever the page size' compares limit=5 and limit=50 through test/utils/query-counter.ts",
+    "src/common/pagination.ts: pageArgs fetches limit + 1 rows; toPage cuts the page and sets nextCursor"
+  ],
+  "decisions": [
+    { "id": "D1", "text": "latestOrder = the newest order by createdAt, a tie broken by the higher id", "source": "planner" },
+    { "id": "D2", "text": "Only GET /users items gain latestOrder; GET /users/:id keeps UserDto", "source": "planner" },
+    { "id": "D3", "text": "No schema change and no new index: Order(userId, createdAt) exists", "source": "planner" }
+  ]
+}

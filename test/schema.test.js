@@ -17,7 +17,8 @@ const PLAN = {
 
 test('U3 fail closed: a keyword the subset lacks (any depth) or a bad keyword value throws at compile', () => {
   assert.throws(() => compile({ type: 'object', oneOf: [] }), /unsupported keyword "oneOf"/);
-  assert.throws(() => compile({ properties: { a: { type: 'string', pattern: '^x' } } }), /schema \/properties\/a: unsupported keyword "pattern"/);
+  // P5 (contract change; was `pattern`, unsupported until the working result caps needed it): any other keyword
+  assert.throws(() => compile({ properties: { a: { type: 'string', format: 'uri' } } }), /schema \/properties\/a: unsupported keyword "format"/);
   assert.throws(() => compile({ type: 'strng' }), /bad value for "type"/);
   assert.throws(() => compile([]), /must be an object/);
   assert.deepEqual(compile({})({ any: 1 }), [], 'the empty schema takes anything (fixture phases)');
