@@ -585,7 +585,7 @@ describe('run: doctor.json', () => {
     const d = w.make({ now: () => new Date('2026-10-08T00:00:00Z') });
     const res = await d.run({});
     assert.equal(res.ok, true);
-    assert.deepEqual(res.checks.map((c) => c.name), ['auth', 'claude_bin', 'fable_billing', 'node']);
+    assert.deepEqual(res.checks.map((c) => c.name), ['auth', 'claude_bin', 'fable_billing', 'node', 'config']);
     const file = path.join(w.tbHome, 'doctor.json');
     assert.equal(fs.statSync(file).mode & 0o777, 0o600);
     assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), { at: '2026-10-08T00:00:00.000Z', ok: true, checks: res.checks });
@@ -695,7 +695,8 @@ describe('e2e: POST /api/doctor and tb doctor on a real tbd', () => {
     assert.equal((await t.api('POST', '/api/doctor', { version: '2.1.295' })).status, 400);
     const r = await t.api('POST', '/api/doctor', {});
     assert.equal(r.status, 200);
-    assert.deepEqual(r.json.checks.map((c) => [c.name, c.ok]), [['auth', true], ['claude_bin', true], ['fable_billing', true], ['node', true]]);
+    assert.deepEqual(r.json.checks.map((c) => [c.name, c.ok]), [['auth', true], ['claude_bin', true], ['fable_billing', true], ['node', true], ['config', true]]);
+    assert.equal(r.json.checks.at(-1).warn, undefined, 'D-0080: a fresh config.json changes no default');
     assert.equal(r.json.ok, true);
     assert.equal(fs.statSync(path.join(t.tbHome, 'doctor.json')).mode & 0o777, 0o600);
 
@@ -703,18 +704,49 @@ describe('e2e: POST /api/doctor and tb doctor on a real tbd', () => {
     assert.equal((await t.api('POST', '/api/doctor', {})).json.ok, false);
   });
 
+  test('D-0080 config: a key off its code default (dotted path) or unknown to the code is a warn, never a fail; machine keys skipped', async () => {
+    const { DEFAULTS } = realStore;
+    const own = await startTbd({ files: { 'config.json': {
+      claude_bin: '/opt/x/claude-2.1.295', claude_team_id: 'ABCDE12345',
+      memory: { ...DEFAULTS.memory, phase_need_gb: { ...DEFAULTS.memory.phase_need_gb, working: 1.5 } },
+      tz: DEFAULTS.tz, bogus: true, max_concurrent: 2, notify: { ...DEFAULTS.notify, reping_min: 10 },
+    } } });
+    try {
+      const c = (await own.api('POST', '/api/doctor', {})).json.checks.find((x) => x.name === 'config');
+      assert.deepEqual(c, { name: 'config', ok: true, warn: true,
+        detail: '4 key(s) differ from the code defaults: memory.phase_need_gb.working: 1.5 (default 1); bogus: unknown key; max_concurrent: 2 (default 1); +1 more' });
+    } finally {
+      await own.stop();
+    }
+  });
+
+  test('D-0080 config: a default key missing from a nested object is listed (shallow merge drops it); URL credentials masked', async () => {
+    const { DEFAULTS } = realStore;
+    const own = await startTbd({ files: { 'config.json': {
+      notify: { quiet: DEFAULTS.notify.quiet },
+      gates: { ...DEFAULTS.gates, registry: 'https://u:s3/cr@et@npm.example/' }, // raw / and @ in the password
+    } } });
+    try {
+      const c = (await own.api('POST', '/api/doctor', {})).json.checks.find((x) => x.name === 'config');
+      assert.deepEqual(c, { name: 'config', ok: true, warn: true,
+        detail: '2 key(s) differ from the code defaults: notify.reping_min: missing (default 30 not applied); gates.registry: "https://***@npm.example/" (default "https://registry.npmjs.org/")' });
+    } finally {
+      await own.stop();
+    }
+  });
+
   test('tb doctor: exit 1 and a fail row on API-key login; exit 0 once it is the subscription', async () => {
     const authFile = path.join(t.tbHome, 'auth.json');
     fs.writeFileSync(authFile, JSON.stringify(AUTH.apiKey));
     const bad = await tb('doctor');
     assert.equal(bad.code, 1, bad.stdout);
-    assert.match(bad.stdout, /^doctor: FAIL \(1 of 4 checks\)$/m);
+    assert.match(bad.stdout, /^doctor: FAIL \(1 of 5 checks\)$/m);
     assert.match(bad.stdout, /^ {2}auth,fail,"authMethod apiKey: runs must use the claude\.ai subscription",/m);
     fs.writeFileSync(authFile, JSON.stringify(AUTH.ok));
     const good = await tb('doctor');
     assert.equal(good.code, 0, good.stdout);
     assert.match(good.stdout, /^doctor: ok$/m);
-    assert.match(good.stdout, /^checks\[4\]\{name,status,detail,fix\}:$/m);
+    assert.match(good.stdout, /^checks\[5\]\{name,status,detail,fix\}:$/m);
     assert.match(good.stdout, /^ {2}fable_billing,ok,plan,""$/m);
   });
 

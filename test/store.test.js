@@ -9,6 +9,7 @@ const os = require('node:os');
 const path = require('node:path');
 const http = require('node:http');
 const { startTbd, isolatedEnv, phaseFixture, PHASE_FILES, FAKE_HANDLERS, TBD } = require('./helpers/tbd');
+const { DEFAULT_PIN } = require('../lib/util');
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'store-'));
 process.on('exit', () => fs.rmSync(root, { recursive: true, force: true }));
@@ -313,10 +314,31 @@ test('S8 writeAtomic never writes through a link at its tmp path: planted before
   assert.deepEqual([fs.readFileSync(victim, 'utf8'), fs.readFileSync(file, 'utf8')], ['mine', 'new'], 'link target unchanged, nothing written');
 });
 
-test('D36 fresh config.json gets the 8 GB RAM defaults (planning/review 0.4, working 1.0, qa 1.5, min_free 1)', async (t) => {
-  const tbd = await startTbd();
-  t.after(() => tbd.stop());
-  const config = JSON.parse(fs.readFileSync(path.join(tbd.tbHome, 'config.json'), 'utf8'));
+// D-0080: store.init() in a child on a TB_HOME (the store reads TB_HOME at require) → its merged config
+const STORE = path.join(__dirname, '..', 'lib', 'store.js');
+function merged(tbHome) {
+  const r = spawnSync(process.execPath, ['-e', `const s = require(${JSON.stringify(STORE)}); s.init(); process.stdout.write(JSON.stringify(s.config))`],
+    { env: isolatedEnv({ home: path.join(root, 'home'), tbHome, port: 0 }), encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  return JSON.parse(r.stdout);
+}
+
+test('D36 D-0080 fresh config.json holds only the machine key claude_bin; the 8 GB RAM defaults (planning/review 0.4, working 1.0, qa 1.5, min_free 1) come from code', () => {
+  const tbHome = path.join(root, 'd80-fresh');
+  const config = merged(tbHome);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(tbHome, 'config.json'), 'utf8')), { claude_bin: path.join(tbHome, 'bin', `claude-${DEFAULT_PIN}`) }, 'no defaults written');
   assert.deepEqual(config.memory.phase_need_gb, { planning: 0.4, review: 0.4, working: 1.0, qa: 1.5 });
   assert.equal(config.memory.min_free_gb, 1);
+  assert.equal(config.claude_bin, path.join(tbHome, 'bin', `claude-${DEFAULT_PIN}`));
+});
+
+test('D-0080 a config.json already there is never rewritten; its keys beat the code defaults, the rest stay defaults', () => {
+  const tbHome = path.join(root, 'd80-own');
+  fs.mkdirSync(tbHome);
+  const text = '{ "max_concurrent": 2 }\n';
+  fs.writeFileSync(path.join(tbHome, 'config.json'), text);
+  const config = merged(tbHome);
+  assert.equal(fs.readFileSync(path.join(tbHome, 'config.json'), 'utf8'), text);
+  assert.equal(config.max_concurrent, 2);
+  assert.deepEqual(config.memory.phase_need_gb, { planning: 0.4, review: 0.4, working: 1.0, qa: 1.5 });
 });

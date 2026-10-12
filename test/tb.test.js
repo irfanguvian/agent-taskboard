@@ -10,6 +10,7 @@ const http = require('node:http');
 const os = require('node:os');
 const path = require('node:path');
 const { startTbd, runTb, request, isolatedEnv, phaseFixture, PHASE_FILES, FAKE_HANDLERS } = require('./helpers/tbd');
+const { ticket } = require('./helpers/runs');
 
 const ROOT = path.join(__dirname, '..');
 const TB = path.join(ROOT, 'bin', 'tb');
@@ -278,6 +279,28 @@ test('new -f and promote create a flow once the kind is built; list --flows and 
   } finally {
     await t.stop();
     fs.rmSync(phases, { recursive: true, force: true });
+  }
+});
+
+// D-0081: tbd sends waiting as an object; the flows table printed [object Object]
+test('list: a flow\'s waiting column is its reason (children done/total), empty when none, never [object Object]', async () => {
+  const since = '2026-10-12T00:00:00.000Z';
+  const files = Object.fromEntries([
+    ticket('t_wait01', { state: 'final_gate', waiting: { reason: 'children', done: 1, total: 2, blocked: 0, since } }),
+    ticket('t_wait02', { state: 'clarify', waiting: { reason: 'manual', since } }),
+    ticket('t_wait03', { state: 'clarify' }),
+  ].map(k => [`tickets/${k.id}/ticket.json`, k]));
+  const t = await startTbd({ files });
+  try {
+    for (const args of [['list', '--flows'], ['list']]) {
+      const out = (await runTb(args, t)).stdout;
+      for (const row of ['t_wait01,code,"",final_gate,children 1/2,run t_wait01', 't_wait02,code,"",clarify,manual,run t_wait02', 't_wait03,code,"",clarify,"",run t_wait03']) {
+        assert.ok(out.includes(`  ${row}\n`), `${args.join(' ')}: ${row}\n${out}`);
+      }
+      assert.doesNotMatch(out, /object Object/);
+    }
+  } finally {
+    await t.stop();
   }
 });
 

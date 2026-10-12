@@ -1,7 +1,8 @@
 'use strict';
 // P1 AC6 notify (D3, D28, REMIND_AT port): ticket waits → 1 banner + sound, re-ping every 30 min, stops on
 // leave; quiet 22:00-07:00 silent + 07:00 summary; weekday "Do now" once per slot; TB_NOTIFY=0 silent;
-// POST /api/notify-test. In-process: real store on a temp TB_HOME, fake clock, stubbed exec (osascript/afplay).
+// POST /api/notify-test. D-0079: a memory wait pings too, with RAM numbers + the biggest apps (one ps).
+// In-process: real store on a temp TB_HOME, fake clock, stubbed exec (osascript/afplay/ps).
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -22,20 +23,28 @@ const { createNotifier } = require('../lib/notify');
 store.init();
 
 const MIN = 60_000;
+const GB = 1024 ** 3;
 const at = (iso) => Date.parse(iso); // tz Asia/Jakarta = UTC+7; 2026-10-07 is a Wednesday
+const settle = () => new Promise((r) => setImmediate(r)); // a memory wait's banner waits for its ps
+const MEM = { reason: 'memory', since: '2026-10-07T03:00:00Z' };
 
-// New notifier with a fake clock; calls = every exec (file + argv). Tickets get cancelled after the test
-// so the next notifier doesn't start out tracking them.
+// New notifier with a fake clock; calls = every exec (file + argv); ps = what /bin/ps answers. Tickets get cancelled
+// after the test so the next notifier doesn't start out tracking them.
 function setup(t, iso, opts = {}) {
   const clock = { ms: at(iso) };
   const calls = [];
-  const exec = (file, args, o, cb) => { calls.push([file, ...args]); cb(null, '', ''); };
+  const ps = { err: null, out: '' };
+  const exec = (file, args, o, cb) => {
+    calls.push([file, ...args]);
+    if (file === '/bin/ps') cb(ps.err, ps.out, '');
+    else cb(null, '', '');
+  };
   const n = createNotifier({ store, exec, now: () => clock.ms, ...opts });
   n.start();
   const made = [];
   t.after(async () => { for (const id of made) await store.updateTicket(id, (k) => ({ ...k, state: 'cancelled', waiting: null })); });
   return {
-    n, clock, calls,
+    n, clock, calls, ps,
     banners: () => calls.filter((c) => c[0] === '/usr/bin/osascript').map((c) => ({ title: c[8], message: c[9], subtitle: c[10] })),
     sounds: () => calls.filter((c) => c[0] === '/usr/bin/afplay').length,
     tickAfter(min) { clock.ms += min * MIN; n.tick(); },
@@ -66,17 +75,81 @@ test('AC6 entering clarify → 1 banner + 1 sound; re-ping at 30 min; leaving th
   assert.equal(s.banners().length, 2, 'no pings after the ticket left clarify');
 });
 
-test('AC6 plan_approval, blocked, waiting manual / needs_scope each ping; waiting memory does not', async (t) => {
+test('AC6 plan_approval, blocked, waiting manual / needs_scope / memory (D-0079) each ping', async (t) => {
   const s = setup(t, '2026-10-07T03:00:00Z');
   const k = await s.flow('Ticket W');
-  await move(k.id, { waiting: { reason: 'memory', since: '2026-10-07T03:00:00Z' } });
-  assert.equal(s.calls.length, 0, 'memory pause is not a wait on you');
+  await move(k.id, { state: 'working', waiting: MEM });
+  await settle();
   await move(k.id, { waiting: { reason: 'manual', since: '2026-10-07T03:00:00Z' } });
   await move(k.id, { waiting: { reason: 'needs_scope', since: '2026-10-07T03:00:00Z' } });
   await move(k.id, { state: 'plan_approval', waiting: null });
   await move(k.id, { state: 'blocked' });
-  assert.deepEqual(s.banners().map((b) => b.title), ['Waiting on you: manual step', 'Waiting on you: scope', 'Plan ready to approve', 'Blocked']);
-  assert.equal(s.sounds(), 4);
+  assert.deepEqual(s.banners().map((b) => b.title), ['Waiting for RAM', 'Waiting on you: manual step', 'Waiting on you: scope', 'Plan ready to approve', 'Blocked']);
+  assert.equal(s.sounds(), 5);
+});
+
+// D-0079. ps rss KB: Chrome 1.0 + 0.4 GB (main + a helper app inside its bundle), claude 0.8, Spotify 0.2, trustd 0.1.
+const PS = [
+  '1048576 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+  ' 419431 /Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Helpers/Google Chrome Helper (Renderer).app/Contents/MacOS/Google Chrome Helper (Renderer)',
+  ' 838861 /Users/me/.local/bin/claude',
+  ' 104858 /usr/libexec/trustd',
+  ' 209715 /Applications/Spotify.app/Contents/MacOS/Spotify',
+].join('\n');
+
+test('D-0079 memory wait: banner + sound at once, RAM numbers + 3 biggest apps from one ps; re-ping recomputes (ps fails → numbers only); wait ends → no re-ping', async (t) => {
+  let avail = 1.4 * GB;
+  const s = setup(t, '2026-10-07T03:00:00Z', { system: () => ({ avail }) });
+  s.ps.out = PS;
+  const k = await s.flow('Sync job');
+  await move(k.id, { state: 'working', waiting: MEM });
+  await settle();
+  assert.deepEqual(s.banners(), [{ title: 'Waiting for RAM', subtitle: 'Sync job',
+    message: 'Needs 2.0 GB free to run, has 1.4 GB. Starts by itself when RAM frees. Biggest now: Google Chrome 1.4 GB, claude 0.8 GB, Spotify 0.2 GB' }]);
+  assert.equal(s.sounds(), 1);
+  assert.deepEqual(s.calls.filter((c) => c[0] === '/bin/ps'), [['/bin/ps', '-U', String(process.getuid()), '-o', 'rss=,comm=']], 'one ps, own processes');
+
+  avail = 0.9 * GB;
+  s.ps.err = Object.assign(new Error('ps timed out'), { code: null, killed: true });
+  s.tickAfter(30);
+  await settle();
+  assert.deepEqual(s.banners().at(-1), { title: 'Still waiting: Waiting for RAM', subtitle: 'Sync job',
+    message: 'Needs 2.0 GB free to run, has 0.9 GB. Starts by itself when RAM frees.' });
+  assert.equal(s.sounds(), 2);
+
+  await move(k.id, { waiting: null });
+  s.tickAfter(30);
+  await settle();
+  assert.equal(s.banners().length, 2, 'no re-ping once the run got its RAM');
+});
+
+test('D-0079 memory wait in quiet hours: no banner, sound or ps until 07:00, then the summary', async (t) => {
+  const s = setup(t, '2026-10-07T15:30:00Z', { system: () => ({ avail: GB }) }); // 22:30 local
+  s.ps.out = PS;
+  const k = await s.flow('Night run');
+  await move(k.id, { state: 'working', waiting: MEM });
+  s.tickAfter(60);
+  await settle();
+  assert.equal(s.calls.length, 0, 'held 22:00-07:00');
+  s.tickAfter(7.5 * 60); // 07:00
+  await settle();
+  assert.deepEqual(s.banners(), [{ title: '1 waiting for RAM', message: 'Night run', subtitle: '' }], 'a RAM wait is not "on you"');
+});
+
+test('D-0079 memory wait text: + docker_reserved_gb while Docker runs, pressure when not normal; a need that is not a number → no "Needs"', async (t) => {
+  const s = setup(t, '2026-10-07T03:00:00Z', { system: () => ({ avail: 3 * GB, docker: true, pressure: 'critical' }) });
+  s.ps.err = new Error('ps failed');
+  const k = await s.flow('Docker job');
+  await move(k.id, { state: 'working', waiting: MEM });
+  await settle();
+  assert.equal(s.banners()[0].message, 'Needs 4.0 GB free to run, has 3.0 GB. Memory pressure critical. Starts by itself when RAM frees.');
+
+  const nan = setup(t, '2026-10-07T03:00:00Z', { system: () => ({ avail: GB, pressure: 'normal' }), need: () => NaN });
+  nan.ps.err = new Error('ps failed');
+  const j = await nan.flow('Broken config job');
+  await move(j.id, { state: 'working', waiting: MEM });
+  await settle();
+  assert.equal(nan.banners()[0].message, 'Starts by itself when RAM frees.');
 });
 
 test('AC6 quiet hours: 22:30 entry silent, night silent, 07:00 one summary, re-ping 30 min later', async (t) => {
@@ -158,6 +231,8 @@ test('AC6 TB_NOTIFY=0: no banner, no sound for waits, re-pings or Do now', async
   delete process.env.TB_NOTIFY;
   const k = await s.flow('Silent one');
   await move(k.id, { state: 'clarify' });
+  await move(k.id, { state: 'working', waiting: MEM }); // D-0079: no ps either
+  await settle();
   s.n.tick();
   s.tickAfter(30);
   assert.equal(s.n.doNow().sent, false);

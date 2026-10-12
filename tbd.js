@@ -79,7 +79,7 @@ process.on('SIGINT', () => stop());
 function boot() {
   try {
     store.init();
-    notifier = createNotifier({ store });
+    notifier = createNotifier({ store, system: () => monitor?.snapshot() ?? null }); // D-0079: RAM free in a memory wait's banner
     store.on('transition', (t) => metrics.ticket(t, store.ticketDir(t.id))); // AC8: t:ticket on done, blocked, cancelled
   } catch (e) {
     die(e.message);
