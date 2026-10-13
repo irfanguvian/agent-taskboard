@@ -1,0 +1,35 @@
+diff --git a/src/users/users.service.ts b/src/users/users.service.ts
+index cff4862..8951b24 100644
+--- a/src/users/users.service.ts
++++ b/src/users/users.service.ts
+@@ -10,22 +10,19 @@ export class UsersService {
+   constructor(private readonly prisma: PrismaService) {}
+ 
+   async list(query: PageQueryDto) {
++    // each user's newest order comes with the page: one query for the page, not one per user
+     const rows = await this.prisma.user.findMany({
+-      select,
++      select: {
++        ...select,
++        orders: { orderBy: { createdAt: 'desc' }, take: 1, select: orderSelect },
++      },
+       orderBy: { id: 'asc' },
+       ...pageArgs(query),
+     });
+-    const items = await Promise.all(
+-      rows.map(async (user) => ({
+-        ...user,
+-        latestOrder: await this.prisma.order.findFirst({
+-          where: { userId: user.id },
+-          orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+-          select: orderSelect,
+-        }),
+-      })),
++    return toPage(
++      rows.map(({ orders, ...user }) => ({ ...user, latestOrder: orders[0] ?? null })),
++      query.limit,
+     );
+-    return toPage(items, query.limit);
+   }
+ 
+   async get(id: number) {

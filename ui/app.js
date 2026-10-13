@@ -647,7 +647,7 @@ function drawerBody(f, ticket, error) {
       el('h2', null, vis(f.title || f.id)),
       el('button', { type: 'button', class: 'ghost', 'data-role': 'close', 'aria-label': 'Close details', onclick: () => $('#drawer').close() }, '×')),
     el('dl', { class: 'facts' },
-      dd('Kind', f.kind), dd('Tag', f.tag), dd('State', stateLabel(st || f.state)), dd('Waiting', w), dd('Rework', k.rework ?? f.rework),
+      dd('Kind', f.kind), dd('Tag', f.tag), dd('State', stateLabel(st || f.state)), dd('Waiting', w), dd('Rework', k.rework ?? f.rework), dd('Fix', k.fixes > 0 ? `${k.fixes}/${ui.fixMax}` : null),
       dd('Branch', k.branch), dd('Base', k.base_sha?.slice(0, 12)),
       dd('Created', when(k.created_at)), dd('Updated', when(k.updated_at || f.updated_at)), dd('Id', f.id)),
     ticket && [
@@ -665,6 +665,7 @@ function drawerBody(f, ticket, error) {
       ['review', 'qa', 'final_gate'].includes(st) && stageActs(f.id, k),
       isObj(k.work) && workView(f.id, k),
       isObj(k.work) && gatesView(f.id),
+      isObj(k.review) && reviewView(f.id, k),
       k.interventions > 0 && ivsView(f.id),
       family(k),
     ],
@@ -783,6 +784,7 @@ async function readOpen() {
       ui.round = j.round ?? null;
       ui.plan = j.plan ?? null;
       ui.ask = j.ask ?? null;
+      ui.fixMax = j.fix_max;
       drawerBody(flowOf(id), ui.ticket = j.ticket);
     }
   } catch (e) {
@@ -1129,6 +1131,31 @@ function gateItem(id, x, newest, latestWorking) {
       el('span', { class: `chip ${unused.has(a) ? 'warn' : 'pass'}` }, unused.has(a) ? 'unused' : 'used'))))] : null,
     isObj(x.ask) && el('p', { class: 'hint' }, `It asked you: ${vis(x.ask.kind)}.`),
     x.why && el('pre', { class: 'log', tabindex: '0', 'aria-label': `Gate ${x.n}: what it found` }, vis(x.why)));
+}
+
+// The review loop (lib/review.js): fix n of FIX_MAX, then the newest review's findings from GET …/report?kind=review. Agent text:
+// el() / textContent only, never markup. Open = blocking (tbd's one rule); a closed id carries how it was fixed.
+function reviewView(id, k) {
+  const r = ui.review?.id === id ? ui.review : null;
+  const rows = r?.data ? [...r.data.findings.map(x => [x, x.blocking ? 'open' : 'need review', x.failure_scenario]), ...r.data.closed.map(c => [{ id: c.id }, 'closed', c.how])] : [];
+  return el('section', { class: 'part', 'aria-labelledby': 'rv-h' },
+    el('div', { class: 'log-head' }, el('h3', { id: 'rv-h' }, 'Review', el('span', { class: 'count' }, `fix ${k.fixes ?? 0}/${ui.fixMax}`)),
+      el('button', { type: 'button', class: 'ghost', 'data-role': 'review', onclick: () => loadReview(id) }, r ? 'Refresh' : 'Show review')),
+    r?.error && el('p', { class: 'hint' }, r.error),
+    r?.data && [el('p', { class: 'hint' }, `Review ${r.data.n}: `, el('span', { class: `chip ${r.data.verdict === 'pass' ? 'pass' : 'fail'}` }, vis(r.data.verdict)), r.data.at ? ` · ${when(r.data.at)}` : '', r.data.truncated ? ' · cut to fit' : ''),
+      rows.length ? el('table', { class: 'dtable rtable' }, el('caption', { class: 'sr' }, `Review ${r.data.n}: findings`),
+        // the drawer is 540 px: short fields in one row, the long texts in a full-width row under it
+        el('thead', null, el('tr', null, ...['Id', 'Sev', 'Conf', 'Where', 'State'].map(h => el('th', { scope: 'col' }, h)))),
+        el('tbody', null, ...rows.flatMap(([x, st, why]) => [
+          el('tr', null, el('td', null, code(String(x.id))), el('td', null, vis(x.severity ?? DASH)), el('td', null, vis(x.confidence ?? DASH)),
+            el('td', null, x.where ? code(x.where) : DASH),
+            el('td', null, el('span', { class: `chip ${st === 'open' ? 'fail' : st === 'closed' ? 'pass' : 'warn'}` }, st))),
+          el('tr', { class: 'rdetail' }, el('td', { colSpan: 5 }, ...(st === 'closed' ? [['How fixed', why]] : [['Problem', x.problem], ['Scenario', why], ['Fix', x.fix]])
+            .map(([h, v]) => el('p', null, el('b', null, `${h}: `), vis(v || DASH)))))]))) : el('p', { class: 'hint' }, 'No findings.')]);
+}
+async function loadReview(id) {
+  try { ui.review = { id, data: await api('GET', `/api/tickets/${enc(id)}/report?kind=review`) }; } catch (e) { ui.review = { id, error: e.status === 404 ? 'No review kept yet.' : e.message }; }
+  redraw();
 }
 
 // interventions.jsonl, oldest first, 20 a page: time, cli or ui, verb, task

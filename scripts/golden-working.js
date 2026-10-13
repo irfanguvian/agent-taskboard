@@ -21,7 +21,7 @@
 // Hidden spec (traps B check 2): test/golden/fixtures/n1.e2e-spec.ts lives only in this repo, never in tb-sandbox. It is
 // copied to <head worktree>/test/golden-n1.e2e-spec.ts after tbd stopped (no session alive), run once
 // (`npm run test:e2e -- golden-n1`, sandboxed), then deleted; the worktree goes at cleanup anyway. Answer-key leak (D-0059):
-// prevented, then detected. --real: tbd runs from a COPY of the code (root/code: tbd.js, lib, hooks, bin, ui, package.json; no
+// prevented, then detected. --real: tbd runs from a COPY of the code (root/code: tbd.js, lib, hooks, bin, ui, phases, package.json; no
 // test/golden, no this script, no .omc/.learning/docs/.git), so TB_CODE (allowRead, for hooks) holds no key; the real
 // repo is denyRead in the sandbox and Read-denied for the file tools (TB_EVAL_DENY_READ, lib/phase-settings.js).
 // contamination() still flags any tool call naming the key. Residual: a copy of the key elsewhere the agent can read
@@ -500,7 +500,7 @@ function cleanSandbox(id, wt) {
 
 // What tbd needs at runtime (no runtime deps); everything else, the answer key included, stays out. → dest
 function codeCopy(dest) {
-  for (const f of ['tbd.js', 'package.json', 'lib', 'hooks', 'bin', 'ui']) fs.cpSync(path.join(REPO, f), path.join(dest, f), { recursive: true });
+  for (const f of ['tbd.js', 'package.json', 'lib', 'hooks', 'bin', 'ui', 'phases']) fs.cpSync(path.join(REPO, f), path.join(dest, f), { recursive: true });
   return dest;
 }
 
@@ -764,6 +764,9 @@ async function main() {
   const scn = path.join(root, 'scn');
   fs.cpSync(path.join(REPO, 'phases'), phases, { recursive: true });
   write(path.join(phases, 'code', 'working', 'prompt.md'), promptText);
+  // M5.1 built code/review; these goldens score working only and end where they always did: review unbuilt (waiting
+  // manual), no review run spawned. The review phase has its own evals (scripts/eval-phase.js).
+  fs.rmSync(path.join(phases, 'code', 'review', 'prompt.md'), { force: true });
   const rules = path.join(root, 'rules', 'FUNDAMENTALS.md'); // T1: the owner's rules, copied (~/.claude is never written)
   write(rules, fs.readFileSync(path.join(os.homedir(), '.claude', 'FUNDAMENTALS.md'), 'utf8'));
   const tag = goldenTag(rules);
@@ -813,7 +816,7 @@ async function main() {
   process.exitCode = ok ? 0 : 1;
 }
 
-module.exports = { codeCopy, CASES, goldenTag, ticketText, guardHome, gatesRun, factsB, factsC, precommit, queueDry, report, DRY_MSG, queryInLoop, blockOf, removedLines, nonNicknameLines, specDiff, newTableCols, modelCols, firstCatch, loopEdits, contamination, checksB, checksC, checksCEmpty, B_NAMES, C_NAMES, CE_NAMES, parse };
+module.exports = { codeCopy, freshPath, CASES, goldenTag, ticketText, guardHome, gatesRun, factsB, factsC, precommit, queueDry, report, DRY_MSG, queryInLoop, blockOf, removedLines, nonNicknameLines, specDiff, newTableCols, modelCols, firstCatch, loopEdits, contamination, checksB, checksC, checksCEmpty, B_NAMES, C_NAMES, CE_NAMES, parse };
 
 if (require.main === module) {
   main().catch((e) => {

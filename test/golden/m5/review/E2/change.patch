@@ -1,0 +1,64 @@
+diff --git a/README.md b/README.md
+index 9d6566b..32c6231 100644
+--- a/README.md
++++ b/README.md
+@@ -16,7 +16,7 @@ erDiagram
+ | GET | `/users` | cursor pagination: `cursor`, `limit` (default 20, max 100) |
+ | GET | `/users/:id` | one user |
+ | GET | `/orders?userId=` | orders of one user, newest first, same pagination |
+-| POST | `/orders` | body `{ userId, totalMinor }`, `totalMinor` is an integer > 0 (minor units) |
++| POST | `/orders` | body `{ userId, totalMinor }`, `totalMinor` is an integer from 1 to 10 000 000 (minor units) |
+ | GET | `/health` | liveness probe, no auth, no DB; returns `{"status":"ok"}` |
+ 
+ Swagger UI at `/docs` when the app runs.
+diff --git a/src/orders/orders.dto.ts b/src/orders/orders.dto.ts
+index 4f41eb1..70e77f4 100644
+--- a/src/orders/orders.dto.ts
++++ b/src/orders/orders.dto.ts
+@@ -1,8 +1,11 @@
+ import { ApiProperty } from '@nestjs/swagger';
+ import { Type } from 'class-transformer';
+-import { IsInt, Min } from 'class-validator';
++import { IsInt, Max, Min } from 'class-validator';
+ import { PageQueryDto } from '../common/pagination.js';
+ 
++/** The highest order total accepted: 100 000.00 in integer minor units. */
++export const MAX_TOTAL_MINOR = 10_000_000;
++
+ export class OrderDto {
+   @ApiProperty() id: number;
+   @ApiProperty() userId: number;
+@@ -30,8 +33,9 @@ export class CreateOrderDto {
+   @Min(1)
+   userId: number;
+ 
+-  @ApiProperty({ minimum: 1, description: 'total in integer minor units (cents)' })
++  @ApiProperty({ minimum: 1, maximum: MAX_TOTAL_MINOR, description: 'total in integer minor units (cents)' })
+   @IsInt()
+   @Min(1)
++  @Max(MAX_TOTAL_MINOR)
+   totalMinor: number;
+ }
+diff --git a/test/orders.e2e-spec.ts b/test/orders.e2e-spec.ts
+index 1ab840e..2826e5e 100644
+--- a/test/orders.e2e-spec.ts
++++ b/test/orders.e2e-spec.ts
+@@ -33,6 +33,18 @@ describe('orders (e2e)', () => {
+     await server().post('/orders').send({ userId: 2, totalMinor: 10.5 }).expect(400);
+   });
+ 
++  it('POST /orders accepts a total at the maximum', async () => {
++    const { body } = await server().post('/orders').send({ userId: 3, totalMinor: 10_000_000 }).expect(201);
++    expect(body).toMatchObject({ userId: 3, totalMinor: 10_000_000 });
++  });
++
++  it('POST /orders rejects a total above the maximum and stores nothing', async () => {
++    const before = await server().get('/orders?userId=4&limit=100').expect(200);
++    await server().post('/orders').send({ userId: 4, totalMinor: 10_000_001 }).expect(400);
++    const after = await server().get('/orders?userId=4&limit=100').expect(200);
++    expect(after.body.data).toHaveLength(before.body.data.length);
++  });
++
+   it('POST /orders rejects an unknown user', async () => {
+     await server().post('/orders').send({ userId: 9999, totalMinor: 100 }).expect(422);
+   });

@@ -319,6 +319,11 @@ main { max-width: 1560px; margin: 0 auto; padding: 22px 24px 56px; }
 .dtable td { padding: 7px 8px; border-top: 1px solid var(--line); vertical-align: top; overflow-wrap: anywhere; }
 .dtable td:last-child { width: 9.5rem; }
 .dtable tr.planner td:first-child { box-shadow: inset 3px 0 0 var(--amber); }
+.rtable td:last-child { width: auto; }
+.rtable tr:not(.rdetail) td:not(:nth-child(4)) { white-space: nowrap; }
+.rtable tr.rdetail td { border-top: 0; padding-top: 0; }
+.rtable .rdetail p { margin: 0 0 6px; }
+.rtable .rdetail b { font-weight: 600; color: var(--mute); }
 .src { font-size: 12px; font-weight: 600; }
 .src.you { color: var(--accent-ink); }
 .src.ticket, .src.adr { color: var(--steel); }
@@ -331,7 +336,7 @@ main { max-width: 1560px; margin: 0 auto; padding: 22px 24px 56px; }
 .sheet input[type="text"] { flex: 1 1 14rem; min-width: 0; font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
 .pick { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--mute); }
 .ask { padding: 10px 12px 12px; border-radius: 6px; border-left: 4px solid var(--accent); background: var(--you-bg); }
-.ask code, .gate code, .wtable code, .passform code, .part .plist code { padding: 1px 5px; border-radius: 4px; background: var(--chip-bg); font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
+.ask code, .gate code, .wtable code, .passform code, .part .plist code, .part .rtable code { padding: 1px 5px; border-radius: 4px; background: var(--chip-bg); font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
 .ask .change { display: grid; gap: 6px; }
 .acts .ghost.armed, .ask .ghost.armed { background: var(--red); border-color: var(--red); color: var(--on-red); font-weight: 700; }
 .chip.pass { background: transparent; color: var(--green); box-shadow: inset 0 0 0 1px currentColor; font-weight: 600; }

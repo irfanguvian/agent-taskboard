@@ -106,3 +106,17 @@ test('XSS: agent strings in the P5 drawer (gate tail, why, file names, changes, 
   const link = walk(trees[0]).attrs.find((a) => a.startsWith('href='));
   assert.equal(link, `href=/api/tickets/t_xss001/gates/3/log?check=${encodeURIComponent(`unit${S}`)}`);
 });
+
+test('XSS: review findings (M5.1 Review view) render as text only', () => {
+  const ctx = sandbox();
+  const run = (code) => vm.runInContext(code, ctx);
+  run('state = { reminders: [], flows: [], system: {}, calendar: {} }; ui.open = "t_xss001"; ui.fixMax = 3;');
+  const f = (over) => ({ id: 'F1', severity: 'HIGH', confidence: 'high', where: `src/${P}.js:1`, problem: `p ${P}`, failure_scenario: `s ${S}`, fix: `f ${P}`, blocking: true, ...over });
+  const tree = run(`ui.review = { id: "t_xss001", data: { n: 1, verdict: ${JSON.stringify(`block${S}`)}, at: "2026-10-12T01:02:03.000Z",
+    findings: [${JSON.stringify(f())}, ${JSON.stringify(f({ id: `F2${P}`, blocking: false }))}], closed: [{ id: "F3", how: ${JSON.stringify(`how ${P}`)} }] } };
+    reviewView("t_xss001", { fixes: 1, review: { n: 1 } })`);
+  const w = walk(tree);
+  assert.ok(w.tags.every((t) => !['img', 'script', 'iframe', 'svg', 'object'].includes(t)), `no element from a payload: ${w.tags}`);
+  assert.deepEqual(w.attrs.filter((a) => /^(on\w+|src|srcdoc|formaction|href)=/i.test(a)), [], 'no payload in a handler, src or link attribute');
+  assert.ok(w.text.some((s) => s.includes(`p ${P}`)) && w.text.some((s) => s.includes(`s ${S}`)) && w.text.includes('fix 1/3'), 'the payload and fix n/3 are there, as text');
+});

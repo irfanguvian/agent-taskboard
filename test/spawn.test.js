@@ -221,3 +221,20 @@ test('S4 a .gitmodules path that leads out of the worktree through a link (the l
   assert.deepEqual((await spawn.plantedConfig(t, wt, path.join(root, 'ticket'), process.env)).sort(),
     ['.gitmodules: a/sub (leads outside the worktree)', '.gitmodules: link (leads outside the worktree)']);
 });
+
+// M5 C2 (D-0085): the rules reach every code run through its system prompt; the repo's own CLAUDE.md through the cwd
+test('M5 C2 a code run: runs/<n>.system.md (0600) = the phase prompt + \\n\\n + phases/_rules.md, passed as --append-system-prompt-file; the repo\'s own CLAUDE.md (tracked at base_sha) is not refused and loads (cwd = worktree, --setting-sources project)', async () => {
+  const wt = fs.mkdtempSync(path.join(ROOT, 'wt-'));
+  const git = (...a) => execFileSync('/usr/bin/git', ['-C', wt, ...a], { env: GENV, encoding: 'utf8' }).trim();
+  git('init', '-q');
+  fs.writeFileSync(path.join(wt, 'CLAUDE.md'), '# repo conventions\n');
+  git('add', '-A');
+  git('-c', 'user.name=t', '-c', 'user.email=t@example.invalid', 'commit', '-qm', 'base');
+  const { d, ticketDir } = await run({ resume: false, ticket: { worktree: wt, base_sha: git('rev-parse', 'HEAD') } });
+  const sys = path.join(ticketDir, 'runs/2.system.md');
+  assert.equal(d.opts['--append-system-prompt-file'], sys);
+  assert.equal(fs.readFileSync(sys, 'utf8'), `# working fixture\n\n\n${fs.readFileSync(path.join(__dirname, '..', 'phases', '_rules.md'), 'utf8')}`);
+  assert.equal(fs.statSync(sys).mode & 0o777, 0o600);
+  assert.equal(fs.realpathSync(d.cwd), fs.realpathSync(wt));
+  assert.equal(d.opts['--setting-sources'], 'project', 'claude loads the cwd CLAUDE.md');
+});

@@ -253,7 +253,7 @@ test('code copy for the harness tbd: has what tbd needs, none of the answer key'
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tbg-test-'));
   try {
     const c = G.codeCopy(path.join(dir, 'code'));
-    for (const f of ['tbd.js', 'lib/phase-settings.js', 'lib/gates/gate.sb', 'hooks/bash-guard.js', 'bin/tbx']) assert.ok(fs.existsSync(path.join(c, f)), f);
+    for (const f of ['tbd.js', 'lib/phase-settings.js', 'lib/gates/gate.sb', 'hooks/bash-guard.js', 'bin/tbx', 'phases/_rules.md']) assert.ok(fs.existsSync(path.join(c, f)), f);
     const all = fs.readdirSync(c, { recursive: true, encoding: 'utf8' });
     assert.deepEqual(all.filter((f) => /golden|\.omc|sandbox-traps|n1\.e2e/.test(f)), []);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }

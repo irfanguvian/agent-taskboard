@@ -154,7 +154,8 @@ test('AC2 + AC3: §9 argv and env through tbd (removed keys absent, TBX_RUN live
   const tk = path.join(tbd.tbHome, 'tickets', 't_argv01');
   assert.deepEqual(d.argv, [
     '-p', '--session-id', lease.session, '--setting-sources', 'project', '--settings', path.join(tk, 'runs/1.settings.json'),
-    '--append-system-prompt-file', path.join(PHASES, 'code/planning/prompt.md'), '--add-dir', path.join(tk, 'skills'), '--add-dir', tag,
+    // M5 C2 (contract change: was the phase's prompt.md): a code run's prompt + phases/_rules.md
+    '--append-system-prompt-file', path.join(tk, 'runs/1.system.md'), '--add-dir', path.join(tk, 'skills'), '--add-dir', tag,
     '--strict-mcp-config', '--mcp-config', path.join(tk, 'runs/1.mcp.json'), '--tools', 'Read,Glob,Grep', '--disallowedTools', 'Agent',
     '--permission-mode', 'dontAsk', '--permission-prompts', 'none', '--model', 'fable', '--effort', 'high', '--fallback-model', 'opus',
     '--max-turns', '60', '--json-schema', JSON.stringify(SCHEMA), '--output-format', 'stream-json', '--verbose', '--include-partial-messages',

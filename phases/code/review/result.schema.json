@@ -1,0 +1,121 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "verdict",
+    "findings",
+    "closed",
+    "notes",
+    "declined"
+  ],
+  "properties": {
+    "verdict": {
+      "type": "string",
+      "enum": [
+        "pass",
+        "block"
+      ]
+    },
+    "findings": {
+      "type": "array",
+      "maxItems": 30,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "severity",
+          "confidence",
+          "where",
+          "problem",
+          "failure_scenario",
+          "fix"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^F[1-9][0-9]{0,2}$"
+          },
+          "severity": {
+            "type": "string",
+            "enum": [
+              "CRIT",
+              "HIGH",
+              "MED",
+              "LOW"
+            ]
+          },
+          "confidence": {
+            "type": "string",
+            "enum": [
+              "high",
+              "medium"
+            ]
+          },
+          "where": {
+            "type": "string",
+            "maxLength": 400,
+            "pattern": "^(?!/)(?!(?:.*/)?\\.\\.(?:/|:))[^:\\u0000-\\u001f\\u007f\\u061c\\u200b-\\u200f\\u202a-\\u202e\\u2060\\u2066-\\u2069\\ufeff]+:[1-9][0-9]{0,6}(?:-[1-9][0-9]{0,6})?$"
+          },
+          "problem": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          },
+          "failure_scenario": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          },
+          "fix": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          },
+          "cheap": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "closed": {
+      "type": "array",
+      "maxItems": 30,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "how"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^F[1-9][0-9]{0,2}$"
+          },
+          "how": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          }
+        }
+      }
+    },
+    "notes": {
+      "type": "array",
+      "maxItems": 30,
+      "items": {
+        "type": "string",
+        "maxLength": 2048
+      }
+    },
+    "declined": {
+      "type": "array",
+      "maxItems": 30,
+      "items": {
+        "type": "string",
+        "maxLength": 2048
+      }
+    }
+  }
+}

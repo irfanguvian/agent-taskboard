@@ -72,7 +72,7 @@ test('phases: built fixture → POST /api/flows 201 backlog ticket on disk, SSE 
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(dir, 'ticket.json'), 'utf8')), k);
   assert.equal(fs.readFileSync(path.join(dir, 'ticket.md'), 'utf8'), '# Paginate GET /users\n\nPaginate GET /users\nwith cursors\n');
   assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'events.jsonl'), 'utf8')).kind, 'create');
-  assert.deepEqual((await tbd.api('GET', `/api/tickets/${k.id}`)).json, { ticket: k });
+  assert.deepEqual((await tbd.api('GET', `/api/tickets/${k.id}`)).json, { ticket: k, fix_max: 3 }); // M5.1 C20: fix_max rides the envelope
   assert.deepEqual((await tbd.api('GET', '/api/state')).json.flows,
     [{ id: k.id, title: k.title, kind: 'code', tag: null, state: 'backlog', waiting: null, rework: 0, updated_at: k.updated_at, merged_at: null }]);
   const want = `event: ticket\ndata: {"id":"${k.id}","state":"backlog","waiting":null,"rework":0}\n\n`;
@@ -124,4 +124,43 @@ test('phases: promote turns a reminder into a backlog flow (promoted_from, title
   assert.deepEqual(st.flows.map((f) => f.id), [k.id]);
   assert.equal((await tbd.api('POST', `/api/tickets/${id}/promote`, { kind: 'code' })).status, 404);
   assert.equal((await tbd.api('POST', '/api/tickets/t_zzzzzz/promote', { kind: 'code' })).status, 404);
+});
+
+// ---- M5 C2: phases/_rules.md ----------------------------------------------------------------------------------------
+// lib/phases.js reads <its dir>/../phases/_rules.md once at load: a copy of it in a temp code dir, loaded in a child,
+// with each rules file. → {review: code/review, research: research/working (no rules needed), sha12}
+function loadWith(rules) {
+  const code = fs.mkdtempSync(path.join(root, 'code-'));
+  fs.mkdirSync(path.join(code, 'lib'));
+  fs.copyFileSync(path.join(__dirname, '..', 'lib', 'phases.js'), path.join(code, 'lib', 'phases.js'));
+  phaseFixture(path.join(code, 'phases'), { 'code/review': PHASE_FILES, 'research/working': PHASE_FILES });
+  if (rules !== null) fs.writeFileSync(path.join(code, 'phases', '_rules.md'), rules);
+  const js = `const p = require(${JSON.stringify(path.join(code, 'lib', 'phases.js'))}); for (const k of ['code/review', 'research/working']) p.registerHandler(k, async () => {});
+    const g = (k, ph) => ({ built: p.built(k, ph), misconfigured: p.misconfigured(k, ph) });
+    process.stdout.write(JSON.stringify({ review: g('code', 'review'), research: g('research', 'working'), sha12: p.rules?.sha12 ?? null }));`;
+  const { TB_PHASES_DIR: _, ...env } = process.env;
+  return JSON.parse(require('node:child_process').execFileSync(process.execPath, ['-e', js], { env, encoding: 'utf8' }));
+}
+
+test('M5 C2 rules missing or over 8 KB → every code phase misconfigured (never spawned), other kinds unaffected; exactly 8 KB loads', () => {
+  const bad = { review: { built: false, misconfigured: true }, research: { built: true, misconfigured: false }, sha12: null };
+  assert.deepEqual(loadWith(null), bad, 'missing');
+  assert.deepEqual(loadWith('x'.repeat(8 * 1024 + 1)), bad, 'over 8 KB');
+  const ok = 'y'.repeat(8 * 1024);
+  assert.deepEqual(loadWith(ok), { review: { built: true, misconfigured: false }, research: { built: true, misconfigured: false },
+    sha12: require('node:crypto').createHash('sha256').update(ok).digest('hex').slice(0, 12) });
+});
+
+test('M5 C2 phases/_rules.md (public repo): ≤ 8 KB, headings 1-9 in order, OWASP 2025 A01..A10, no home path, email, person or tool name', () => {
+  const text = fs.readFileSync(path.join(__dirname, '..', 'phases', '_rules.md'), 'utf8');
+  assert.ok(Buffer.byteLength(text) <= 8 * 1024, `${Buffer.byteLength(text)} bytes`);
+  assert.deepEqual(text.match(/^## \d\. \w+/gm), ['## 1. Precedence', '## 2. Security', '## 3. Gates', '## 4. Performance', '## 5. API', '## 6. Code', '## 7. Database', '## 8. Tests', '## 9. Honesty']);
+  assert.match(text, new RegExp(['A01 Broken Access Control', 'A02 Security Misconfiguration', 'A03 Software Supply Chain Failures', 'A04 Cryptographic Failures',
+    'A05 Injection', 'A06 Insecure Design', 'A07 Authentication Failures', 'A08 Software or Data Integrity Failures', 'A09 Security Logging and Alerting Failures',
+    'A10 Mishandling of Exceptional Conditions'].join('[^]*')), 'the 2025 list, in its order (not 2021)');
+  assert.doesNotMatch(text, /\/Users\/|\/home\/|~\/|@/, 'no home path or email address');
+  // split so this file never trips the push leak gate itself
+  for (const w of ['ir' + 'fan', 'guv' + 'ian', 'her' + 'dr', 'o' + 'mc', 'oh-my-' + 'claude', 'cave' + 'man', 'pony' + 'tail', 'lav' + 'ish', 'graph' + 'ify', '-' + 'axi']) {
+    assert.doesNotMatch(text, new RegExp(`(^|[^a-z])${w}([^a-z]|$)`, 'i'), `no "${w}"`);
+  }
 });

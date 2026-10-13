@@ -1,0 +1,39 @@
+{
+  "title": "E3 round 2: old F1 fixed + a new MED: F1 closed, MED open",
+  "ticket": "GET /users should include each user's latest order.",
+  "plan": "../E1/plan.json",
+  "commits": ["../E1/change.patch", "fix.patch"],
+  "prior": {
+    "commit": 1,
+    "fixes": 1,
+    "open": ["F1"],
+    "review": {
+      "verdict": "block",
+      "findings": [{
+        "id": "F1", "severity": "HIGH", "confidence": "high", "where": "src/users/users.service.ts:21",
+        "problem": "UsersService.list runs one order.findFirst per user of the page (N+1).",
+        "failure_scenario": "GET /users?limit=50 runs 52 queries instead of 2; the constant query count test goes red.",
+        "fix": "Load the newest order with the page in the same findMany (orders, take 1) and map orders[0] ?? null."
+      }],
+      "closed": [],
+      "notes": [],
+      "declined": []
+    }
+  },
+  "expect": {
+    "closed": ["F1"],
+    "findings": [{ "severity": ["MED"], "path": "src/users/users.service.ts", "lines": [14, 18], "new": true }]
+  },
+  "example": {
+    "verdict": "block",
+    "findings": [{
+      "id": "F2", "severity": "MED", "confidence": "high", "where": "src/users/users.service.ts:17",
+      "problem": "The fix orders a user's orders by createdAt only; round 1 and A1 break a tie by the higher id.",
+      "failure_scenario": "Two orders of one user with the same createdAt: latestOrder may be the lower id.",
+      "fix": "orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] and a test with two orders at the same createdAt."
+    }],
+    "closed": [{ "id": "F1", "how": "list loads orders (take 1) in the page's findMany: one query per page." }],
+    "notes": [],
+    "declined": []
+  }
+}

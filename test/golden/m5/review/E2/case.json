@@ -1,0 +1,14 @@
+{
+  "title": "E2 clean diff: pass, no invented finding",
+  "ticket": "POST /orders should refuse an order total above 100 000.00.",
+  "plan": "plan.json",
+  "commits": ["change.patch"],
+  "expect": { "verdict": "pass", "findings": [], "max_findings": 0 },
+  "example": {
+    "verdict": "pass",
+    "findings": [],
+    "closed": [],
+    "notes": ["@Max is inclusive: 10000000 passes, 10000001 is a 400 from the global ValidationPipe; both bounds have an e2e test."],
+    "declined": ["no auth on POST /orders: at base, not this change"]
+  }
+}

@@ -16,6 +16,7 @@ const { createSlots } = require('./lib/slots');
 const { createRunner } = require('./lib/runner');
 const planning = require('./lib/planning'); // registers the code/planning handler + seed (P4)
 const working = require('./lib/working'); // registers the code/working handler, seed + next hook (P5)
+require('./lib/review'); // registers the code/review handler, seed + next hook (M5 C3)
 const pass = require('./lib/pass');
 const metrics = require('./lib/metrics');
 

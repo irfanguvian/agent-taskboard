@@ -1,0 +1,22 @@
+{
+  "title": "E1 planted N+1: HIGH at the right line",
+  "ticket": "GET /users should include each user's latest order.",
+  "plan": "plan.json",
+  "commits": ["change.patch"],
+  "expect": {
+    "verdict": "block",
+    "findings": [{ "severity": ["HIGH"], "confidence": "high", "path": "src/users/users.service.ts", "lines": [18, 27] }]
+  },
+  "example": {
+    "verdict": "block",
+    "findings": [{
+      "id": "F1", "severity": "HIGH", "confidence": "high", "where": "src/users/users.service.ts:19-26",
+      "problem": "UsersService.list runs one order.findFirst per user of the page (N+1), and one more for the extra cursor row.",
+      "failure_scenario": "GET /users?limit=50 runs 52 queries instead of 2; 'GET /users runs the same number of queries whatever the page size' goes red.",
+      "fix": "Load the newest order with the page: select orders {orderBy [createdAt desc, id desc], take 1} in the findMany and map orders[0] ?? null."
+    }],
+    "closed": [],
+    "notes": ["DTO and the two new e2e tests match A1."],
+    "declined": []
+  }
+}

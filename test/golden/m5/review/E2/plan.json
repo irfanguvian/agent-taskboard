@@ -1,0 +1,41 @@
+{
+  "kind": "plan",
+  "summary": "POST /orders refuses a totalMinor above 10 000 000 (100 000.00) with 400; the maximum itself is accepted.",
+  "acceptance": [
+    { "id": "A1", "text": "POST /orders with totalMinor 10000001 answers 400 and stores no order", "type": "new" },
+    { "id": "A2", "text": "POST /orders with totalMinor 10000000 answers 201 with the order", "type": "new" },
+    { "id": "A3", "text": "POST /orders still refuses totalMinor 0 or 10.5 (400) and an unknown user (422)", "type": "preserve" }
+  ],
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "maximum order total on POST /orders",
+      "files": ["src/orders/orders.dto.ts", "test/orders.e2e-spec.ts", "README.md"],
+      "modules": ["src/orders", "test"],
+      "blocked_by": [],
+      "acceptance": ["A1", "A2", "A3"],
+      "type": "new",
+      "test_cmd": "npm run test:e2e -- orders",
+      "steps": [
+        "In test/orders.e2e-spec.ts add \"POST /orders accepts a total at the maximum\" and \"POST /orders rejects a total above the maximum and stores nothing\". The second fails now: 10000001 is accepted",
+        "Run npm run test:e2e -- orders: red",
+        "In src/orders/orders.dto.ts add MAX_TOTAL_MINOR = 10_000_000 and @Max(MAX_TOTAL_MINOR) on CreateOrderDto.totalMinor, maximum in its @ApiProperty",
+        "Update the POST /orders row in README.md",
+        "Run npm run test:e2e -- orders: green"
+      ]
+    }
+  ],
+  "allowed_schema_changes": [],
+  "allowed_api_changes": ["POST /orders: totalMinor maximum 10000000 (400 above it)"],
+  "skills": [],
+  "ui": null,
+  "children": [],
+  "facts": [
+    "src/orders/orders.dto.ts: CreateOrderDto.totalMinor is @IsInt @Min(1)",
+    "src/app.module.ts: a global ValidationPipe (transform, whitelist) answers 400 on a DTO violation",
+    "test/orders.e2e-spec.ts: 'POST /orders rejects a non-positive or non-integer total' covers the lower bound"
+  ],
+  "decisions": [
+    { "id": "D1", "text": "The maximum is 10 000 000 minor units, inclusive", "source": "planner" }
+  ]
+}

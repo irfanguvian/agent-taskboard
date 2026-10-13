@@ -1,0 +1,90 @@
+diff --git a/src/users/users.dto.ts b/src/users/users.dto.ts
+index 106f9c1..7b8c1a1 100644
+--- a/src/users/users.dto.ts
++++ b/src/users/users.dto.ts
+@@ -7,7 +7,18 @@ export class UserDto {
+   @ApiProperty({ type: String, nullable: true }) nickname: string | null;
+ }
+ 
++export class LatestOrderDto {
++  @ApiProperty() id: number;
++  @ApiProperty({ description: 'integer minor units' }) totalMinor: number;
++  @ApiProperty() status: string;
++  @ApiProperty({ format: 'date-time' }) createdAt: Date;
++}
++
++export class UserListItemDto extends UserDto {
++  @ApiProperty({ type: LatestOrderDto, nullable: true }) latestOrder: LatestOrderDto | null;
++}
++
+ export class UserPageDto {
+-  @ApiProperty({ type: [UserDto] }) data: UserDto[];
++  @ApiProperty({ type: [UserListItemDto] }) data: UserListItemDto[];
+   @ApiProperty({ type: Number, nullable: true }) nextCursor: number | null;
+ }
+diff --git a/src/users/users.service.ts b/src/users/users.service.ts
+index 2eb7c79..cff4862 100644
+--- a/src/users/users.service.ts
++++ b/src/users/users.service.ts
+@@ -3,6 +3,7 @@ import { PageQueryDto, pageArgs, toPage } from '../common/pagination.js';
+ import { PrismaService } from '../prisma/prisma.service.js';
+ 
+ const select = { id: true, email: true, name: true, nickname: true } as const;
++const orderSelect = { id: true, totalMinor: true, status: true, createdAt: true } as const;
+ 
+ @Injectable()
+ export class UsersService {
+@@ -14,7 +15,17 @@ export class UsersService {
+       orderBy: { id: 'asc' },
+       ...pageArgs(query),
+     });
+-    return toPage(rows, query.limit);
++    const items = await Promise.all(
++      rows.map(async (user) => ({
++        ...user,
++        latestOrder: await this.prisma.order.findFirst({
++          where: { userId: user.id },
++          orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
++          select: orderSelect,
++        }),
++      })),
++    );
++    return toPage(items, query.limit);
+   }
+ 
+   async get(id: number) {
+diff --git a/test/users.e2e-spec.ts b/test/users.e2e-spec.ts
+index fde436e..08f81dd 100644
+--- a/test/users.e2e-spec.ts
++++ b/test/users.e2e-spec.ts
+@@ -58,6 +58,30 @@ describe('users (e2e)', () => {
+     expect(small).toBeLessThanOrEqual(3);
+   });
+ 
++  it('GET /users gives each user their newest order as latestOrder', async () => {
++    const { body } = await get('/users?limit=3').expect(200);
++    for (const user of body.data) {
++      const { body: orders } = await get(`/orders?userId=${user.id}&limit=1`).expect(200);
++      expect(user.latestOrder).toEqual({
++        id: orders.data[0].id,
++        totalMinor: orders.data[0].totalMinor,
++        status: orders.data[0].status,
++        createdAt: orders.data[0].createdAt,
++      });
++    }
++  });
++
++  it('GET /users gives latestOrder null to a user without orders', async () => {
++    const prisma = app.get(PrismaService);
++    const user = await prisma.user.create({ data: { email: 'no-orders@example.test', name: 'No Orders' } });
++    try {
++      const { body } = await get(`/users?cursor=${user.id}&limit=1`).expect(200);
++      expect(body.data[0]).toMatchObject({ id: user.id, latestOrder: null });
++    } finally {
++      await prisma.user.delete({ where: { id: user.id } });
++    }
++  });
++
+   it('GET /users/:id returns the user with nickname', async () => {
+     const { body } = await get('/users/1').expect(200);
+     expect(body).toEqual({ id: 1, email: 'user1@example.test', name: 'User 1', nickname: 'nick1' });

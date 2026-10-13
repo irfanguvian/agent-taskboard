@@ -152,14 +152,17 @@ test('P3a a state change clears waiting (a cancelled ticket never re-pings a sta
   assert.equal((await fsm.transition(store, t.id, 'cancelled', 'you')).waiting, null);
 });
 
-// A10
-test('A10 resume from blocked resets rework to 0 and clears blocked_from; blocking alone keeps rework', async () => {
+// A10; M5 C4 (contract change: Resume also resets the fix counter) + C1 (a replan drops the review rounds)
+test('A10 + M5 C4 resume from blocked resets rework and fixes to 0 and clears blocked_from; blocking alone keeps both; a move to planning drops review', async () => {
   const t = await store.createFlow({ text: 'resume resets rework', kind: 'code' });
-  await store.updateTicket(t.id, (k) => ({ ...k, state: 'working', rework: 2 }));
+  const review = { n: 2, head: 'a'.repeat(40), open: ['F1'] };
+  await store.updateTicket(t.id, (k) => ({ ...k, state: 'working', rework: 2, fixes: 3, review }));
   const blocked = await fsm.transition(store, t.id, 'blocked', 'runner');
-  assert.deepEqual([blocked.rework, blocked.blocked_from], [2, 'working']);
+  assert.deepEqual([blocked.rework, blocked.fixes, blocked.blocked_from], [2, 3, 'working']);
   const resumed = await fsm.transition(store, t.id, 'working', 'you');
   const onDisk = JSON.parse(fs.readFileSync(path.join(process.env.TB_HOME, 'tickets', t.id, 'ticket.json'), 'utf8'));
-  for (const k of [resumed, onDisk]) assert.deepEqual([k.state, k.rework, 'blocked_from' in k], ['working', 0, false]);
+  for (const k of [resumed, onDisk]) assert.deepEqual([k.state, k.rework, k.fixes, 'blocked_from' in k, k.review], ['working', 0, 0, false, review]);
+  await fsm.transition(store, t.id, 'blocked', 'runner');
+  assert.equal('review' in (await fsm.transition(store, t.id, 'planning', 'you')), false, 'a replan starts its review rounds afresh');
   await store.releasePid();
 });

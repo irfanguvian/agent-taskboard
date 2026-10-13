@@ -49,13 +49,16 @@ const PLANTED = [CTX.WORKTREE, CTX.TICKET_DIR, CTX.TAG_PATH].flatMap((r) => ['.c
 
 test('phase-settings: one template per §5/§6 phase, allow == table, prompt.md + schema only where built (D9)', () => {
   const found = [];
-  for (const kind of fs.readdirSync(path.join(REPO, 'phases'))) {
-    for (const phase of fs.readdirSync(path.join(REPO, 'phases', kind))) {
+  const dirs = (d) => fs.readdirSync(d, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name); // M5.1: phases/_rules.md is a file, not a kind
+  for (const kind of dirs(path.join(REPO, 'phases'))) {
+    for (const phase of dirs(path.join(REPO, 'phases', kind))) {
       found.push(`${kind}/${phase}`);
       // P4 (contract change; was settings.json only everywhere): code/planning is built (D9: prompt.md + settings.json +
       // result.schema.json + its handler), landed after the fable evals passed 3/3 and golden A scored 4/5 (AC1 AC9)
       // P5 (contract change; was settings.json only): code/working gains its result.schema.json (P5d: prompt.md landed, code/working is built)
-      const want = { 'code/planning': ['prompt.md', 'result.schema.json', 'settings.json'], 'code/working': ['prompt.md', 'result.schema.json', 'settings.json'] };
+      const want = { 'code/planning': ['prompt.md', 'result.schema.json', 'settings.json'], 'code/working': ['prompt.md', 'result.schema.json', 'settings.json'],
+        // M5.1 (contract change; was settings.json only): code/review is built (D9: prompt.md + result.schema.json + settings.json)
+        'code/review': ['prompt.md', 'result.schema.json', 'settings.json'] };
       assert.deepEqual(fs.readdirSync(path.join(REPO, 'phases', kind, phase)), want[`${kind}/${phase}`] ?? ['settings.json'], `${kind}/${phase}`);
     }
   }
