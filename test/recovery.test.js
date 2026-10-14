@@ -969,3 +969,22 @@ test('P3d strays: claude runs each Bash call in its own process group; claude cr
   assert.deepEqual(w.killsOf(X), []);
   assert.equal(w.spawns.at(-1).resume, true, 'recovered as usual');
 });
+
+test('M5.2 E1 live: a result line while claude stays up (a background shell holds -p open) → 30 s later its group is killed and the result handled; another session\'s result line never ends a run', async (t) => {
+  const w = world(t);
+  const got = [];
+  onResult = async (k, out) => { got.push([k.id, out]); return undefined; };
+  t.after(() => { onResult = async () => undefined; });
+  const [a, b] = [await w.ticket(), await w.ticket()];
+  await w.step();
+  const [la, lb] = [w.lease(a), w.lease(b)];
+  w.say(a, { ...OK, structured_output: { verdict: 'pass' } });
+  w.say(b, { ...OK, session_id: '22222222-2222-4222-8222-222222222222' }); // not b's session: not b's result
+  await w.step(30_000); // seen at the first tick after it: the grace runs from there
+  assert.deepEqual([w.killsOf(la.pid), got, w.lease(a).exit], [[], [], undefined], 'within the grace: left alone');
+  await w.step(15_000);
+  assert.deepEqual(w.killsOf(la.pid).map(([s]) => s), ['SIGTERM'], 'its group: SIGTERM ends it, no SIGKILL needed');
+  assert.deepEqual([got, w.lease(a).exit, w.get(a).failures?.planning ?? 0], [[[a, { verdict: 'pass' }]], 'result', 0], 'handled as a result, no failure');
+  await w.step(5 * MIN);
+  assert.deepEqual([w.killsOf(lb.pid), w.lease(b).exit, w.procs.has(lb.pid)], [[], undefined, true], 'b: still live');
+});

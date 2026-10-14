@@ -274,6 +274,30 @@ test('P5 D5 RO2 bash-guard working (TB_PHASE=working): npx, npm exec / x, pnpm d
   for (const env of [{ TB_PHASE: 'planning' }, { TB_PHASE: 'qa' }, {}]) assert.equal(guard('npx jest', env)?.deny, undefined, JSON.stringify(env));
 });
 
+test('M5 C7 bash-guard qa + final_gate (TB_PHASE): postgres-irfan-axi with --yes, dropdb, DROP DATABASE / SCHEMA, psql TRUNCATE denied in any case, quoting, SQL comment or shell expansion; a read passes; outside them unchanged', () => {
+  const denied = [
+    "postgres-irfan-axi -d app exec 'delete from users' --yes",
+    "~/bin/postgres-irfan-axi -d app exec 'truncate t' --y''es",
+    'dropdb app',
+    "postgres-irfan-axi -d app exec 'drop  DATABASE app'",
+    'psql -c "Drop Database app"',
+    "postgres-irfan-axi -d app exec 'delete from t' --y$'e's",
+    "f=--ye; postgres-irfan-axi -d app exec 'delete from t' ${f}s",
+    "p=postgres-irfan; ${p}-axi -d app exec 'delete from t' --yes",
+    "a=post; b=gres-irfan-axi; $a$b -d app exec 'delete from t' --yes",
+    "postgres-irfan-axi -d app exec 'delete from t' --y{e,}s",
+    "postgres-irfan-axi -d app exec 'DROP/**/DATABASE app'",
+    "psql -h 127.0.0.1 -d other -c 'DROP SCHEMA public CASCADE'",
+    "psql -d app -c 'TRUNCATE users'",
+  ];
+  for (const TB_PHASE of ['qa', 'final_gate']) {
+    for (const c of denied) assert.match(guard(c, { TB_PHASE })?.deny ?? 'allowed', /never drop a database .*\(--yes\)/, `${TB_PHASE}: ${c}`);
+    assert.equal(guard("postgres-irfan-axi -d app query 'select 1'", { TB_PHASE }), null, `${TB_PHASE}: a read passes`);
+    assert.match(guard('git push origin main', { TB_PHASE })?.deny ?? 'allowed', /agents never push/, `${TB_PHASE}: the old denials stay`);
+  }
+  for (const env of [{ TB_PHASE: 'working' }, {}]) for (const c of denied) assert.equal(guard(c, env), null, `${JSON.stringify(env)}: ${c}`);
+});
+
 test('S3 bash-guard: a glob redirect target is matched in linear time (no RegExp from agent text); C*.md still denied, plain files pass', () => {
   for (const tail of ['z', 'md']) { // ...z: no match; ...md: could be claude.md → denied
     const c = `echo hi > ${'*'.repeat(40)}${tail}`;

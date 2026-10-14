@@ -97,7 +97,7 @@ function toast(msg, { kind = 'error', title } = {}) {
 }
 
 // P5: every change sends the session's synchronizer token (X-TB-CSRF), read once per trusted connection.
-async function api(method, path, body) {
+async function api(method, path, body, text = false) { // text: the reply as text (a doc), not JSON
   if (!trusted) throw Object.assign(new Error('tbd is not reachable.'), { status: 0 });
   if (method !== 'GET' && !ui.csrf) ui.csrf = (await api('GET', '/api/session/csrf')).csrf;
   const init = { method, headers: method === 'GET' ? {} : { 'X-TB-CSRF': ui.csrf } };
@@ -109,6 +109,7 @@ async function api(method, path, body) {
     throw Object.assign(new Error('tbd is not reachable.'), { status: 0 });
   }
   if (r.status === 401) { lockOut(); return new Promise(() => {}); } // page is gone: callers never resume
+  if (text && r.ok) return r.text();
   const j = await r.json().catch(() => ({}));
   if (!r.ok) throw Object.assign(new Error(j.error || `Request failed (${r.status}).`), { status: r.status });
   for (const w of j.warnings || []) toast(w, { kind: 'warn', title: 'Heads up' });
@@ -548,6 +549,8 @@ function runStats(r) {
     r.live && stat('RSS', `${r.rss_mb ?? 0} MB`));
 }
 
+// what a flow waits on, as card and drawer name it: qa:<tag> while another ticket of its tag holds QA (C9)
+const waitLabel = (w, tag) => (w?.reason === 'qa_lock' ? `qa:${tag}` : w?.reason);
 function flowCard(f) {
   const wait = f.waiting?.reason;
   const run = ui.runs.get(f.id);
@@ -557,7 +560,7 @@ function flowCard(f) {
       el('span', { class: 'chip kind' }, f.kind || DASH),
       f.tag && el('span', { class: 'chip tag', style: `--h:${hue(f.tag)}` }, f.tag),
       f.rework > 0 && el('span', { class: 'chip rework' }, `rework ${f.rework}`)),
-    wait && el('span', { class: 'chip wait' }, `waiting: ${wait}${wait === 'children' ? ` ${f.waiting.done ?? '?'}/${f.waiting.total ?? '?'}` : ''}`),
+    wait && el('span', { class: 'chip wait' }, `waiting: ${waitLabel(f.waiting, f.tag)}${wait === 'children' ? ` ${f.waiting.done ?? '?'}/${f.waiting.total ?? '?'}` : ''}`),
     run && runStats(run)));
 }
 
@@ -638,7 +641,7 @@ function drawerBody(f, ticket, error) {
   const foc = drawerFocus(), scroll = logScroll();
   const dd = (k, v) => v == null || v === '' ? null : [el('dt', null, k), el('dd', null, String(v))];
   const k = ticket || {};
-  const w = (ticket ? k.waiting : f.waiting)?.reason;
+  const w = waitLabel(ticket ? k.waiting : f.waiting, f.tag || k.tag);
   // L7: once frozen (plan_hash) the plan shown is the one approve froze (GET's plan), never a newer round file
   const r = ticket ? (k.plan_hash && ui.plan ? { ...ui.plan, n: ui.round?.n } : ui.round) : null, st = k.state;
   const plan = r?.kind === 'plan' && (st === 'plan_approval' || k.plan_hash) ? planView(f.id, k, r) : null; // a rejected plan (hash cleared) is not shown
@@ -648,6 +651,7 @@ function drawerBody(f, ticket, error) {
       el('button', { type: 'button', class: 'ghost', 'data-role': 'close', 'aria-label': 'Close details', onclick: () => $('#drawer').close() }, '×')),
     el('dl', { class: 'facts' },
       dd('Kind', f.kind), dd('Tag', f.tag), dd('State', stateLabel(st || f.state)), dd('Waiting', w), dd('Rework', k.rework ?? f.rework), dd('Fix', k.fixes > 0 ? `${k.fixes}/${ui.fixMax}` : null),
+      dd('QA', k.qa?.verdict ? `${k.qa.verdict} · ${k.qa.pass} pass · ${k.qa.fail} fail · ${k.qa.blocked} blocked` : null),
       dd('Branch', k.branch), dd('Base', k.base_sha?.slice(0, 12)),
       dd('Created', when(k.created_at)), dd('Updated', when(k.updated_at || f.updated_at)), dd('Id', f.id)),
     ticket && [
@@ -666,6 +670,7 @@ function drawerBody(f, ticket, error) {
       isObj(k.work) && workView(f.id, k),
       isObj(k.work) && gatesView(f.id),
       isObj(k.review) && reviewView(f.id, k),
+      isObj(k.qa) && qaView(f.id, k),
       k.interventions > 0 && ivsView(f.id),
       family(k),
     ],
@@ -795,7 +800,7 @@ const reloadOpen = debounce(readOpen, 200);
 
 async function openTicket(id) {
   const d = $('#drawer');
-  if (ui.open !== id) Object.assign(ui, { log: null, ticket: null, round: null, plan: null, arm: null, err: null, ask: null, gates: null, ivs: null, fb: null, pass: null });
+  if (ui.open !== id) Object.assign(ui, { log: null, ticket: null, round: null, plan: null, arm: null, err: null, ask: null, gates: null, ivs: null, fb: null, pass: null, qa: null, rec: null });
   ui.open = id;
   drawerBody(flowOf(id), ui.ticket);
   if (!d.open) d.showModal();
@@ -839,8 +844,11 @@ const WAIT = {
   work: 'Blocked: the gate stayed red after a resume and a fresh try. Read the gate below, then Resume or Restart.',
   scope: 'Blocked: the agent asked again for files you denied. Replan or Resume.',
   rework: 'Blocked: sent back more than twice. Resume resets the count.',
+  // M5.2: QA not proven (a BLOCKED or ASSISTED case, or a 4th fix), the DB guard (a database URL not on this Mac)
+  qa: 'Blocked: QA did not prove the change (or a 4th fix was needed). Read the QA below, then Resume.',
+  db: 'Blocked: the DB guard refused an env file (a database not on this Mac). Fix the tag\'s env file, then Resume.',
 };
-const BLOCKS = ['infra', 'integrity', 'config', 'work', 'scope', 'rework'];
+const BLOCKS = ['infra', 'integrity', 'config', 'work', 'scope', 'rework', 'qa', 'db'];
 const code = s => el('code', null, vis(s));
 const none = () => el('p', { class: 'hint' }, 'None.');
 
@@ -1155,6 +1163,70 @@ function reviewView(id, k) {
 }
 async function loadReview(id) {
   try { ui.review = { id, data: await api('GET', `/api/tickets/${enc(id)}/report?kind=review`) }; } catch (e) { ui.review = { id, error: e.status === 404 ? 'No review kept yet.' : e.message }; }
+  redraw();
+}
+
+// QA (lib/qa.js, M5.2 C5 C20): the newest QA result from GET …/report?kind=qa: each case as a summary row + a full-width
+// detail row (as Review), its evidence label (captured by tbd: recs tbd made itself; agent-made: screenshots, notes) and
+// the need review lines; the report (md) as text in a <pre> and screenshots as <img> from GET …/docs (tbd checks the
+// path again); recs (…/report?kind=rec) as curl + status + headers + body (masked by tbd), a page at a time. Agent text:
+// el() / textContent only, never markup.
+const DOC_RE = /^docs\/((?:verification|verdicts)\/(?:(?!\.\.?\/)[A-Za-z0-9._-]{1,120}\/){0,6}[A-Za-z0-9._-]{1,120}\.(?:md|png))$/; // the docs route's path, docs/ in front
+const docUrl = (id, p) => { const m = DOC_RE.exec(p ?? ''); return m && `/api/tickets/${enc(id)}/docs?path=${enc(m[1])}`; };
+function qaView(id, k) {
+  const q = ui.qa?.id === id ? ui.qa : null, d = q?.data, rec = ui.rec?.id === id ? ui.rec : null;
+  const res = x => el('span', { class: `chip ${/^pass$/i.test(x) ? 'pass' : /^fail$/i.test(x) ? 'fail' : 'warn'}` }, vis(x));
+  const para = (h, ...v) => el('p', null, el('b', null, `${h}: `), ...v);
+  const list = (h, xs) => (Array.isArray(xs) && xs.length ? para(h, ...xs.flatMap((x, i) => [i ? ' ' : '', code(String(x))])) : null);
+  const report = d && docUrl(id, d.report);
+  return el('section', { class: 'part', 'aria-labelledby': 'qa-h' },
+    el('div', { class: 'log-head' }, el('h3', { id: 'qa-h' }, 'QA', el('span', { class: 'count' }, `QA ${k.qa.n ?? DASH}`)),
+      el('button', { type: 'button', class: 'ghost', 'data-role': 'qa', onclick: () => loadQa(id) }, q ? 'Refresh' : 'Show QA')),
+    q?.error && el('p', { class: 'hint' }, q.error),
+    d && [el('p', { class: 'hint' }, `QA ${d.n}: `, res(d.verdict), d.at ? ` · ${when(d.at)}` : '', d.truncated ? ' · cut to fit' : ''),
+      d.need_review.length ? el('div', { class: 'notice' }, el('p', null, el('strong', null, 'Check by hand: '), 'agent-made evidence can be faked.'),
+        el('ul', { class: 'plist' }, ...d.need_review.map(x => el('li', null, vis(x))))) : null,
+      d.cases.length ? el('table', { class: 'dtable rtable' }, el('caption', { class: 'sr' }, `QA ${d.n}: cases`),
+        el('thead', null, el('tr', null, ...['Case', 'Type', 'Kind', 'Result', 'Evidence'].map(h => el('th', { scope: 'col' }, h)))),
+        el('tbody', null, ...d.cases.flatMap(c => [
+          el('tr', null, el('td', null, code(String(c.id))), el('td', null, vis(c.type)), el('td', null, vis(c.kind)),
+            el('td', null, res(c.result), c.cause ? ` ${vis(c.cause)}` : ''),
+            el('td', null, el('span', { class: `chip ${c.evidence === 'captured by tbd' ? 'pass' : 'warn'}` }, vis(c.evidence ?? DASH)))),
+          el('tr', { class: 'rdetail' }, el('td', { colSpan: 5 }, para('Source', code(String(c.source ?? DASH))), list('Acceptance', c.acceptance),
+            c.pre ? para('Before', vis(c.pre)) : null, para('Steps', vis((Array.isArray(c.steps) ? c.steps : []).join(' → '))), para('Expect', vis(c.expect ?? DASH)),
+            para('Observed', isObj(c.observed) && c.observed.status != null ? `${c.observed.status}: ` : '', vis(isObj(c.observed) ? c.observed.note : DASH)),
+            list('Recs', c.recs),
+            ...(Array.isArray(c.screenshots) ? c.screenshots : []).map(p => (docUrl(id, p) ? el('img', { class: 'shot', src: docUrl(id, p), alt: `${c.id} screenshot ${p}`, loading: 'lazy' }) : list('Screenshot', [p])))))]))) : none(),
+      d.findings.length ? el('div', null, el('h4', null, 'Findings'), el('ul', { class: 'plist' }, ...d.findings.map(x => el('li', null, vis(x))))) : null,
+      el('div', { class: 'acts' }, el('span', { class: 'hint' }, 'Report: ', code(String(d.report ?? DASH))),
+        report && el('button', { type: 'button', class: 'ghost', 'data-role': 'qa-report', onclick: () => loadQaDoc(id, report) }, q.doc ? 'Refresh report' : 'Show report')),
+      q.doc && (q.doc.error ? el('p', { class: 'hint' }, q.doc.error) : el('pre', { class: 'log', 'data-role': 'qa-doc', tabindex: '0', 'aria-label': 'QA report, as text' }, vis(q.doc.text)))],
+    el('div', { class: 'log-head' }, el('h4', null, 'Recs: the HTTP calls tbd made'),
+      el('button', { type: 'button', class: 'ghost', 'data-role': 'recs', onclick: () => loadRecs(id) }, rec ? 'Refresh' : 'Show recs')),
+    rec?.error && el('p', { class: 'hint' }, rec.error),
+    rec?.runs?.length > 1 && el('div', { class: 'acts' }, el('span', { class: 'hint' }, 'Run:'), ...rec.runs.map(n => el('button', { type: 'button',
+      class: 'ghost', 'aria-pressed': String(n === rec.run), 'data-role': `recs-${n}`, onclick: () => loadRecs(id, n) }, String(n)))),
+    rec?.items && (rec.items.length ? rec.items.map(x => el('div', { class: 'rec' },
+      el('p', { class: 'hint' }, code(String(x.n)), ` · ${x.status ?? `no answer: ${vis(x.error)}`} · ${x.ms} ms${x.at ? ` · ${when(x.at)}` : ''}${x.truncated ? ' · cut' : ''}`),
+      el('pre', { class: 'log', tabindex: '0', 'aria-label': `rec ${vis(x.n)}: curl` }, vis(x.curl)),
+      x.status != null && el('pre', { class: 'log', tabindex: '0', 'aria-label': `rec ${vis(x.n)}: answer` },
+        vis([`HTTP ${x.status}`, ...(Array.isArray(x.headers) ? x.headers : []).map(([h, v]) => `${h}: ${v}`), '', x.body ?? ''].join('\n'))))) : none()),
+    rec?.next != null && el('div', { class: 'acts' }, el('button', { type: 'button', class: 'ghost', 'data-role': 'recs-more', onclick: () => loadRecs(id, rec.run, rec.next) }, 'Load more')));
+}
+async function loadQa(id) {
+  try { ui.qa = { id, data: await api('GET', `/api/tickets/${enc(id)}/report?kind=qa`) }; } catch (e) { ui.qa = { id, error: e.status === 404 ? 'No QA result kept yet.' : e.message }; }
+  redraw();
+}
+async function loadQaDoc(id, url) {
+  const doc = await api('GET', url, null, true).then(text => ({ text }), e => ({ error: e.status === 404 ? 'The report was not kept.' : e.message }));
+  if (ui.qa?.id === id) ui.qa = { ...ui.qa, doc };
+  redraw();
+}
+async function loadRecs(id, run, cursor) {
+  try {
+    const r = await api('GET', `/api/tickets/${enc(id)}/report?kind=rec${run == null ? '' : `&run=${run}`}${cursor == null ? '' : `&cursor=${cursor}`}`);
+    ui.rec = { ...r, id, items: [...(cursor != null && ui.rec?.id === id && ui.rec.run === r.run ? ui.rec.items : []), ...r.items] };
+  } catch (e) { ui.rec = { id, error: e.status === 404 ? 'No recs kept yet.' : e.message }; }
   redraw();
 }
 

@@ -15,14 +15,16 @@ const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'spawn-'));
 after(() => fs.rmSync(ROOT, { recursive: true, force: true }));
 const PHASES = path.join(ROOT, 'phases');
 const SCHEMA = { type: 'object', required: ['status'] };
-for (const [file, content] of Object.entries({
-  'prompt.md': '# working fixture\n',
-  'settings.json': { permissions: { allow: ['Read', 'Glob', 'Grep', 'Edit(/${WORKTREE}/**)', 'Bash', 'Agent'] } },
-  'result.schema.json': SCHEMA,
-  'mcp.json': { mcpServers: {} },
-})) {
-  fs.mkdirSync(path.join(PHASES, 'code/working'), { recursive: true });
-  fs.writeFileSync(path.join(PHASES, 'code/working', file), typeof content === 'string' ? content : JSON.stringify(content));
+for (const ph of ['working', 'qa', 'review']) { // M5 C5: qa + review for the env-file deny test
+  for (const [file, content] of Object.entries({
+    'prompt.md': '# working fixture\n',
+    'settings.json': { permissions: { allow: ['Read', 'Glob', 'Grep', 'Edit(/${WORKTREE}/**)', 'Bash', 'Agent'] } },
+    'result.schema.json': SCHEMA,
+    'mcp.json': { mcpServers: {} },
+  })) {
+    fs.mkdirSync(path.join(PHASES, 'code', ph), { recursive: true });
+    fs.writeFileSync(path.join(PHASES, 'code', ph, file), typeof content === 'string' ? content : JSON.stringify(content));
+  }
 }
 process.env.TB_PHASES_DIR = PHASES; // read by lib/phases + lib/phase-settings at load
 require('./helpers/runs').passFakeEnv(); // FAKE_CLAUDE_DUMP_DIR through the claudeEnv allowlist
@@ -36,7 +38,7 @@ const CONFIG = {
 };
 
 // One spawn.start into a fresh temp dir; err set when it refused (then nothing may have been spawned).
-async function attempt({ config = CONFIG, resume = true, ticket = {}, env = {}, files = {} } = {}) {
+async function attempt({ config = CONFIG, resume = true, ticket = {}, env = {}, files = {}, phase = 'working', tag = undefined } = {}) {
   const dir = fs.mkdtempSync(path.join(ROOT, 'run-'));
   const tbHome = path.join(dir, 'tbhome');
   const ticketDir = path.join(tbHome, 'tickets', 't_spawn1');
@@ -49,7 +51,7 @@ async function attempt({ config = CONFIG, resume = true, ticket = {}, env = {}, 
   }
   try {
     const s = await spawn.start({
-      ticket: { id: 't_spawn1', kind: 'code', ...ticket }, phase: 'working', n: 2, session: SID, resume, key: 'ef'.repeat(16),
+      ticket: { id: 't_spawn1', kind: 'code', ...ticket }, phase, tag, n: 2, session: SID, resume, key: 'ef'.repeat(16),
       prompt: spawn.RESUME_PROMPT, config, tbHome, ticketDir, port: 7777,
       env: { PATH: process.env.PATH, HOME: dir, FAKE_CLAUDE_DUMP_DIR: dump, ...env },
     });
@@ -237,4 +239,22 @@ test('M5 C2 a code run: runs/<n>.system.md (0600) = the phase prompt + \\n\\n + 
   assert.equal(fs.statSync(sys).mode & 0o777, 0o600);
   assert.equal(fs.realpathSync(d.cwd), fs.realpathSync(wt));
   assert.equal(d.opts['--setting-sources'], 'project', 'claude loads the cwd CLAUDE.md');
+});
+
+// M5 C5 C7: the tag's env files are Edit- and sandbox-write-denied in working and qa runs (the copy the app reads = the
+// file the DB guard checked; P5 M1 was working only); a review run never writes, its settings name none
+test('M5 C5 env files: working and qa runs deny Edit + sandbox write of the tag env_files; a review run has no such rule', async () => {
+  const wt = fs.mkdtempSync(path.join(ROOT, 'wt-'));
+  const git = (...a) => execFileSync('/usr/bin/git', ['-C', wt, ...a], { env: GENV, encoding: 'utf8' }).trim();
+  git('init', '-q');
+  git('-c', 'user.name=t', '-c', 'user.email=t@example.invalid', 'commit', '-q', '--allow-empty', '-m', 'base');
+  const per = (v) => Object.fromEntries(['qa', 'review'].map((p) => [p, v]));
+  const config = { ...CONFIG, models: { ...CONFIG.models, ...per({ model: 'opus', effort: 'xhigh' }) }, max_turns: { ...CONFIG.max_turns, ...per(40) },
+    liveness: { wall_min: { ...CONFIG.liveness.wall_min, ...per(30) } } };
+  for (const phase of ['working', 'qa', 'review']) {
+    const { ticketDir } = await run({ phase, config, resume: false, ticket: { worktree: wt, base_sha: git('rev-parse', 'HEAD') }, tag: { env_files: ['.env.test'] } });
+    const s = JSON.parse(fs.readFileSync(path.join(ticketDir, 'runs/2.settings.json'), 'utf8'));
+    const denied = [s.permissions.deny.includes(`Edit(/${wt}/.env.test)`), s.sandbox.filesystem.denyWrite.includes(`${wt}/.env.test`)];
+    assert.deepEqual(denied, phase === 'review' ? [false, false] : [true, true], phase);
+  }
 });

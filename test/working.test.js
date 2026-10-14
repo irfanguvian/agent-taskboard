@@ -15,6 +15,9 @@ const http = require('node:http');
 const { execFileSync } = require('node:child_process');
 const { startTbd, FAKE_GATES, REPO } = require('./helpers/tbd');
 const { FAKE, RUN_SPY, ticket, read, lines, until, reap, pidsOf, alive } = require('./helpers/runs');
+// The daemon's own view, not ticket.json: store.save writes the file before its memory, so a disk read that sees
+// plan_approval can run ahead of approve's check (409 under load: I13 + F2 RO2 flakes).
+const inPlanApproval = (tbd, id) => until(async () => (await tbd.api('GET', `/api/tickets/${id}`)).json?.ticket?.state === 'plan_approval', 30_000, 'plan_approval');
 const { GATE_PROMPT } = require('../lib/recovery');
 
 const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'working-'));
@@ -242,6 +245,20 @@ test('I4 M1: a dirty tree after done → resumed once ("commit them or revert th
   assert.deepEqual([m.k().waiting.reason, m.k().waiting.why], ['integrity', 'integrity: node_modules/.bin links changed since setup']);
 });
 
+// M5.2 C8 Q7 (D-0088, D-0097). D-0101 (contract change; was: an md / png left uncommitted in the docs dirs was skipped):
+// every untracked file there is an "uncommitted change" (I4 above), an md / png too (a check could require it)
+test('M5 C8 dirty check: md, png, a .d.ts and a link named x.md left in docs/verification + docs/verdicts are dirty (resumed, each named); removed → the gate runs, on to review', async (t) => {
+  const docs = { exec: ['/bin/sh', '-c', 'mkdir -p docs/verification/screenshots docs/verdicts && echo r > docs/verification/a.md && echo p > docs/verification/screenshots/a.png && echo v > docs/verdicts/b.md && echo x > docs/verification/x.d.ts && ln -s ../../src docs/verification/link.md'] };
+  const tidy = { exec: ['/bin/sh', '-c', 'rm -r docs/verification docs/verdicts'] };
+  const sessions = [{ steps: [commit('src/a.js', 'one'), docs, result({ status: 'done', commit: SHA })] }, { steps: [tidy, result({ status: 'done', commit: SHA })] }];
+  const w = await approved(t, { id: 't_docs01', tasks: [task('T1')], sessions });
+  await until(() => w.k().state === 'review', 30_000, 'review');
+  const [, d2] = w.dumps();
+  assert.match(d2.prompt, /\n\nuncommitted changes: \?\? docs\/verdicts\/b\.md, \?\? docs\/verification\/a\.md, \?\? docs\/verification\/link\.md, \?\? docs\/verification\/screenshots\/a\.png, \?\? docs\/verification\/x\.d\.ts: commit them or revert them/);
+  assert.equal(w.dumps().length, 2, 'resumed once, then clean');
+  assert.ok(gateFiles(w.tbd, w.id) >= 1, 'the gate ran');
+});
+
 test('I5 K3 RO6: NEEDS_SCOPE → clarify; tb scope --allow (UI ok for scope) → same session, the file allowed for T1; a protected ask from the gate: UI allow → 401, CLI allow binds the blob at HEAD → gate green; the other path: --deny, the same files asked again → Blocked', async (t) => {
   const ask = result({ status: 'NEEDS_SCOPE', needs_scope: { files: ['lib/extra.js'], reason: 'a helper' } });
   const w = await approved(t, {
@@ -410,7 +427,7 @@ test('I13 K4+C2: --replan → planning (seed ## Replan) → keep naming an undon
   const oldHead = git(w.wt, 'rev-parse', 'HEAD');
   const oldHash = k().plan_hash;
   assert.equal((await w.rpc('answer', { replan: true })).ok, true);
-  await until(() => k().state === 'plan_approval', 30_000, 'plan_approval');
+  await inPlanApproval(tbd, id);
   const [, , p1, p2] = w.dumps();
   assert.match(p1.prompt, /## Replan\n\nWork stopped at T2: Split users\?\.\nDone so far:\n- T1 \([0-9a-f]{12}\): task T1 \| files: lib2\/a\.js \| test_cmd: npm test \| acceptance: A1 \(preserve\): users still work\n/);
   assert.match(p2.prompt, /keep\[0\] "T2": not done/);
@@ -628,7 +645,7 @@ test('F2 RO2 replan: kept commits change the lockfile vs base_sha → the tag\'s
   const { tbd, id, k } = w;
   await until(() => k().state === 'clarify', 30_000, 'clarify');
   assert.equal((await w.rpc('answer', { replan: true })).ok, true);
-  await until(() => k().state === 'plan_approval', 30_000, 'plan_approval');
+  await inPlanApproval(tbd, id);
   assert.equal((await tbd.api('POST', `/api/tickets/${id}/approve`, {})).status, 202);
   await until(() => k().state === 'clarify' && k().clarify_origin?.class === 'deps', 30_000, 'deps ask after the re-approve');
   assert.equal(fs.readFileSync(marker, 'utf8'), 'run\n', 'the unsandboxed tag setup ran at the first approve only');
@@ -754,7 +771,7 @@ test('RO2 replan negative: a dropped task had a deps build → the kept commit\'
   await until(() => k().state === 'clarify' && k().clarify_origin.class === 'NEEDS_CONTEXT', 30_000, 'question');
   assert.match(k().work.deps_blob, /^package-lock\.json:[0-9a-f]{40}$/, 'the zod build is recorded');
   assert.equal((await w.rpc('answer', { replan: true })).ok, true);
-  await until(() => k().state === 'plan_approval', 30_000, 'plan_approval');
+  await inPlanApproval(tbd, id);
   assert.equal((await tbd.api('POST', `/api/tickets/${id}/approve`, {})).status, 202);
   await until(() => k().state === 'review', 45_000, 'review');
   assert.equal(fs.readFileSync(marker, 'utf8'), 'run\n', 'the tag setup ran at the first approve only');

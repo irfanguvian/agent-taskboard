@@ -24,9 +24,9 @@ function lines(file) {
 // Run n of the ticket has a log (plain while it runs, .gz once it ended): it was spawned.
 const hasRun = (tbd, id, n) => ['', '.gz'].some((x) => fs.existsSync(path.join(tbd.tbHome, 'tickets', id, 'runs', `${n}.jsonl${x}`)));
 const spyLog = (tbd, name) => lines(path.join(tbd.tbHome, name));
-async function until(fn, ms = 30_000, what = 'condition') {
+async function until(fn, ms = 30_000, what = 'condition') { // fn may be async (a poll over HTTP)
   for (const end = Date.now() + ms; Date.now() < end; await new Promise((r) => setTimeout(r, 100))) {
-    const v = fn();
+    const v = await fn();
     if (v) return v;
   }
   throw new Error(`${what} not met in ${ms} ms`);

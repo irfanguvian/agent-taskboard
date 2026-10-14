@@ -181,6 +181,20 @@ test('K5 sandbox: a check reading a fake secret (HOME/.ssh, the tbd token) or wr
   }
 });
 
+test('M5 C7 profile: the localhost:5432 deny is dropped only for the checks (test mode) of a tag with db: "local" (S3), never for setup (sec F5); the tbd port deny stays', async () => {
+  for (const [db, mode, kept] of /** @type {[string | undefined, 'test' | 'setup', boolean][]} */ ([[undefined, 'test', true], ['local', 'test', false], ['local', 'setup', true]])) {
+    const w = world({ tag: db ? { db } : {} });
+    const ctx = await R.open({ t: w.t, wt: w.wt, tag: w.tag, gate: 'task', quiet: true });
+    try {
+      const text = fs.readFileSync(await R.profile(ctx, mode), 'utf8');
+      assert.equal(text.includes('(deny network-outbound (remote ip "localhost:5432"))'), kept, `db ${db} ${mode}`);
+      assert.ok(text.includes(`(deny network-outbound (remote ip "localhost:${store.config.http.port}"))`), `db ${db} ${mode}: tbd port still denied`);
+    } finally {
+      await R.close(ctx);
+    }
+  }
+});
+
 test('git in a check (D-0077): /usr/bin/git (the xcode-select shim) runs inside the gate; the global git config is never read', async () => {
   fs.writeFileSync(path.join(process.env.HOME, '.gitconfig'), '[user]\n\temail = FAKE-GLOBAL@example.invalid\n');
   try {
@@ -471,6 +485,34 @@ test('SR 2a: forged ignored files (a .tsbuildinfo, node_modules/.cache) are gone
     assert.equal(r.ok, true, r.why);
     assert.deepEqual([...FORGED, 'node_modules/dep/index.js', '.env.local'].map((f) => fs.existsSync(path.join(w.wt, f))), [false, false, true, true]);
   }
+});
+
+// M5.2 C8 Q7 (D-0088, D-0097): docs are never committed; the rules are about changes, not presence. D-0101 (contract
+// change; was: the gates' clean kept the *.md + *.png there): the task + working gates keep no untracked doc
+test('M5 C8 docs dirs: every untracked file under the docs dirs (an md, a png, nested, a .d.ts, __mocks__, inside a dir named x.md) is gone before the first check of a task gate (its clean + fail-first restore) and a working gate; a doc tracked at base stays; a commit adding or changing a docs path → red work in both gates', async () => {
+  const DOCS = ['docs/verification/2026-10-13-t-qa.md', 'docs/verification/screenshots/a.png', 'docs/verification/a/b/deep.md', 'docs/verdicts/2026-10-13-t.md'];
+  const PLANTED = ['docs/verification/x.d.ts', 'docs/verification/__mocks__/m.js', 'docs/verification/evil.md/x.d.ts', 'docs/verification/a/b/c.js', 'docs/other.txt'];
+  const probe = `node -e "process.exit([${[...DOCS, ...PLANTED].map((f) => `'${f}'`)}].some((f) => require('fs').existsSync(f)) ? 1 : 0)"`; // a tsc-like check (or a require): red while it could load one
+  const there = (w, files) => files.filter((f) => fs.existsSync(path.join(w.wt, f)));
+  const w = world({ task: { type: 'new' }, tag: { checks: { typecheck: probe } }, files: { 'docs/verification/old.md': 'tracked at base\n' } });
+  const head = w.commit({ 'lib/sum.js': SUM_OK, 'test/sum.test.js': SUM_TEST });
+  const plant = () => put(w.wt, Object.fromEntries([...DOCS, ...PLANTED].map((f) => [f, 'agent file\n'])));
+  plant();
+  const r = await w.task({ out: { commit: head, tests: ['test/sum.test.js'] } });
+  assert.equal(r.ok, true, r.why);
+  assert.equal(r.tests.failfirst, 'proven', 'the fail-first restore ran');
+  assert.deepEqual([there(w, DOCS), there(w, PLANTED), there(w, ['docs/verification/old.md'])], [[], [], ['docs/verification/old.md']]);
+  plant();
+  const wg = await w.working();
+  assert.equal(wg.ok, true, wg.why);
+  assert.deepEqual([there(w, DOCS), there(w, PLANTED), there(w, ['docs/verification/old.md'])], [[], [], ['docs/verification/old.md']]);
+  const bad = world({ files: { 'docs/verification/old.md': 'tracked at base\n' } });
+  bad.commit({ 'lib/sum.js': SUM_OK, 'docs/verification/old.md': 'edited\n', 'docs/verdicts/new.md': 'committed\n' });
+  const t = await bad.task();
+  assert.deepEqual([t.ok, t.class, t.scope.bad], [false, 'work', ['docs dirs are never committed: docs/verdicts/new.md', 'docs dirs are never committed: docs/verification/old.md']]);
+  const wr = await bad.working();
+  assert.deepEqual([wr.ok, wr.class], [false, 'work']);
+  assert.match(wr.why, /docs dirs are never committed: docs\/verdicts\/new\.md, docs dirs are never committed: docs\/verification\/old\.md/);
 });
 
 // ---- fail-first (K7) -----------------------------------------------------------------------------------------------------

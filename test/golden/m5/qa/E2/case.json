@@ -1,0 +1,37 @@
+{
+  "title": "E2 app cannot start (the qa port is held by a process the run did not start): all blocked, no fake pass",
+  "ticket": "GET /users should include each user's latest order.",
+  "plan": "../../../fixtures/plan-b.json",
+  "commits": ["../../../fixtures/b.patch"],
+  "port_held": true,
+  "expect": {
+    "verdict": "blocked",
+    "state": "blocked",
+    "waiting": "qa",
+    "no_pass": true
+  },
+  "fake": [],
+  "example": {
+    "verdict": "blocked",
+    "cases": [
+      {
+        "id": "TC-1", "type": "backend", "kind": "positive", "source": "src/users/users.service.ts:13-28", "acceptance": ["A1"],
+        "pre": "app on the qa port",
+        "steps": ["start the app on the qa port", "tbx req GET /users?limit=2"],
+        "expect": "200; each item has latestOrder = the user's newest order",
+        "result": "BLOCKED", "cause": "env", "recs": [], "screenshots": [],
+        "observed": { "note": "the app exits with EADDRINUSE: another process holds the qa port; tbx req refuses it (a listener this run did not start)" }
+      },
+      {
+        "id": "TC-2", "type": "backend", "kind": "negative", "source": "A3", "acceptance": ["A3"],
+        "pre": "app on the qa port",
+        "steps": ["tbx req GET /users?limit=0"],
+        "expect": "400: the page bounds hold as before",
+        "result": "BLOCKED", "cause": "env", "recs": [], "screenshots": [],
+        "observed": { "note": "no app of this run on the qa port" }
+      }
+    ],
+    "report": "docs/verification/qa-e2.md",
+    "findings": ["the qa port is held by another process: free it, then run QA again"]
+  }
+}

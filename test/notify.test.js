@@ -105,7 +105,7 @@ test('D-0079 memory wait: banner + sound at once, RAM numbers + 3 biggest apps f
   await move(k.id, { state: 'working', waiting: MEM });
   await settle();
   assert.deepEqual(s.banners(), [{ title: 'Waiting for RAM', subtitle: 'Sync job',
-    message: 'Needs 2.0 GB free to run, has 1.4 GB. Starts by itself when RAM frees. Biggest now: Google Chrome 1.4 GB, claude 0.8 GB, Spotify 0.2 GB' }]);
+    message: 'Needs 1.5 GB free to run, has 1.4 GB. Starts by itself when RAM frees. Biggest now: Google Chrome 1.4 GB, claude 0.8 GB, Spotify 0.2 GB' }]);
   assert.equal(s.sounds(), 1);
   assert.deepEqual(s.calls.filter((c) => c[0] === '/bin/ps'), [['/bin/ps', '-U', String(process.getuid()), '-o', 'rss=,comm=']], 'one ps, own processes');
 
@@ -114,7 +114,7 @@ test('D-0079 memory wait: banner + sound at once, RAM numbers + 3 biggest apps f
   s.tickAfter(30);
   await settle();
   assert.deepEqual(s.banners().at(-1), { title: 'Still waiting: Waiting for RAM', subtitle: 'Sync job',
-    message: 'Needs 2.0 GB free to run, has 0.9 GB. Starts by itself when RAM frees.' });
+    message: 'Needs 1.5 GB free to run, has 0.9 GB. Starts by itself when RAM frees.' });
   assert.equal(s.sounds(), 2);
 
   await move(k.id, { waiting: null });
@@ -142,7 +142,7 @@ test('D-0079 memory wait text: + docker_reserved_gb while Docker runs, pressure 
   const k = await s.flow('Docker job');
   await move(k.id, { state: 'working', waiting: MEM });
   await settle();
-  assert.equal(s.banners()[0].message, 'Needs 4.0 GB free to run, has 3.0 GB. Memory pressure critical. Starts by itself when RAM frees.');
+  assert.equal(s.banners()[0].message, 'Needs 3.5 GB free to run, has 3.0 GB. Memory pressure critical. Starts by itself when RAM frees.');
 
   const nan = setup(t, '2026-10-07T03:00:00Z', { system: () => ({ avail: GB, pressure: 'normal' }), need: () => NaN });
   nan.ps.err = new Error('ps failed');

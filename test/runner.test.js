@@ -344,3 +344,30 @@ test('C1: a lease with pid but no lstart (tbd died before ps listed it) → adop
   assert.equal(alive(other.pid), true, 'a process that is not the run is never killed');
   assert.deepEqual(spyLog(tbd, 'test-kills.jsonl').filter((k) => Math.abs(k.pid) === other.pid), []);
 });
+
+// M5.2 C9 Q8 (A8): one QA per tag. Its own fixture dir: code/qa built (the file's PHASES keeps it misconfigured for AC1).
+const PHASES_QA = path.join(ROOT, 'phases-qa');
+fs.mkdirSync(path.join(PHASES_QA, 'code/qa'), { recursive: true });
+for (const [f, c] of Object.entries({ 'prompt.md': '# qa fixture\n', 'settings.json': { permissions: { allow: ['Read'] } }, 'result.schema.json': SCHEMA })) {
+  fs.writeFileSync(path.join(PHASES_QA, 'code/qa', f), typeof c === 'string' ? c : JSON.stringify(c));
+}
+
+test('M5 C9 qa_lock: two qa tickets of one tag (max_concurrent 3) → one runs, the other waits qa_lock and starts once the first is done; another tag runs beside them; a final gate job of a tag holds it too', async (t) => {
+  const qa = (tag) => ({ state: 'qa', tag, scenario: { steps: [{ sleep_ms: 2000 }, { result: { structured_output: { next: 'blocked' } } }] } });
+  const tbd = await boot(t, {
+    t_qaa001: qa('acme/api'), t_qaa002: qa('acme/api'), t_qaw001: qa('acme/web'),
+    t_fgj001: { state: 'final_gate', tag: 'acme/job', work: { gate: { kind: 'final' } } }, t_qaj001: qa('acme/job'), // gate job pending
+  }, { config: { max_concurrent: 3 }, env: { TB_PHASES_DIR: PHASES_QA, TEST_PRESSURE: 'normal' } });
+  const k = (id) => read(tbd, id);
+  const ids = ['t_qaa001', 't_qaa002'];
+  const [first, second] = await until(() => {
+    const a = ids.find((id) => k(id).lease?.pid && !k(id).lease.exit);
+    const b = ids.find((id) => id !== a);
+    return a && k(b).waiting?.reason === 'qa_lock' && k(b).lease === null && [a, b];
+  }, 15_000, 'one acme/api run, the other waiting qa_lock');
+  await until(() => [first, second, 't_qaw001'].every((id) => k(id).state === 'blocked'), 30_000, 'every qa run done');
+  const at = (id, f) => Date.parse(k(id).lease[f]);
+  assert.ok(at(second, 'started_at') >= at(first, 'ended_at'), `${second} started after ${first} ended`);
+  assert.ok(at('t_qaw001', 'started_at') < at(first, 'ended_at'), 'acme/web ran beside it');
+  assert.deepEqual([k('t_qaj001').waiting?.reason, k('t_qaj001').lease], ['qa_lock', null], 'a final gate job of acme/job holds it all along');
+});

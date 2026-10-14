@@ -324,6 +324,10 @@ main { max-width: 1560px; margin: 0 auto; padding: 22px 24px 56px; }
 .rtable tr.rdetail td { border-top: 0; padding-top: 0; }
 .rtable .rdetail p { margin: 0 0 6px; }
 .rtable .rdetail b { font-weight: 600; color: var(--mute); }
+/* M5.2 QA: screenshots from the docs route, recs (curl + answer), the rec run shown */
+.rtable img.shot { display: block; max-width: 100%; height: auto; margin: 4px 0 8px; border: 1px solid var(--line); border-radius: 4px; }
+.rec { display: grid; gap: 6px; }
+.acts .ghost[aria-pressed="true"] { border-color: var(--accent); font-weight: 700; }
 .src { font-size: 12px; font-weight: 600; }
 .src.you { color: var(--accent-ink); }
 .src.ticket, .src.adr { color: var(--steel); }

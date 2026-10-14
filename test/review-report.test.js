@@ -36,13 +36,13 @@ test('M5.1 report review: route, tb report, tb show fix n/3; unknown id 404, bad
   const status = async (p) => (await tbd.api('GET', p)).status;
   assert.equal(await status('/api/tickets/t_nope99/report?kind=review'), 404);
   assert.equal(await status(`/api/tickets/${id}/report?kind=review&n=3`), 404);
-  for (const q of ['kind=qa', '', 'kind=review&n=0', 'kind=review&n=x', 'kind=review&n=../../token', 'kind=review&n=10000']) assert.equal(await status(`/api/tickets/${id}/report?${q}`), 400, q);
+  for (const q of ['kind=bogus', '', 'kind=review&n=0', 'kind=review&n=x', 'kind=review&n=../../token', 'kind=review&n=10000']) assert.equal(await status(`/api/tickets/${id}/report?${q}`), 400, q);
   // CLI
   const cli = await runTb(['report', id, '--kind', 'review', '--n', '1'], tbd);
   assert.equal(cli.code, 0, cli.stdout);
   assert.match(cli.stdout, /^report: t_rrp001 · review 1 · block · head aaaaaaaaaaaa · 2026-10-12T01:02:03.000Z\nfindings\[2\]\{id,severity,confidence,where,problem,scenario,fix,status\}:\n {2}F1,HIGH,high,"src\/users.js:1",problem F1,scenario F1,fix F1,open\n {2}F2,HIGH,medium,"src\/users.js:1",problem F2,scenario F2,fix F2,need review\nclosed\[0\]: none\n$/);
   assert.equal((await runTb(['report', id], tbd)).code, 2);
-  assert.equal((await runTb(['report', id, '--kind', 'qa'], tbd)).code, 2);
+  assert.equal((await runTb(['report', id, '--kind', 'bogus'], tbd)).code, 2);
   // tb show
   assert.match((await runTb(['show', id], tbd)).stdout, /\n {2}fix: 1\/3\n/);
 });

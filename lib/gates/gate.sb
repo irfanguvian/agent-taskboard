@@ -43,12 +43,12 @@
 (allow file-ioctl (literal "/dev/null") (literal "/dev/zero") (literal "/dev/random") (literal "/dev/urandom") (literal "/dev/dtracehelper") (literal "/dev/tty"))
 (allow file-read* file-write-data (literal "/dev/null") (literal "/dev/zero") (literal "/dev/random") (literal "/dev/urandom") (literal "/dev/tty") (literal "/dev/dtracehelper"))
 
-; network: local bind ok; outbound only localhost, minus tbd port + 5432 + tag deny_ports (later rule wins)
+; network: local bind ok; outbound only localhost, minus tbd port + 5432 (kept unless tag db: "local") + tag deny_ports (later rule wins)
 (allow network-bind (local ip "*:*"))
 (allow network-inbound (local ip "*:*"))
 (allow network-outbound (remote ip "localhost:*"))
 (deny network-outbound (remote ip "localhost:${TBD_PORT}"))
-(deny network-outbound (remote ip "localhost:5432"))
+(deny network-outbound (remote ip "localhost:5432")) ; @pg
 ${DENY_PORTS}
 ; setupnet only (RO2 step 1, npm ci --ignore-scripts): outbound 443 any host + DNS
 (allow network-outbound (remote ip "*:443")) ; @net

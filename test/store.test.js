@@ -323,12 +323,12 @@ function merged(tbHome) {
   return JSON.parse(r.stdout);
 }
 
-test('D36 D-0080 fresh config.json holds only the machine key claude_bin; the 8 GB RAM defaults (planning/review 0.4, working 1.0, qa 1.5, min_free 1) come from code', () => {
+test('D36 D-0080 fresh config.json holds only the machine key claude_bin; the 8 GB RAM defaults (planning/review 0.4, working 1.0, qa 1.0, min_free 0.5; D-0100 was qa 1.5, min_free 1) come from code', () => {
   const tbHome = path.join(root, 'd80-fresh');
   const config = merged(tbHome);
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(tbHome, 'config.json'), 'utf8')), { claude_bin: path.join(tbHome, 'bin', `claude-${DEFAULT_PIN}`) }, 'no defaults written');
-  assert.deepEqual(config.memory.phase_need_gb, { planning: 0.4, review: 0.4, working: 1.0, qa: 1.5 });
-  assert.equal(config.memory.min_free_gb, 1);
+  assert.deepEqual(config.memory.phase_need_gb, { planning: 0.4, review: 0.4, working: 1.0, qa: 1.0 });
+  assert.equal(config.memory.min_free_gb, 0.5);
   assert.equal(config.claude_bin, path.join(tbHome, 'bin', `claude-${DEFAULT_PIN}`));
 });
 
@@ -340,5 +340,11 @@ test('D-0080 a config.json already there is never rewritten; its keys beat the c
   const config = merged(tbHome);
   assert.equal(fs.readFileSync(path.join(tbHome, 'config.json'), 'utf8'), text);
   assert.equal(config.max_concurrent, 2);
-  assert.deepEqual(config.memory.phase_need_gb, { planning: 0.4, review: 0.4, working: 1.0, qa: 1.5 });
+  assert.deepEqual(config.memory.phase_need_gb, { planning: 0.4, review: 0.4, working: 1.0, qa: 1.0 });
+});
+
+test('M5 C9 fresh config: a slot lease holds up to 75 min (slots.max_hold_min, was the implicit 60), longer than a qa run\'s wall (60)', () => {
+  const config = merged(path.join(root, 'm5-hold'));
+  assert.equal(config.slots.max_hold_min, 75);
+  assert.ok(config.slots.max_hold_min > config.liveness.wall_min.qa);
 });

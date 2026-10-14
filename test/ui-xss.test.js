@@ -120,3 +120,39 @@ test('XSS: review findings (M5.1 Review view) render as text only', () => {
   assert.deepEqual(w.attrs.filter((a) => /^(on\w+|src|srcdoc|formaction|href)=/i.test(a)), [], 'no payload in a handler, src or link attribute');
   assert.ok(w.text.some((s) => s.includes(`p ${P}`)) && w.text.some((s) => s.includes(`s ${S}`)) && w.text.includes('fix 1/3'), 'the payload and fix n/3 are there, as text');
 });
+
+test('XSS: the QA view (M5.2: cases, need review, findings, report text, screenshots, recs) renders agent text as text only', () => {
+  const ctx = sandbox();
+  const run = (code) => vm.runInContext(code, ctx);
+  run('state = { reminders: [], flows: [], system: {}, calendar: {} }; ui.open = "t_xss001";');
+  const c = (over) => ({ id: 'TC-1', type: 'backend', kind: 'positive', source: `src/${P}.js:1`, acceptance: ['A1'], pre: `pre ${S}`, steps: [`step ${P}`], expect: `expect ${S}`,
+    result: 'PASS', recs: ['7.1'], screenshots: [], observed: { status: 200, note: `note ${P}` }, evidence: 'captured by tbd', ...over });
+  const data = { n: 1, verdict: 'fail', at: '2026-10-13T01:02:03.000Z', report: 'docs/verification/r.md', need_review: [`QA 1: ${S}`], findings: [`finding ${P}`],
+    cases: [c(), c({ id: 'TC-2', type: 'frontend', result: 'FAIL', cause: 'code', recs: [], evidence: 'agent-made',
+      screenshots: ['docs/verification/screenshots/a.png', `docs/verification/screenshots/${P}.png`] })] };
+  const recs = { id: 't_xss001', run: 7, runs: [7, 5], next: 1, items: [{ n: '7.1', at: data.at, ms: 3, curl: `curl '${P}'`, status: 200, headers: [['x-h', S]], body: `body ${P}`, truncated: false }] };
+  const tree = run(`ui.qa = { id: "t_xss001", data: ${JSON.stringify(data)}, doc: { text: ${JSON.stringify(`# report\n${S}`)} } }; ui.rec = ${JSON.stringify(recs)};
+    qaView("t_xss001", { qa: { n: 1, verdict: "fail" } })`);
+  const w = walk(tree);
+  assert.ok(w.tags.every((t) => !['script', 'iframe', 'svg', 'object'].includes(t)), `no element from a payload: ${w.tags}`);
+  assert.equal(w.tags.filter((t) => t === 'img').length, 1, 'one screenshot as <img>: the payload path stays text');
+  assert.deepEqual(w.attrs.filter((a) => /^(on\w+|src|srcdoc|formaction|href)=/i.test(a)), ['src=/api/tickets/t_xss001/docs?path=verification%2Fscreenshots%2Fa.png'], 'the one src is tbd\'s docs route');
+  for (const s of [`step ${P}`, `expect ${S}`, `note ${P}`, `src/${P}.js:1`, `QA 1: ${S}`, `finding ${P}`, `# report\n${S}`, `curl '${P}'`, `docs/verification/screenshots/${P}.png`]) {
+    assert.ok(w.text.some((x) => x.includes(s)), `as text: ${s}`);
+  }
+  assert.ok(w.text.some((x) => x.includes(`x-h: ${S}`) && x.includes(`body ${P}`)), 'rec answer as text');
+  assert.ok(w.text.includes('captured by tbd') && w.text.includes('agent-made'), 'evidence labels');
+});
+
+test('M5.2 C9: waiting qa_lock reads qa:<tag> on the card and in the drawer facts', () => {
+  const ctx = sandbox();
+  const run = (code) => vm.runInContext(code, ctx);
+  const drawer = new Node('dialog');
+  /** @type {any} */ (ctx.document).querySelector = (s) => (s === '#drawer' ? drawer : new Node('stub'));
+  const f = { id: 't_xss001', title: 't', kind: 'code', tag: 'self/tb', state: 'qa', waiting: { reason: 'qa_lock', since: '2026-10-13T01:02:03.000Z' } };
+  run(`state = { reminders: [], flows: [${JSON.stringify(f)}], system: {}, calendar: {} }; ui.open = "t_xss001";`);
+  assert.ok(walk(run(`flowCard(${JSON.stringify(f)})`)).text.includes('waiting: qa:self/tb'));
+  run(`drawerBody(${JSON.stringify(f)}, ${JSON.stringify({ ...f, qa: { n: 1, head: 'a' } })})`);
+  const t = walk(drawer).text;
+  assert.equal(t[t.indexOf('Waiting') + 1], 'qa:self/tb');
+});

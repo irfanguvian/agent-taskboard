@@ -9,6 +9,10 @@
 // (S2 belt). S3: no RegExp is built from agent text; main() denies a check that runs past 3 s (fail closed, io.run).
 // P5 (D5, RO2): in working, no npx / npm exec / pnpm dlx / yarn dlx: they fetch and run a package outside the lockfile
 // (a dependency is Irfan's call: NEEDS_SCOPE with packages); local tools run as ./node_modules/.bin/<tool> or npm scripts.
+// M5 C7 (D-0087): in qa and final_gate, no dropdb, no DROP DATABASE / SCHEMA (SQL /*…*/ and -- comments read as space),
+// no psql TRUNCATE and no postgres-irfan-axi with --yes (its confirmed writes), case-insensitive, read with quotes and
+// backslashes taken out (`--y''es`). A line naming a DB tool with a shell expansion ($x, ${…}, $(…), $'…', `…`, an
+// unquoted glob or {a,b}), or whose command word the shell builds next to -axi / psql text, is refused whole.
 // Rewrites (updatedInput) a command whose simple commands start with a TB_HEAVY prefix (JSON array, matched
 // by leading words, after keywords/VAR=value/env/timeout/nice/nohup/command wrappers, by basename, also inside
 // `sh -c '…'`) to `tbx heavy -- sh -c '<whole command>'`; pins jest --maxWorkers=2, playwright --workers=1.
@@ -46,6 +50,24 @@ const FETCH_RUN = 'npx, npm exec, pnpm dlx and yarn dlx fetch and run packages o
 // and create fetch too; plain `npm init` is harmless, denied anyway: fail closed)
 const FETCHERS = { npm: ['exec', 'x', 'init', 'create'], pnpm: ['dlx', 'create'], yarn: ['dlx', 'create'], bun: ['x', 'create'] };
 const fetchRun = (w) => ['npx', 'pnpx', 'bunx'].includes(base(w[0] ?? '')) || !!(Object.hasOwn(FETCHERS, base(w[0] ?? '')) && FETCHERS[base(w[0])].includes(w.slice(1).find((x) => !x.startsWith('-'))));
+const DB_PHASES = ['qa', 'final_gate'];
+const DB_WHY = 'qa and final review never drop a database or schema (dropdb, DROP DATABASE / SCHEMA, psql TRUNCATE), confirm a postgres-irfan-axi write (--yes) or build a DB command with shell expansion ($x, ${…}, $(…), `…`, globs, {a,b}); read with its query command and literal words, name the write you need in your result';
+const DB_TOOL = /postgres-irfan|psql|dropdb|\bpg_[a-z]/i;
+const EXPAND = /`|(?<!\$)\$[\w'"({[@*#?!-]/; // $name, ${, $(, $', $", $[, $@ and the other specials, a backtick; not SQL's $$
+const GLOB = /[*?]|\[[^\s\]]*\]|\{[^\s{}]*(?:,|\.\.)[^\s{}]*\}/; // outside quotes: *, ?, [x], {a,b}, {1..3}
+function dbBad(cmd) {
+  const c = cmd.replace(/["'\\]/g, ''); // as the shell reads it: `--y''es` and `-\-yes` are --yes
+  const sql = c.replace(/\/\*[\s\S]*\*\//g, ' '); // first /* to last */: nested comments too
+  if (/\bdropdb\b|\bdrop(?:\s|--[^\n]*\n)+(?:database|schema)\b/i.test(sql) || (/\bpsql\b/i.test(c) && /\btruncate\b/i.test(sql))) return true;
+  if (/postgres-irfan-axi/i.test(c) && /--yes\b/i.test(c)) return true;
+  if (DB_TOOL.test(c) && (EXPAND.test(cmd) || GLOB.test(cmd.replace(/'[^']*'|"(?:[^"\\]|\\.)*"/g, '')))) return true;
+  // a command word the shell builds (`$a$b`, `${p}-axi`) on a line with -axi / psql text in it
+  return /-axi|psql/i.test(c) && cmd.split(SEP).some((seg, i) => {
+    const t = i % 2 ? [] : tokens(seg);
+    const w = t[head(t)];
+    return !!w && /[$`]/.test(seg.slice(w.from, w.to));
+  });
+}
 const GIT_ARG = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--config-env']); // global options taking the next word
 const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const base = (s) => s.slice(s.lastIndexOf('/') + 1);
@@ -296,6 +318,7 @@ function heavyList(env) {
 // → {deny: reason} | {command: rewritten} | null (allow unchanged)
 function guard(command, env = process.env) {
   for (const [re, why] of rules(env)) if (re.test(command)) return { deny: `bash-guard: ${why}` };
+  if (DB_PHASES.includes(env.TB_PHASE ?? '') && dbBad(command)) return { deny: `bash-guard: ${DB_WHY}` };
   // planning (J16): an env var set by `export GIT_PAGER=…; git log` sits outside git's own words
   if (env.TB_PHASE === 'planning' && /(^|[\s;&|(`])(export|declare|typeset|readonly)\b|\bGIT_\w*=/.test(command)) {
     return { deny: 'bash-guard: planning only reads: no export/declare or GIT_* variables (they make git run programs)' };

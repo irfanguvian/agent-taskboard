@@ -37,7 +37,8 @@ const EXPECTED = {
   'research/review': [RO, []],
   'brainstorm/review': [RO, []],
   'design/review': [RO, []],
-  'code/qa': [[...RO, W(`${CTX.WORKTREE}/qa`), 'Bash', 'Agent'], [`${CTX.WORKTREE}/qa`]], // QA writes only to qa/
+  // M5 C5 (contract change; was Edit(qa/**)): QA writes only its reports + screenshots under docs/verification/
+  'code/qa': [[...RO, W(`${CTX.WORKTREE}/docs/verification`), 'Bash', 'Agent'], [`${CTX.WORKTREE}/docs/verification`]],
   'research/qa': [RO, []], // claim spot-check reads the runner's fetched pages; no subagents (§6)
   'design/qa': [RO, []], // visual check
   'code/pr': [[...RO, W(CTX.OUT_DIR)], [CTX.OUT_DIR]], // Sonnet writes out/pr.md
@@ -58,7 +59,9 @@ test('phase-settings: one template per §5/§6 phase, allow == table, prompt.md 
       // P5 (contract change; was settings.json only): code/working gains its result.schema.json (P5d: prompt.md landed, code/working is built)
       const want = { 'code/planning': ['prompt.md', 'result.schema.json', 'settings.json'], 'code/working': ['prompt.md', 'result.schema.json', 'settings.json'],
         // M5.1 (contract change; was settings.json only): code/review is built (D9: prompt.md + result.schema.json + settings.json)
-        'code/review': ['prompt.md', 'result.schema.json', 'settings.json'] };
+        'code/review': ['prompt.md', 'result.schema.json', 'settings.json'],
+        // M5.2 (contract change; was settings.json only): code/qa is built (D9: prompt.md + result.schema.json + settings.json)
+        'code/qa': ['prompt.md', 'result.schema.json', 'settings.json'] };
       assert.deepEqual(fs.readdirSync(path.join(REPO, 'phases', kind, phase)), want[`${kind}/${phase}`] ?? ['settings.json'], `${kind}/${phase}`);
     }
   }
@@ -73,7 +76,7 @@ test('phase-settings: one template per §5/§6 phase, allow == table, prompt.md 
 test('phase-settings: §3b deny paths + D35c reads + S1 Claude config on every phase; own worktree and out/ never denied', () => {
   const must = [
     ...['config.json', 'tags.json', 'tasks.json', 'token', 'session', 'metrics.jsonl', 'leak-denylist.txt', 'slots.json', 'doctor.json',
-      'events.jsonl', 'tbd.log', 'tbd.pid', 'deploy.log', 'backup/**'].flatMap((f) => [`Read(/${H}/${f})`, `Edit(/${H}/${f})`]),
+      'events.jsonl', 'tbd.log', 'tbd.pid', 'deploy.log', 'backup/**', 'rec-key*'].flatMap((f) => [`Read(/${H}/${f})`, `Edit(/${H}/${f})`]), // rec-key: M5 C6
     `Edit(/${H}/tbd.sock)`, `Edit(/${H}/bin/**)`, W(CTX.SKILLS_DIR), 'Edit(~/taskboard-live/**)', `Edit(/${CTX.WORKTREE}/.git)`,
     `Edit(/${CTX.TICKET_DIR}/*.json)`, `Edit(/${CTX.TICKET_DIR}/rounds/**)`, 'Bash(git push *)',
     ...PLANTED.map((p) => `Edit(/${p}${p.endsWith('.claude') ? '/**' : ''})`),
@@ -114,7 +117,8 @@ test('phase-settings: hooks wired by absolute path; sandbox kept on, localhost o
     // P4 L8 (contract change; was [TB_HOME] only): a TB_HOME that is not the live ~/.taskboard denies the live one too
     assert.deepEqual(sb.filesystem.denyRead, [H, path.join(os.homedir(), '.taskboard')], k);
     const bashPhase = k === 'code/working' || k === 'code/qa';
-    const reopen = bashPhase ? [REPO, '/u/.nvm/v24', '~/.npm', '~/Library/Caches/ms-playwright'] : []; // tbx, node, npm
+    // tbx, node, npm; M5 S4 (contract change; was none): code/qa reads the one DB CLI file, not ~/bin
+    const reopen = bashPhase ? [REPO, '/u/.nvm/v24', '~/.npm', '~/Library/Caches/ms-playwright', ...(k === 'code/qa' ? ['~/bin/postgres-irfan-axi'] : [])] : [];
     assert.deepEqual(sb.filesystem.allowRead, [CTX.WORKTREE, CTX.TICKET_DIR, `${H}/tbd.sock`, ...reopen], k);
     for (const p of [REPO, '/u/.nvm/v24/bin', '~/.claude*', '~/.zshrc', `${CTX.TAG_PATH}/.git/config`, `${CTX.TAG_PATH}/.git/hooks`,
       `${CTX.TAG_PATH}/.git/info`, `${CTX.TAG_PATH}/.git/modules`, `${CTX.TAG_PATH}/.git/worktrees/*/config.worktree`, `${CTX.WORKTREE}/.git`, `${CTX.TICKET_DIR}/runs`, ...PLANTED,
@@ -140,6 +144,27 @@ test('phase-settings: code/working M1 node_modules + env-file denies, .cache / .
   assert.deepEqual(s.sandbox.filesystem.denyWrite.filter((p) => p.includes('node_modules') || p.includes('.env.test')), [`${nm}/[a-zA-Z0-9@_-]*`, `${nm}/.bin`, `${nm}/.package-lock.json`, `${CTX.WORKTREE}/.env.test`]);
   assert.ok(![...s.permissions.deny, ...s.sandbox.filesystem.denyWrite].some((r) => /node_modules\/\*\*|node_modules\)$|\.cache|\.prisma/.test(r)), 'no rule covers node_modules/.cache or .prisma');
   assert.deepEqual(s.attribution, { commit: '', pr: '' });
+});
+
+// M5 C5 + S4 (contract change; code/qa had Edit(qa/**) and network registry.npmjs.org): QA writes docs/verification/
+// only, reaches no domain (loopback via allowLocalBinding: the app, 127.0.0.1:5432), and carries code/working's
+// node_modules + env-file denies and attribution off verbatim
+test('phase-settings: code/qa M5 C5: Edit docs/verification/** only (real path-guard), no allowed domain, working\'s node_modules + env-file denies, D34 trailer off', () => {
+  const ctx = { ...CTX, ENV_FILES: ['.env.test'] };
+  const qa = render('code', 'qa', ctx);
+  const working = render('code', 'working', ctx);
+  const nm = (r) => r.includes('node_modules') || r.includes('.env.test');
+  assert.deepEqual(qa.permissions.deny.filter(nm), working.permissions.deny.filter(nm));
+  assert.equal(qa.permissions.deny.filter(nm).length, 6, '5 node_modules rules + the env file (the list: the M1 test above)');
+  assert.deepEqual(qa.sandbox.filesystem.denyWrite.filter(nm), working.sandbox.filesystem.denyWrite.filter(nm));
+  // M5.2 sec F2: QA never commits, so no index write either (update-index --skip-worktree would blind the tree pin)
+  assert.deepEqual([qa, working].map((s) => s.sandbox.filesystem.denyWrite.includes(`${CTX.TAG_PATH}/.git`)), [true, false]);
+  assert.deepEqual(qa.attribution, { commit: '', pr: '' });
+  assert.deepEqual(qa.sandbox.network, { allowUnixSockets: [`${H}/tbd.sock`], allowLocalBinding: true });
+  assert.equal(check({ tool_input: { file_path: `${CTX.WORKTREE}/docs/verification/screenshots/a.png` } }, qa.env), null);
+  for (const f of ['src/a.ts', 'docs/verdicts/x.md', 'qa/x.md', '.env.test']) {
+    assert.equal(check({ tool_input: { file_path: `${CTX.WORKTREE}/${f}` } }, qa.env)?.permissionDecision, 'deny', f);
+  }
 });
 
 test('phase-settings: --tools from allow (Edit brings Write); read-only phases get no write tool', () => {
