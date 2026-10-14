@@ -18,6 +18,7 @@ const planning = require('./lib/planning'); // registers the code/planning handl
 const working = require('./lib/working'); // registers the code/working handler, seed + next hook (P5)
 require('./lib/review'); // registers the code/review handler, seed + next hook (M5 C3)
 require('./lib/qa'); // registers the code/qa handler, seed + next hook (M5 C5)
+require('./lib/final'); // registers the code/final_gate handler, seed + next hook, tells working.js a final gate's result (M5 C10-C13)
 const pass = require('./lib/pass');
 const metrics = require('./lib/metrics');
 
@@ -106,6 +107,7 @@ function boot() {
     await working.boot(); // P5: pre-P5 working tickets get a work cursor; a swap left by a killed tbd is restored first
     pass.watch({ alert: runner.alert }); // parents waiting on children: one alert per newly blocked child
     await pass.boot().catch((e) => console.error(`tbd: children recount: ${e.message}`)); // a finish lost to a stop
+    await require('./lib/push').boot({ alert: runner.alert }); // M5 C14: a push a dead tbd left running → failed
     runner.start(); // re-attaches live leases, then starts runs (after the socket: TBX_RUN keys work from the first second)
     ready(notifier, monitor, runner); // throws on an unreadable session file: caught below, clean stop(1)
     console.log(`tbd listening ${/** @type {import('node:net').AddressInfo} */ (server.address()).port}`);

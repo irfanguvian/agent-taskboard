@@ -1,0 +1,76 @@
+{
+  "title": "E3 QA passed but A1 (a total above the maximum is refused) has no proof: its case sends totalMinor 0 and no test covers it: block naming the gap",
+  "ticket": "POST /orders should refuse an order total above 100 000.00.",
+  "plan": "../../review/E2/plan.json",
+  "commits": ["change.patch"],
+  "review": {
+    "verdict": "pass", "findings": [], "closed": [],
+    "notes": ["@Max is inclusive: 10000000 passes, 10000001 is a 400 from the global ValidationPipe."],
+    "declined": ["no auth on POST /orders: at base, not this change"]
+  },
+  "qa_report": "qa-report.md",
+  "qa": {
+    "verdict": "pass",
+    "cases": [
+      {
+        "id": "TC-1", "type": "backend", "kind": "positive", "source": "A2", "acceptance": ["A2"],
+        "pre": "app on the qa port, qa.db migrated and seeded (50 users, 5 orders each)",
+        "steps": ["tbx req POST /orders -d '{\"userId\":3,\"totalMinor\":10000000}'"],
+        "expect": "201 with the stored order, totalMinor 10000000",
+        "result": "PASS", "recs": ["1.1"], "screenshots": [], "observed": { "status": 201, "note": "order 251 stored with totalMinor 10000000" }
+      },
+      {
+        "id": "TC-2", "type": "backend", "kind": "negative", "source": "A1", "acceptance": ["A1"],
+        "pre": "app on the qa port",
+        "steps": ["tbx req POST /orders -d '{\"userId\":4,\"totalMinor\":0}'"],
+        "expect": "400, no order stored",
+        "result": "PASS", "recs": ["1.2"], "screenshots": [], "observed": { "status": 400, "note": "totalMinor must not be less than 1" }
+      },
+      {
+        "id": "TC-3", "type": "backend", "kind": "negative", "source": "A3", "acceptance": ["A3"],
+        "pre": "app on the qa port",
+        "steps": ["tbx req POST /orders -d '{\"userId\":9999,\"totalMinor\":100}'"],
+        "expect": "422 for an unknown user",
+        "result": "PASS", "recs": ["1.3"], "screenshots": [], "observed": { "status": 422, "note": "user 9999 does not exist" }
+      }
+    ],
+    "findings": []
+  },
+  "recs": [
+    { "method": "POST", "path": "/orders", "body": { "userId": 3, "totalMinor": 10000000 }, "status": 201,
+      "res": { "id": 251, "userId": 3, "totalMinor": 10000000, "status": "pending", "createdAt": "2026-10-14T09:12:03.418Z" } },
+    { "method": "POST", "path": "/orders", "body": { "userId": 4, "totalMinor": 0 }, "status": 400,
+      "res": { "message": ["totalMinor must not be less than 1"], "error": "Bad Request", "statusCode": 400 } },
+    { "method": "POST", "path": "/orders", "body": { "userId": 9999, "totalMinor": 100 }, "status": 422,
+      "res": { "message": "user 9999 does not exist", "error": "Unprocessable Entity", "statusCode": 422 } }
+  ],
+  "expect": {
+    "verdict": "block",
+    "state": "working",
+    "fix": "@fx1",
+    "gap": "\\bA1\\b|10[ _,.]?000[ _,.]?001|above the max"
+  },
+  "docs": {
+    "verdict": "# Verdict: POST /orders maximum total\n\n## Verdict\n\n**FAIL**\n\n- plan: PASS\n- work: PASS: T1 done\n- review: PASS\n- QA: PASS, but A1 is not proven\n- final: FAIL: F1\n\n```mermaid\nflowchart LR\n  A1 -.no proof.-> X[ ]\n  A2 --> TC1\n```\n\n## All work done\n\n- T1: done, but the above-maximum test of its steps is missing\n\n## All changes, before → after\n\n- src/orders/orders.dto.ts: before: no upper bound. After: @Max(10 000 000).\n\nTesting evidence: see Evidence below.\n",
+    "verification": "# Final verification\n\n```mermaid\nflowchart LR\n  A2 --> TC1\n  A1 --> none\n```\n\n- A2: TC-1 (captured by tbd).\n- A1: not proven: TC-2 sends totalMinor 0, not a total above 10 000 000; no e2e test either.\n\n**Verdict:** FAIL\n"
+  },
+  "example": {
+    "verdict": "block",
+    "findings": [{
+      "id": "F1", "severity": "MED", "confidence": "high", "where": "src/orders/orders.dto.ts:39",
+      "problem": "A1 (a total above 10 000 000 is refused and stores nothing) has no proof: TC-2, filed under A1, sends totalMinor 0 (the old lower bound), and no test sends 10 000 001; the plan's above-maximum e2e test is missing.",
+      "failure_scenario": "@Max dropped or set too high: every test and QA case still passes, and POST /orders with totalMinor 10000001 stores the order.",
+      "fix": "Add the e2e test 'POST /orders rejects a total above the maximum and stores nothing' (10000001 answers 400, the user's order count unchanged) and run QA again with a case that sends 10000001."
+    }],
+    "verdict_doc": "docs/verdicts/final-e3.md",
+    "verification_doc": "docs/verification/final-e3.md",
+    "summary": {
+      "title": "POST /orders maximum total: blocked, A1 not proven",
+      "description": "@Max(10 000 000) is on CreateOrderDto.totalMinor and the maximum itself is tested.\nNothing proves a bigger total is refused: no test, and the QA case for A1 sends 0.",
+      "worked_on": ["src/orders/orders.dto.ts: @Max on totalMinor", "test/orders.e2e-spec.ts: the test at the maximum"],
+      "blocker": "F1: A1 has no proof",
+      "need_review": "none",
+      "verdict": "blocked"
+    }
+  }
+}

@@ -41,7 +41,9 @@ const EXPECTED = {
   'code/qa': [[...RO, W(`${CTX.WORKTREE}/docs/verification`), 'Bash', 'Agent'], [`${CTX.WORKTREE}/docs/verification`]],
   'research/qa': [RO, []], // claim spot-check reads the runner's fetched pages; no subagents (§6)
   'design/qa': [RO, []], // visual check
-  'code/pr': [[...RO, W(CTX.OUT_DIR)], [CTX.OUT_DIR]], // Sonnet writes out/pr.md
+  // M5.3 A17 (contract change; was code/pr: Read, Glob, Grep + Edit(out/**), Sonnet writes out/pr.md): no PR phase (D-0082:
+  // gh and PRs are gone); code/final_gate reads with review's git and writes its two docs under the docs dirs only (C11)
+  'code/final_gate': [[...GIT, W(`${CTX.WORKTREE}/docs/verdicts`), W(`${CTX.WORKTREE}/docs/verification`)], [`${CTX.WORKTREE}/docs/verdicts`, `${CTX.WORKTREE}/docs/verification`]],
   'code/context': [[...GIT, W(`${CTX.WORKTREE}/.learning`)], [`${CTX.WORKTREE}/.learning`]], // module context refresh
 };
 const all = () => Object.keys(EXPECTED).map((k) => [k, render(...k.split('/'), CTX)]);
@@ -61,7 +63,9 @@ test('phase-settings: one template per §5/§6 phase, allow == table, prompt.md 
         // M5.1 (contract change; was settings.json only): code/review is built (D9: prompt.md + result.schema.json + settings.json)
         'code/review': ['prompt.md', 'result.schema.json', 'settings.json'],
         // M5.2 (contract change; was settings.json only): code/qa is built (D9: prompt.md + result.schema.json + settings.json)
-        'code/qa': ['prompt.md', 'result.schema.json', 'settings.json'] };
+        'code/qa': ['prompt.md', 'result.schema.json', 'settings.json'],
+        // M5.3 (new phase dir): code/final_gate is built (D9: prompt.md + result.schema.json + settings.json)
+        'code/final_gate': ['prompt.md', 'result.schema.json', 'settings.json'] };
       assert.deepEqual(fs.readdirSync(path.join(REPO, 'phases', kind, phase)), want[`${kind}/${phase}`] ?? ['settings.json'], `${kind}/${phase}`);
     }
   }
@@ -167,6 +171,27 @@ test('phase-settings: code/qa M5 C5: Edit docs/verification/** only (real path-g
   }
 });
 
+// M5 C11 (D-0089): the final review writes its verdict + verification doc only (real path-guard), never the tag repo's .git
+// (no index flag can hide an edit from its tree pin, as QA), with code/working's node_modules + env-file denies and
+// attribution off
+test('phase-settings: code/final_gate M5 C11: Edit docs/verdicts/** + docs/verification/** only, .git write-denied, working\'s node_modules + env-file denies, D34 trailer off', () => {
+  const ctx = { ...CTX, ENV_FILES: ['.env.test'] };
+  const fin = render('code', 'final_gate', ctx);
+  const working = render('code', 'working', ctx);
+  const nm = (r) => r.includes('node_modules') || r.includes('.env.test');
+  assert.deepEqual(fin.permissions.deny.filter(nm), working.permissions.deny.filter(nm));
+  assert.deepEqual(fin.sandbox.filesystem.denyWrite.filter(nm), working.sandbox.filesystem.denyWrite.filter(nm));
+  assert.ok(fin.sandbox.filesystem.denyWrite.includes(`${CTX.TAG_PATH}/.git`));
+  assert.deepEqual(fin.attribution, { commit: '', pr: '' });
+  assert.deepEqual(tools(fin), ['Read', 'Glob', 'Grep', 'Bash', 'Edit', 'Write']);
+  for (const f of ['docs/verdicts/2026-10-14-t_abc123.md', 'docs/verification/2026-10-14-t_abc123-final.md']) {
+    assert.equal(check({ tool_input: { file_path: `${CTX.WORKTREE}/${f}` } }, fin.env), null, f);
+  }
+  for (const f of ['src/a.ts', 'docs/notes.md', '.env.test', 'node_modules/x/index.js']) {
+    assert.equal(check({ tool_input: { file_path: `${CTX.WORKTREE}/${f}` } }, fin.env)?.permissionDecision, 'deny', f);
+  }
+});
+
 test('phase-settings: --tools from allow (Edit brings Write); read-only phases get no write tool', () => {
   assert.deepEqual(tools(render('code', 'working', CTX)), ['Read', 'Glob', 'Grep', 'Edit', 'Write', 'Bash']); // P5 K15 (contract change): no Agent
   assert.deepEqual(tools(render('code', 'planning', CTX)), ['Read', 'Glob', 'Grep', 'Bash']);
@@ -194,6 +219,12 @@ test('phase-settings: bad ctx or phase name is refused, nothing rendered', () =>
   for (const b of bad) assert.throws(() => render('code', 'working', { ...CTX, ...b }), /phase-settings:/, JSON.stringify(b));
   for (const [kind, phase] of [['..', 'working'], ['code', '../planning'], ['code', 'nope'], ['Code', 'working']]) {
     assert.throws(() => render(kind, phase, CTX), /phase-settings:/, `${kind}/${phase}`);
+  }
+  // M5 C10: a phase dir name may hold `_` after its first letter (final_gate); the name check refuses anything else
+  const why = (kind, phase) => { try { render(kind, phase, CTX); return ''; } catch (e) { return e.message; } };
+  assert.doesNotMatch(why('code', 'final_gate'), /bad phase/); // renders once phases/code/final_gate/settings.json is there
+  for (const [kind, phase] of [['code', '_x'], ['code', 'Final'], ['code', 'final-gate'], ['code', 'final_gate/..'], ['_code', 'qa']]) {
+    assert.match(why(kind, phase), /bad phase/, `${kind}/${phase}`);
   }
 });
 

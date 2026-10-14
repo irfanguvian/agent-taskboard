@@ -156,3 +156,64 @@ test('M5.2 C9: waiting qa_lock reads qa:<tag> on the card and in the drawer fact
   const t = walk(drawer).text;
   assert.equal(t[t.indexOf('Waiting') + 1], 'qa:self/tb');
 });
+
+test('XSS: M5.3 push state, tag ident and the Push view (git why, ident name) render as text only; Push disabled without the tag ident', () => {
+  const ctx = sandbox();
+  const run = (code) => vm.runInContext(code, ctx);
+  const drawer = new Node('dialog');
+  /** @type {any} */ (ctx.document).querySelector = (s) => (s === '#drawer' ? drawer : new Node('stub'));
+  const role = (n, r) => (n?.attrs?.['data-role'] === r ? n : (n?.kids ?? []).map((x) => role(x, r)).find(Boolean));
+  const f = { id: 't_xss001', title: 't', kind: 'code', tag: 'acme/api', state: 'final_gate', waiting: { reason: 'close' } };
+  const k = { ...f, branch: 'tb/t_xss001-x', final: { sha: 'a'.repeat(40) },
+    push: { state: 'failed', remote: 'mirror', ref: 'refs/heads/tb/t_xss001-x', sha: 'a'.repeat(40), why: `rejected ${P}` } };
+  run(`state = { reminders: [], flows: [${JSON.stringify(f)}], system: {}, calendar: {} }; ui.open = "t_xss001";
+    ui.tagDefs = { "acme/api": { push: { remote: "mirror" }, ident: { name: ${JSON.stringify(`Irfan ${P}`)}, email: "i@example.com" } } };`);
+  run(`drawerBody(${JSON.stringify(f)}, ${JSON.stringify(k)})`);
+  const w = walk(drawer);
+  assert.ok(w.tags.every((t) => !['img', 'script', 'iframe', 'svg', 'object'].includes(t)), `no element from a payload: ${w.tags}`);
+  assert.deepEqual(w.attrs.filter((a) => /^(on\w+|src|srcdoc|formaction|href)=/i.test(a)), [], 'no payload in a handler, src or link attribute');
+  for (const s of [`failed · mirror tb/t_xss001-x · ${'a'.repeat(12)} · rejected ${P}`, `Irfan ${P} <i@example.com>`]) assert.ok(w.text.includes(s), `as text: ${s}`);
+  assert.equal(role(drawer, 'push').attrs.disabled, undefined, 'ident set: Push enabled');
+
+  run('ui.tagDefs = { "acme/api": { push: { remote: "mirror" } } };');
+  run(`drawerBody(${JSON.stringify(f)}, ${JSON.stringify(k)})`);
+  const t2 = walk(drawer).text;
+  assert.equal(role(drawer, 'push').attrs.disabled, '', 'no ident: Push disabled');
+  assert.ok(t2.filter((s) => s === 'tb doctor --tag acme/api --ident').length === 2 && t2.includes('ident not set: run '), 'the hint in the facts and by the button');
+  run('ui.tagDefs = { "acme/api": {} };');
+  run(`drawerBody(${JSON.stringify(f)}, ${JSON.stringify(k)})`);
+  assert.equal(role(drawer, 'push'), undefined, 'no push remote: no Push button');
+});
+
+test('M5.3 C15: waiting blockers_diverge is explained in the drawer', () => {
+  const ctx = sandbox();
+  const text = walk(vm.runInContext('notice("t_xss001", { reason: "blockers_diverge", error: "t_a and t_b diverge" })', ctx)).text;
+  assert.ok(text.some((s) => /^Blockers diverge: .*does not rebase\. Cancel it, or re-plan it\.$/.test(s)) && text.includes('t_a and t_b diverge'), String(text));
+});
+
+test('XSS: M5.3 Final view (findings, summary, verdict doc) renders agent text as text only, the verification doc as a docs route link; Close + send back at waiting close only', () => {
+  const ctx = sandbox();
+  const run = (code) => vm.runInContext(code, ctx);
+  const drawer = new Node('dialog');
+  /** @type {any} */ (ctx.document).querySelector = (s) => (s === '#drawer' ? drawer : new Node('stub'));
+  const role = (n, r) => (n?.attrs?.['data-role'] === r ? n : (n?.kids ?? []).map((x) => role(x, r)).find(Boolean));
+  const f = { id: 't_xss001', title: 't', kind: 'code', tag: null, state: 'final_gate', waiting: { reason: 'close' } };
+  const k = { ...f, fixes: 1, work: { tasks: [] }, final: { n: 2, tested_sha: 'b'.repeat(40), sha: 'c'.repeat(40), verdict: 'pass' } };
+  const fin = (doc) => ({ data: { n: 2, verdict: 'pass', at: '2026-10-14T01:02:03.000Z', verification_doc: doc,
+    findings: [{ id: 'F1', severity: 'LOW', confidence: 'medium', where: `src/${P}.js:1`, problem: `p ${P}`, failure_scenario: `s ${S}`, fix: `f ${P}`, blocking: false }] } });
+  run(`state = { reminders: [], flows: [${JSON.stringify(f)}], system: {}, calendar: {} }; ui.open = "t_xss001"; ui.fixMax = 3;
+    ui.final = { id: "t_xss001", final: ${JSON.stringify(fin('docs/verification/f.md'))}, summary: { text: ${JSON.stringify(`**Title:** ${S}`)} }, verdict: { text: ${JSON.stringify(`PASS ${P}`)} } };`);
+  run(`drawerBody(${JSON.stringify(f)}, ${JSON.stringify(k)})`);
+  const w = walk(drawer);
+  assert.ok(w.tags.every((t) => !['img', 'script', 'iframe', 'svg', 'object'].includes(t)), `no element from a payload: ${w.tags}`);
+  assert.deepEqual(w.attrs.filter((a) => /^(on\w+|src|srcdoc|formaction|href)=/i.test(a)), ['href=/api/tickets/t_xss001/docs?path=verification%2Ff.md'], 'the one link is tbd\'s docs route');
+  for (const s of [`p ${P}`, `s ${S}`, `f ${P}`, `src/${P}.js:1`, `**Title:** ${S}`, `PASS ${P}`, 'pass · squash cccccccccccc · tested bbbbbbbbbbbb']) assert.ok(w.text.includes(s), `as text: ${s}`);
+  assert.ok(role(drawer, 'close-flow') && role(drawer, 'rework-text'), 'waiting close: Close + the send-back box');
+
+  run(`ui.final.final = ${JSON.stringify(fin(`docs/verification/${P}.md`))};`);
+  run(`drawerBody(${JSON.stringify({ ...f, waiting: null })}, ${JSON.stringify({ ...k, waiting: null })})`);
+  const w2 = walk(drawer);
+  assert.deepEqual(w2.attrs.filter((a) => /^href=/i.test(a)), [], 'a path off the docs regex: no link');
+  assert.ok(w2.text.includes(`docs/verification/${P}.md`), 'it stays text');
+  assert.ok(!role(drawer, 'close-flow') && !role(drawer, 'rework-text'), 'a final gate not waiting close: neither');
+});

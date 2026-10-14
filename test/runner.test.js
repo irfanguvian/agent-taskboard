@@ -16,6 +16,7 @@ const { call } = require('../lib/slots');
 const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'runner-'));
 after(() => fs.rmSync(ROOT, { recursive: true, force: true }));
 const SCHEMA = { type: 'object' };
+const CHILDREN = { reason: 'children', done: 0, total: 1, blocked: [], since: NOW };
 const HANG = path.join(ROOT, 'hang.json'); // T7 variant: SIGINT ignored
 fs.writeFileSync(HANG, JSON.stringify({ steps: [{ hang: 'ignore_sigint' }] }));
 const HANG_TERM = path.join(ROOT, 'hang-term.json'); // INT, TERM, HUP ignored: only SIGKILL ends it
@@ -71,6 +72,13 @@ test('AC1 outcomes from the last result line: crash, invalid JSON, max turns, sc
     t_unblt1: { state: 'review' }, // phase not built: waits on Irfan
     t_mscfg1: { state: 'qa' }, // prompt.md without schema/handler: Blocked, never spawned
     t_backl1: { state: 'backlog' }, // not an agent phase
+    // M5 C10 hazard (a): final_gate is an agent phase now; a legacy D9 parent (its pass recorded) keeps its children
+    // wait, a non-code final gate gets no wait (as before); a code final gate without a pass is considered (unbuilt
+    // here: waiting manual)
+    t_d9par1: { state: 'final_gate', pr: { sha: 'a'.repeat(40), merged_at: NOW }, children: ['t_d9kid1'], waiting: CHILDREN },
+    t_rsfg01: { state: 'final_gate', kind: 'research' },
+    t_d9kid1: { state: 'clarify', parent: 't_d9par1' },
+    t_fgate1: { state: 'final_gate' },
   });
   // usage limit: test/recovery-tbd.test.js (its pause would hold every later start here)
   const ran = ['t_crash1', 't_ijson1', 't_maxt01', 't_schem1', 't_refus1', 't_okres1', 't_next01', 't_throw1', 't_refsd1'];
@@ -93,13 +101,14 @@ test('AC1 outcomes from the last result line: crash, invalid JSON, max turns, sc
   // T1 negatives
   assert.deepEqual(read(tbd, 't_unblt1').waiting?.reason, 'manual');
   assert.equal(read(tbd, 't_mscfg1').state, 'blocked');
-  for (const id of ['t_unblt1', 't_mscfg1', 't_backl1']) assert.equal(fs.existsSync(path.join(tbd.tbHome, 'tickets', id, 'runs')), false, `${id} never spawned`);
+  for (const id of ['t_unblt1', 't_mscfg1', 't_backl1', 't_d9par1', 't_rsfg01', 't_fgate1']) assert.equal(fs.existsSync(path.join(tbd.tbHome, 'tickets', id, 'runs')), false, `${id} never spawned`);
   assert.equal(read(tbd, 't_backl1').lease, null);
   // P3b (contract change; was "an ended lease in its phase is P3b's: no second run"): a counted failure past
   // max_failures_per_phase (0 here) and max_turns → Blocked at once; schema_fail → resumed once, then Blocked; a
   // result that kept the phase → no second run. P4 AC7 / U7 (contract change; was "refusal → Blocked at once"): a
   // refusal on fable (the planning default) → one fresh run on opus xhigh, not counted; it refuses too → Blocked.
   await new Promise((r) => setTimeout(r, 2500));
+  assert.deepEqual([read(tbd, 't_d9par1').waiting, read(tbd, 't_rsfg01').waiting, read(tbd, 't_fgate1').waiting?.reason], [CHILDREN, null, 'manual']);
   const second = ['t_ijson1', 't_schem1'];
   const opus = ['t_refus1'];
   for (const id of ran) assert.equal(hasRun(tbd, id, 2), [...second, ...opus].includes(id), `${id}: a second run only for the schema retry or the opus re-run`);

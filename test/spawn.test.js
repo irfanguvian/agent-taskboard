@@ -258,3 +258,17 @@ test('M5 C5 env files: working and qa runs deny Edit + sandbox write of the tag 
     assert.deepEqual(denied, phase === 'review' ? [false, false] : [true, true], phase);
   }
 });
+
+// M5 C11 G9: the final review never runs on review's model: models.final_gate when it differs (the default: opus vs
+// fable), else the first of opus, fable (billing ok), sonnet that differs; the runner's lease, the argv and t:run all ask
+// modelFor (the argv case: test/final.test.js F1)
+test('M5 C11 G9 finalModel: configured final model kept when it is not review\'s; same as review → opus, fable (billing ok), sonnet, the first that differs', () => {
+  const cfg = (review, final, billing = 'plan') => ({ fable_billing: billing, models: { review, final_gate: final } });
+  const pick = (c) => spawn.modelFor(c, 'final_gate').model;
+  assert.equal(pick(cfg({ model: 'fable' }, { model: 'opus', effort: 'xhigh' })), 'opus', 'the defaults: kept');
+  assert.equal(pick(cfg({ model: 'opus' }, { model: 'opus' })), 'fable', 'review opus, billing ok → fable');
+  assert.equal(pick(cfg({ model: 'opus' }, { model: 'opus' }, 'unknown')), 'sonnet', 'review opus, no fable billing → sonnet');
+  assert.equal(pick(cfg({ model: 'fable' }, { model: 'fable' }, 'unknown')), 'sonnet', 'both fable without billing run as opus: still not the same model');
+  assert.deepEqual(spawn.modelFor(cfg({ model: 'opus' }, { model: 'opus', effort: 'xhigh' }), 'final_gate'), { model: 'fable', effort: 'xhigh', fable: true });
+  assert.equal(spawn.modelFor(cfg({ model: 'opus' }, { model: 'opus' }), 'final_gate', true).model, 'opus', 'a Fable refusal\'s opus re-run stays opus (U7)');
+});

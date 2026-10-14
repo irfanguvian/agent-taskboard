@@ -154,3 +154,82 @@ test('M5 C7 dbLocal: postgres URLs + PGHOST on localhost / 127.0.0.1 / [::1] (an
   fs.symlinkSync('/etc/hosts', path.join(dir, '.env'));
   assert.match((await dbLocal(tag)).why ?? 'passed', /env file ".env": not a plain file/, 'an env file it cannot read fails closed');
 });
+
+// ---- M5.3: the ident + push keys (contract rev 4 C1 C12 C14) and util's git opts, d34 and ident (C12 C14, D34) ----------
+const { execFileSync } = require('node:child_process');
+const sh = require('../lib/sh');
+const { git, d34, ident, SHA_RE } = require('../lib/util');
+const EMAIL = 'i@example.com';
+
+test('M5 C12 C14 tag keys: ident {name, email} a plain git ident, push {remote} a remote name; any other shape → 400', () => {
+  tags.validate('m53', { ident: { name: 'Irfan G', email: 'i.g+tb@mail.example.com' }, push: { remote: 'mirror' } });
+  tags.validate('m53', { ident: { name: 'x'.repeat(100), email: `${'a'.repeat(188)}@example.com` }, push: { remote: `my_remote-1.${'x'.repeat(52)}` } });
+  /** @type {[string, any][]} */
+  const bad = [
+    ['ident', { name: 'Irfan' }], ['ident', { name: 'Irfan', email: EMAIL, extra: 1 }], ['ident', 'Irfan <i@example.com>'],
+    ['ident', { name: '', email: EMAIL }], ['ident', { name: '  ', email: EMAIL }], ['ident', { name: 'x'.repeat(101), email: EMAIL }],
+    ['ident', { name: 'a\nb', email: EMAIL }], ['ident', { name: 'a\u0007', email: EMAIL }], ['ident', { name: 'a <b@c.com>', email: EMAIL }],
+    ['ident', { name: 'I', email: 'no-at' }], ['ident', { name: 'I', email: 'a@b@c' }], ['ident', { name: 'I', email: 'a b@c' }],
+    ['ident', { name: 'I', email: '<a@b>' }], ['ident', { name: 'I', email: `${'a'.repeat(189)}@example.com` }], ['ident', { name: 'I', email: 'a@b\u0000' }],
+    ['push', { remote: '' }], ['push', { remote: 'x'.repeat(65) }], ['push', { remote: 'https://github.com/x/y.git' }], ['push', { remote: '--force' }],
+    ['push', { remote: 'a b' }], ['push', { remote: 'mirror', branch: 'main' }], ['push', 'mirror'],
+  ];
+  for (const [k, v] of bad) assert.throws(() => tags.validate('m53', { [k]: v }), new RegExp(`bad value for tag key "${k}"`), `${k} ${JSON.stringify(v)}`);
+});
+
+test('M5 C12 C14 util.git: add sets vars as given (env is only what the minimal env is picked from); system reads the system config and never prompts; by default no system config, whatever add says', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'git-opts-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const sys = path.join(dir, 'system.gitconfig');
+  fs.writeFileSync(sys, '[tb]\n\tprobe = system\n');
+  const who = { GIT_AUTHOR_NAME: 'Irfan G', GIT_AUTHOR_EMAIL: EMAIL };
+  const author = async (o) => (await git(dir, ['var', 'GIT_AUTHOR_IDENT'], o)).stdout;
+  assert.match(await author({ add: who }), /^Irfan G <i@example\.com> \d+ [+-]\d{4}\n$/);
+  assert.doesNotMatch(await author({ env: { ...process.env, ...who } }), /Irfan G/, 'env vars outside the minimal set are dropped (hazard c)');
+  const probe = async (o) => (await git(dir, ['config', '--get', 'tb.probe'], o)).stdout.trim();
+  assert.equal(await probe({ system: true, add: { GIT_CONFIG_SYSTEM: sys } }), 'system');
+  assert.equal(await probe({ add: { GIT_CONFIG_SYSTEM: sys, GIT_CONFIG_NOSYSTEM: '0' } }), '', 'GIT_ENV wins over add');
+  // the child's real env in system mode: the minimal env + add + the 3 system vars; no GIT_CONFIG_NOSYSTEM, nothing else
+  const env = (await git(dir, [], { system: true, add: { GIT_AUTHOR_NAME: 'Irfan G' }, env: { PATH: '/usr/bin:/bin', HOME: dir, SECRET: 's', GIT_CONFIG_NOSYSTEM: '1' },
+    exec: (_bin, _args, o) => sh('/usr/bin/env', [], o) })).stdout.trim().split('\n').sort();
+  assert.deepEqual(env, [`HOME=${dir}`, 'GIT_AUTHOR_NAME=Irfan G', 'GIT_CONFIG_GLOBAL=/dev/null', 'GIT_NO_REPLACE_OBJECTS=1', 'GIT_TERMINAL_PROMPT=0', 'PATH=/usr/bin:/bin'].sort());
+});
+
+test('D34 util.d34: the first line with co-authored-by: then Claude or Anthropic, or with "generated with" (any case); claude elsewhere → null', () => {
+  assert.equal(d34('fix\n\nCo-Authored-By: Claude <noreply@x.com>\n'), 'Co-Authored-By: Claude <noreply@x.com>');
+  assert.equal(d34('feat\n\nco-authored-by: Bot (ANTHROPIC)'), 'co-authored-by: Bot (ANTHROPIC)');
+  assert.equal(d34('docs\n\n  GENERATED WITH some tool  \nmore'), 'GENERATED WITH some tool');
+  assert.equal(d34('fix claude_bin path\n\nco-authored-by: Bob <b@x.com>\nsee the anthropic docs'), null);
+});
+
+test('M5 C12 util.ident: the tag ident; a push tag without one → error; else the tested commit\'s author; a malformed ident or one naming Claude / Anthropic → error', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ident-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const run = (args, env = {}) => execFileSync('/usr/bin/git', ['-C', dir, ...args], { env: { PATH: '/usr/bin:/bin', HOME: dir, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', ...env }, encoding: 'utf8' }).trim();
+  run(['init', '-q']);
+  const commit = (name, email) => {
+    run(['commit', '-q', '--allow-empty', '-m', 'x'], { GIT_AUTHOR_NAME: name, GIT_AUTHOR_EMAIL: email, GIT_COMMITTER_NAME: 'c', GIT_COMMITTER_EMAIL: 'c@example.com' });
+    return run(['rev-parse', 'HEAD']);
+  };
+  const tested = commit('Irfan G', EMAIL);
+  const tk = { id: 't_ident1', tag: 'self/x', worktree: dir };
+  const mine = { name: 'Irfan Tag', email: 'tag@example.com' };
+  assert.deepEqual(await ident(tk, tested, { ident: mine, push: { remote: 'mirror' } }), { ...mine, from: 'tag' });
+  assert.deepEqual(await ident(tk, tested, { push: { remote: 'mirror' } }), { error: 'ident not set: run tb doctor --tag self/x --ident' });
+  assert.deepEqual(await ident(tk, tested, {}), { name: 'Irfan G', email: EMAIL, from: 'commit' });
+  for (const [name, email] of [['Claude', 'c@example.com'], ['Bot', 'noreply@anthropic.com']]) {
+    assert.match((await ident(tk, commit(name, email), {})).error ?? 'passed', /commit ident names Claude or Anthropic/, name);
+  }
+  assert.match((await ident(tk, tested, { ident: { name: 'claude', email: EMAIL } })).error ?? 'passed', /tag ident names Claude or Anthropic/);
+  assert.match((await ident(tk, commit('Irfan', 'no-at'), {})).error ?? 'passed', /commit ident is no git name \+ email/);
+  assert.match((await ident(tk, 'f'.repeat(40), {})).error ?? 'passed', /git log failed/);
+  assert.match((await ident(tk, 'HEAD', {})).error ?? 'passed', /no tested commit/);
+});
+
+test('M5.3 L6 util.SHA_RE: a SHA-1 (40 hex) or SHA-256 (64 hex) commit name, nothing between; ident takes a 64-hex tested commit', async () => {
+  for (const n of [40, 64]) assert.ok(SHA_RE.test('a'.repeat(n)), String(n));
+  for (const x of ['a'.repeat(39), 'a'.repeat(41), 'a'.repeat(63), 'a'.repeat(65), 'A'.repeat(40), `${'a'.repeat(40)}\n`]) assert.ok(!SHA_RE.test(x), JSON.stringify(x));
+  const tk = { id: 't_ident2', tag: 'self/x', worktree: os.tmpdir() };
+  assert.match((await ident(tk, 'f'.repeat(64), {})).error ?? 'passed', /git log failed/, 'past the check: git is asked');
+  assert.match((await ident(tk, 'f'.repeat(50), {})).error ?? 'passed', /no tested commit/);
+});

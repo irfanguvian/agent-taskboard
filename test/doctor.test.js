@@ -12,6 +12,7 @@ const path = require('node:path');
 const { createDoctor } = require('../lib/doctor');
 const { GIT_SAFE, claudeEnv } = require('../lib/util');
 const realStore = require('../lib/store');
+const tagsLib = require('../lib/tags');
 const { startTbd, runTb } = require('./helpers/tbd');
 
 const roots = [];
@@ -76,6 +77,7 @@ function fakeStore(claudeBin, tags = {}) {
     listTags: () => s.tags,
     updates: [],
     async updateConfig(patch) { s.updates.push(patch); Object.assign(s.config, patch); },
+    async putTag(name, def) { tagsLib.validate(name, def); s.tags = { ...s.tags, [name]: def }; return def; }, // the real check, as store.putTag
     writeAtomic: realStore.writeAtomic,
   };
   return s;
@@ -553,6 +555,24 @@ describe('tag checks', () => {
     const s = (await w.tagChecks()).find((c) => c.name.endsWith(':settings'));
     assert.deepEqual([s.ok, s.warn], [true, true]);
     assert.match(s.detail, /settings\.json has hooks/);
+  });
+
+  test('M5 C12 C14 D-0104: a push tag without ident fails tag:<t>:ident with the hint (assign refuses on it); --ident / --push-remote are merged into the stored tag (other keys kept) before the checks; a bad value or no tag → 400, nothing stored', async () => {
+    const w = repoWorld();
+    w.tag({ checks: { lint: 'true' }, push: { remote: 'mirror' } });
+    const d = w.doctor();
+    assert.deepEqual((await d.tagStatic('acme/api')).find((c) => c.name === 'tag:acme/api:ident'),
+      { name: 'tag:acme/api:ident', ok: false, detail: 'ident not set: run tb doctor --tag acme/api --ident', fix: 'tb doctor --tag acme/api --ident' });
+    const ident = { name: 'Irfan', email: 'irfan@example.com' };
+    const res = await d.run({ tag: 'acme/api', ident, push: { remote: 'origin' } });
+    assert.deepEqual(w.store.tags['acme/api'], { type: 'git', base: 'main', path: w.repo, checks: { lint: 'true' }, push: { remote: 'origin' }, ident });
+    assert.deepEqual(w.check(res, 'tag:acme/api:ident'), { name: 'tag:acme/api:ident', ok: true, detail: 'Irfan <irfan@example.com>' });
+    const before = structuredClone(w.store.tags);
+    for (const body of [{ tag: 'acme/api', push: { remote: '-oops' } }, { tag: 'acme/api', push: { remote: 'https://evil.example/x' } },
+      { tag: 'acme/api', ident: { name: 'a', email: 'a <b@c>' } }, { ident }, { tag: 'acme/none', ident }, { tag: 'constructor', ident }]) {
+      await assert.rejects(d.run(body), is400, JSON.stringify(body));
+    }
+    assert.deepEqual(w.store.tags, before, 'a refused value stores nothing');
   });
 
   test('a bad tag fails its check and runs nothing: unknown, group, missing path, not a repo, missing base branch', async () => {

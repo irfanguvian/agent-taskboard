@@ -174,7 +174,9 @@ test('R5 R6 fixes already 3 (review + QA + final) + a new blocking finding → B
     reviewRun({ closed: [{ id: 'F1', how: 'not a bug after all: the caller checks it' }] }),
   ] });
   const { tbd, id, k } = w;
-  await until(() => k().state === 'blocked', 60_000, 'blocked');
+  // the daemon's view, not ticket.json (store.save writes the file first): blocked by the handler, then the run's lease
+  // ended (runner.end saves it after the move); a Resume before both → 409
+  await until(async () => { const m = (await tbd.api('GET', `/api/tickets/${id}`)).json?.ticket; return m?.state === 'blocked' && m.lease?.exit; }, 60_000, 'blocked, the run ended');
   let p = k();
   assert.deepEqual([p.blocked_from, p.fixes, p.waiting?.reason, p.work.task, p.review.open], ['review', 3, 'review', null, ['F1']]);
   assert.match(p.waiting.why, /fix 4, max 3 per ticket/);

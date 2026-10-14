@@ -47,9 +47,13 @@ const gateFiles = (tbd, id) => (fs.existsSync(tk(tbd, id, 'gates')) ? fs.readdir
 const canon = (v) => (Array.isArray(v) ? `[${v.map(canon).join(',')}]`
   : v && typeof v === 'object' ? `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canon(v[k])}`).join(',')}}` : JSON.stringify(v));
 
-function repo({ ignoreEnv = true } = {}) {
+function repo({ ignoreEnv = true, base = {} } = {}) { // base: {path: text} committed too
   const dir = fs.mkdtempSync(path.join(ROOT, 'repo-'));
   git(dir, 'init', '-q', '-b', 'main');
+  for (const [f, text] of Object.entries(base)) {
+    fs.mkdirSync(path.dirname(path.join(dir, f)), { recursive: true });
+    fs.writeFileSync(path.join(dir, f), text);
+  }
   fs.writeFileSync(path.join(dir, 'package.json'), '{"scripts": {"test": "node --test"}}\n');
   fs.mkdirSync(path.join(dir, 'src'));
   fs.writeFileSync(path.join(dir, 'src', 'users.js'), 'module.exports = {};\n');
@@ -72,8 +76,8 @@ const done = (file, msg) => ({ steps: [commit(file, msg), result({ status: 'done
 // One ticket per tbd, approved for real (POST approve → setup → working). gates: the fake-gates script; sessions: the
 // fake-claude scenarios by invocation. → tbd + its ticket id, worktree, base and helpers.
 /** @param {any} t @param {any} o */
-async function approved(t, { tasks, planOver = {}, gates = {}, sessions = [], tag = {}, env = {}, id = 't_work01', state = 'working', ignoreEnv = true, ticketOver = {}, extra = {} }) {
-  const dir = repo({ ignoreEnv });
+async function approved(t, { tasks, planOver = {}, gates = {}, sessions = [], tag = {}, env = {}, id = 't_work01', state = 'working', ignoreEnv = true, ticketOver = {}, extra = {}, baseFiles = {} }) {
+  const dir = repo({ ignoreEnv, base: baseFiles });
   const base = git(dir, 'rev-parse', 'main');
   if (typeof sessions === 'function') sessions = sessions(base);
   const wt = path.join(fs.mkdtempSync(path.join(ROOT, 'wt-')), 'w');
@@ -246,17 +250,33 @@ test('I4 M1: a dirty tree after done → resumed once ("commit them or revert th
 });
 
 // M5.2 C8 Q7 (D-0088, D-0097). D-0101 (contract change; was: an md / png left uncommitted in the docs dirs was skipped):
-// every untracked file there is an "uncommitted change" (I4 above), an md / png too (a check could require it)
-test('M5 C8 dirty check: md, png, a .d.ts and a link named x.md left in docs/verification + docs/verdicts are dirty (resumed, each named); removed → the gate runs, on to review', async (t) => {
+// every untracked file there is an "uncommitted change" (I4 above). M5.3 G8 (contract change; was: an md / png there is
+// dirty too): a plain md / png under a docs dir (docs.dropDocs: what a QA visit without a result leaves) is not dirty, the
+// gate's cleanTree removes it before any check; any other file there, a link named x.md too, stays dirty
+test('M5 C8 G8 dirty check: a .d.ts and a link named x.md left in docs/verification are dirty (resumed, each named), the md / png docs beside them are not; the two removed → the gate runs with the docs still there, on to review', async (t) => {
   const docs = { exec: ['/bin/sh', '-c', 'mkdir -p docs/verification/screenshots docs/verdicts && echo r > docs/verification/a.md && echo p > docs/verification/screenshots/a.png && echo v > docs/verdicts/b.md && echo x > docs/verification/x.d.ts && ln -s ../../src docs/verification/link.md'] };
-  const tidy = { exec: ['/bin/sh', '-c', 'rm -r docs/verification docs/verdicts'] };
+  const tidy = { exec: ['/bin/sh', '-c', 'rm docs/verification/x.d.ts docs/verification/link.md'] };
   const sessions = [{ steps: [commit('src/a.js', 'one'), docs, result({ status: 'done', commit: SHA })] }, { steps: [tidy, result({ status: 'done', commit: SHA })] }];
   const w = await approved(t, { id: 't_docs01', tasks: [task('T1')], sessions });
   await until(() => w.k().state === 'review', 30_000, 'review');
   const [, d2] = w.dumps();
-  assert.match(d2.prompt, /\n\nuncommitted changes: \?\? docs\/verdicts\/b\.md, \?\? docs\/verification\/a\.md, \?\? docs\/verification\/link\.md, \?\? docs\/verification\/screenshots\/a\.png, \?\? docs\/verification\/x\.d\.ts: commit them or revert them/);
-  assert.equal(w.dumps().length, 2, 'resumed once, then clean');
+  assert.match(d2.prompt, /\n\nuncommitted changes: \?\? docs\/verification\/link\.md, \?\? docs\/verification\/x\.d\.ts: commit them or revert them/);
+  assert.equal(w.dumps().length, 2, 'resumed once, then the docs alone are no dirty tree');
   assert.ok(gateFiles(w.tbd, w.id) >= 1, 'the gate ran');
+  assert.ok(fs.existsSync(path.join(w.wt, 'docs', 'verdicts', 'b.md')), 'the docs were there when the (fake) gate ran: not called dirty');
+});
+
+// M5.3 (D-0101 F1 kept closed): G8 skips untracked docs only. cleanTree keeps a tracked file's edit, so an uncommitted
+// edit of a tracked md (a test may require it) is dirty like any tracked change
+test('M5 C8 G8 negative: a tracked docs/verification/old.md edited and left uncommitted → dirty, named, resumed; reverted → the gate runs', async (t) => {
+  const edit = { exec: ['/bin/sh', '-c', 'echo "module.exports = 1" >> docs/verification/old.md'] };
+  const revert = { exec: ['/bin/sh', '-c', 'git checkout -q -- docs/verification/old.md'] };
+  const sessions = [{ steps: [commit('src/a.js', 'one'), edit, result({ status: 'done', commit: SHA })] }, { steps: [revert, result({ status: 'done', commit: SHA })] }];
+  const w = await approved(t, { id: 't_docs02', tasks: [task('T1')], sessions, baseFiles: { 'docs/verification/old.md': '# old report\n' } });
+  await until(() => w.k().state === 'review', 30_000, 'review');
+  const [, d2] = w.dumps();
+  assert.match(d2.prompt, /\n\nuncommitted changes: {2}M docs\/verification\/old\.md: commit them or revert them/);
+  assert.equal(w.dumps().length, 2, 'resumed once, then clean');
 });
 
 test('I5 K3 RO6: NEEDS_SCOPE → clarify; tb scope --allow (UI ok for scope) → same session, the file allowed for T1; a protected ask from the gate: UI allow → 401, CLI allow binds the blob at HEAD → gate green; the other path: --deny, the same files asked again → Blocked', async (t) => {

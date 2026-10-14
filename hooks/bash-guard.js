@@ -9,6 +9,8 @@
 // (S2 belt). S3: no RegExp is built from agent text; main() denies a check that runs past 3 s (fail closed, io.run).
 // P5 (D5, RO2): in working, no npx / npm exec / pnpm dlx / yarn dlx: they fetch and run a package outside the lockfile
 // (a dependency is Irfan's call: NEEDS_SCOPE with packages); local tools run as ./node_modules/.bin/<tool> or npm scripts.
+// D-0107 (SEC-6): final_gate's git reads as planning's does (J16's git rules: `git log --output=x` wrote a file in a phase
+// that only reads; --ext-diff / --textconv / -c ran programs); not its redirect or export rules.
 // M5 C7 (D-0087): in qa and final_gate, no dropdb, no DROP DATABASE / SCHEMA (SQL /*…*/ and -- comments read as space),
 // no psql TRUNCATE and no postgres-irfan-axi with --yes (its confirmed writes), case-insensitive, read with quotes and
 // backslashes taken out (`--y''es`). A line naming a DB tool with a shell expansion ($x, ${…}, $(…), $'…', `…`, an
@@ -259,22 +261,24 @@ function denyWhy(w, env = false) {
   return null;
 }
 
-// J16: why a planning run's simple command may not run (git with a write/exec option, or env vars in front), else null.
-function planGitWhy(w, env) {
+// J16: why a planning (or final_gate: D-0107) run's simple command may not run (git with a write/exec option, or env vars
+// in front), else null. ro: the phase.
+function planGitWhy(w, env, ro) {
   if (base(w[0] ?? '') !== 'git') return null;
-  if (env) return 'planning runs git with no VAR=value in front (GIT_PAGER, GIT_EXTERNAL_DIFF, GIT_CONFIG_* run programs)';
+  const who = ro === 'final_gate' ? 'the final gate' : 'planning';
+  if (env) return `${who} runs git with no VAR=value in front (GIT_PAGER, GIT_EXTERNAL_DIFF, GIT_CONFIG_* run programs)`;
   let i = 1;
   while (w[i]?.startsWith('-')) i += GIT_ARG.has(w[i]) ? 2 : 1;
   const bad = w.slice(1, i).find((x) => PLAN_GIT_TOP.test(x)) ?? w.slice(1).find((x) => gitBad(x, PLAN_BAD));
-  return bad ? `planning only reads: git ${JSON.stringify(bad.slice(0, 40))} could write files, read outside the repo or run programs; use plain git log/show/diff` : null;
+  return bad ? `${who} only reads: git ${JSON.stringify(bad.slice(0, 40))} could write files, read outside the repo or run programs; use plain git log/show/diff` : null;
 }
 
 // Pins worker flags to `want` (replaces every `flag` match) or, with none, inserts it after the token at offset `to`.
 const pin = (seg, flag, want, to) => (seg.match(flag) ? seg.replace(flag, want) : `${seg.slice(0, to)} ${want}${seg.slice(to)}`);
 
 // Walks the simple commands of cmd (and one level of `sh -c '…'` text per depth) → {heavy, deny, out: cmd with worker pins}.
-// planning: J16's git rules apply too. Redirects (and the S2 redirect rule): redirects().
-function scan(cmd, heavy, depth = 0, planning = false, working = false) {
+// ro ('planning' | 'final_gate'): J16's git rules apply too. Redirects (and the S2 redirect rule): redirects().
+function scan(cmd, heavy, depth = 0, ro = '', working = false) {
   let isHeavy = false;
   let why = null;
   const out = cmd.split(SEP).map((seg, i) => {
@@ -284,7 +288,7 @@ function scan(cmd, heavy, depth = 0, planning = false, working = false) {
     const w = t.slice(h).map((x) => x.text);
     if (heavy.some((p) => base(w[0] ?? '') === base(p[0]) && p.every((x, j) => !j || w[j] === x))) isHeavy = true;
     const env = t.slice(0, h).some((x) => /^\w+=/.test(x.text));
-    why ??= denyWhy(w, env) ?? (planning ? planGitWhy(w, env) : null) ?? (working && fetchRun(w) ? FETCH_RUN : null);
+    why ??= denyWhy(w, env) ?? (ro ? planGitWhy(w, env, ro) : null) ?? (working && fetchRun(w) ? FETCH_RUN : null);
     if (depth < 3 && SHELLS.has(base(w[0] ?? ''))) {
       const c = w.findIndex((x, j) => j && /^-[a-z]*c[a-z]*$/i.test(x));
       const inner = c > 0 ? t[h + c + 1] : null;
@@ -292,7 +296,7 @@ function scan(cmd, heavy, depth = 0, planning = false, working = false) {
       const raw = seg.slice(inner.from, inner.to);
       const q = /^['"]/.test(raw) ? 1 : 0;
       const end = q && raw.length > 1 && raw.endsWith(raw[0]) ? raw.length - 1 : raw.length;
-      const r = scan(raw.slice(q, end), heavy, depth + 1, planning, working);
+      const r = scan(raw.slice(q, end), heavy, depth + 1, ro, working);
       isHeavy ||= r.heavy;
       why ??= r.deny;
       return seg.slice(0, inner.from + q) + r.out + seg.slice(inner.from + end);
@@ -323,7 +327,7 @@ function guard(command, env = process.env) {
   if (env.TB_PHASE === 'planning' && /(^|[\s;&|(`])(export|declare|typeset|readonly)\b|\bGIT_\w*=/.test(command)) {
     return { deny: 'bash-guard: planning only reads: no export/declare or GIT_* variables (they make git run programs)' };
   }
-  const r = scan(command, heavyList(env), 0, env.TB_PHASE === 'planning', env.TB_PHASE === 'working');
+  const r = scan(command, heavyList(env), 0, ['planning', 'final_gate'].includes(env.TB_PHASE ?? '') ? env.TB_PHASE : '', env.TB_PHASE === 'working');
   const why = r.deny ?? redirects(command, env.TB_PHASE === 'planning');
   if (why) return { deny: `bash-guard: ${why}` };
   // $TB_CODE is expanded by the agent's shell (the runner sets it), so a PATH-shadowed tbx cannot take the slot's place

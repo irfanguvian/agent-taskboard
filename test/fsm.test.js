@@ -113,6 +113,27 @@ test('AC3 tb pass rows: refused while the phase is built, allowed while unbuilt 
   assert.match(fsm.check(ticket('final_gate', 'code'), 'done', 'you', { ...g, sha_on_main: () => true }).reason, /code\/final_gate is built/);
 });
 
+// M5 C13: tb close (close_ok + children_done) and rework at close (close_rework G7 + rework_ok); code/final_gate is built
+// in this fixture, so the D9 rows (phase_unbuilt) refuse beside them
+test('M5 C13 close: waiting close + final.sha + children done; rework at close: waiting close + every child (ticketOf) and dependent (dependentsOf) in backlog or cancelled', () => {
+  const kids = { t_kid001: 'backlog', t_kid002: 'cancelled', t_kid003: 'planning', t_kid004: 'done' };
+  const deps = (...list) => () => list; // ctx.dependentsOf(id) → tickets
+  const ctx = { ...fsm.GUARDS, ticketOf: (id) => (kids[id] ? { state: kids[id] } : null), dependentsOf: deps(), rework_ok: () => true };
+  const close = (extra = {}) => ticket('final_gate', 'code', { waiting: { reason: 'close' }, final: { sha: 'a'.repeat(40) }, ...extra });
+  assert.deepEqual(fsm.check(close({ children: ['t_kid002', 't_kid004'] }), 'done', 'you', ctx), { ok: true });
+  assert.match(fsm.check(close({ final: {} }), 'done', 'you', ctx).reason, /not ready to close/);
+  assert.match(fsm.check(close({ waiting: null }), 'done', 'you', ctx).reason, /not ready to close/);
+  assert.match(fsm.check(close({ children: ['t_kid001'] }), 'done', 'you', ctx).reason, /waits for its children: 0\/1/);
+  assert.deepEqual(fsm.check(close({ children: ['t_kid001', 't_kid002'] }), 'working', 'you', { ...ctx, dependentsOf: deps({ state: 'cancelled' }) }), { ok: true });
+  for (const c of ['t_kid003', 't_kid004', 't_gone01']) assert.match(fsm.check(close({ children: ['t_kid001', c] }), 'working', 'you', ctx).reason, /cancel children first/, c);
+  assert.match(fsm.check(close(), 'working', 'you', { ...ctx, dependentsOf: deps({ state: 'backlog' }, { state: 'working' }) }).reason, /cancel children first/);
+  assert.match(fsm.check(close(), 'working', 'you', { ...ctx, dependentsOf: undefined }).reason, /cancel children first/, 'no dependentsOf: refused');
+  assert.match(fsm.check(close({ waiting: null }), 'working', 'you', ctx).reason, /only while it waits for close/);
+  assert.match(fsm.check(close(), 'working', 'you', { ...ctx, rework_ok: () => 'rework > 2' }).reason, /rework > 2/);
+  // the D9 pass of a non-code final gate is untouched (the close rows are code only)
+  assert.equal(fsm.check(ticket('final_gate', 'research', { waiting: { reason: 'close' }, final: { sha: 'a'.repeat(40) } }), 'done', 'you', fsm.GUARDS).reason, 'guard sha_on_main unavailable');
+});
+
 test('AC3 resume goes only to phases up to where the ticket blocked', () => {
   const g = fsm.GUARDS;
   assert.deepEqual(fsm.check(ticket('blocked', 'code', { blocked_from: 'working' }), 'planning', 'you', g), { ok: true });
@@ -150,6 +171,20 @@ test('P3a a state change clears waiting (a cancelled ticket never re-pings a sta
   await store.updateTicket(t.id, (k) => ({ ...k, state: 'review', waiting: w }));
   assert.deepEqual((await store.updateTicket(t.id, (k) => ({ ...k, title: 'renamed' }))).waiting, w);
   assert.equal((await fsm.transition(store, t.id, 'cancelled', 'you')).waiting, null);
+});
+
+// M5 C15: store.dependentsOf(id) = the tickets built on id's squash (parent or blocked_by), what close_rework reads
+test('M5 C13 C15 rework at close with the store\'s dependentsOf: a cancelled ticket blocked by it → allowed; once one blocked by it started → cancel children first', async () => {
+  const p = await store.createFlow({ text: 'close rework parent', kind: 'code' });
+  const b = await store.createFlow({ text: 'blocked by the parent', kind: 'code' });
+  await store.createFlow({ text: 'unrelated, started', kind: 'code' }).then((o) => store.updateTicket(o.id, (k) => ({ ...k, state: 'working' })));
+  await store.updateTicket(b.id, (k) => ({ ...k, state: 'cancelled', blocked_by: [p.id] }));
+  const at = await store.updateTicket(p.id, (k) => ({ ...k, state: 'final_gate', waiting: { reason: 'close' }, final: { sha: 'a'.repeat(40) } }));
+  const ctx = { ...fsm.GUARDS, ticketOf: store.getTicket, dependentsOf: store.dependentsOf, rework_ok: () => true };
+  assert.deepEqual(store.dependentsOf(p.id).map((k) => k.id), [b.id]);
+  assert.deepEqual(fsm.check(at, 'working', 'you', ctx), { ok: true });
+  await store.updateTicket(b.id, (k) => ({ ...k, state: 'working' }));
+  assert.match(fsm.check(at, 'working', 'you', ctx).reason, /cancel children first/);
 });
 
 // A10; M5 C4 (contract change: Resume also resets the fix counter) + C1 (a replan drops the review rounds)

@@ -178,3 +178,19 @@ test('AC8 POST /api/tags: hierarchical tag accepted and listed; bad names and ba
   }
   assert.equal((await tbd.api('GET', '/api/tags')).json.tags['acme/bad'], undefined);
 });
+
+// M5.3 C14 (A18) C13: tb push and tb close are cookie verbs too, not CLI only; a cookie caller needs X-TB-CSRF. Unknown
+// ticket: a 404 from the route itself (no such route would answer "not found").
+test('C14 C13 POST /api/tickets/:id/push | close: cookie without X-TB-CSRF → 403; cookie + CSRF or the token reach the route', async () => {
+  const cookie = await tbd.unlock();
+  const ui = { 'x-tb-token': undefined, cookie, 'sec-fetch-site': 'same-origin' };
+  const { csrf } = (await tbd.api('GET', '/api/session/csrf', undefined, ui)).json;
+  for (const op of ['push', 'close']) {
+    const no = await tbd.api('POST', `/api/tickets/t_zzzzzz/${op}`, undefined, ui);
+    assert.deepEqual([no.status, no.json], [403, { error: 'missing or wrong X-TB-CSRF token: reload the page' }], op);
+    for (const h of [{ ...ui, 'x-tb-csrf': csrf }, {}]) {
+      const r = await tbd.api('POST', `/api/tickets/t_zzzzzz/${op}`, undefined, h);
+      assert.deepEqual([r.status, r.json], [404, { error: 'no ticket t_zzzzzz' }], `${op} ${JSON.stringify(Object.keys(h))}`);
+    }
+  }
+});

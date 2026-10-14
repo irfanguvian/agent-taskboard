@@ -1,0 +1,98 @@
+{
+  "title": "E1 clean change fully covered by QA: pass, summary, verdict doc, evidence appended, one squash commit",
+  "ticket": "POST /orders should refuse an order total above 100 000.00.",
+  "plan": "../../review/E2/plan.json",
+  "commits": ["../../review/E2/change.patch"],
+  "review": {
+    "verdict": "pass", "findings": [], "closed": [],
+    "notes": ["@Max is inclusive: 10000000 passes, 10000001 is a 400 from the global ValidationPipe; both bounds have an e2e test."],
+    "declined": ["no auth on POST /orders: at base, not this change"]
+  },
+  "qa_report": "qa-report.md",
+  "qa": {
+    "verdict": "pass",
+    "cases": [
+      {
+        "id": "TC-1", "type": "backend", "kind": "positive", "source": "A2", "acceptance": ["A2"],
+        "pre": "app on the qa port, qa.db migrated and seeded (50 users, 5 orders each)",
+        "steps": ["tbx req POST /orders -d '{\"userId\":3,\"totalMinor\":10000000}'"],
+        "expect": "201 with the stored order, totalMinor 10000000",
+        "result": "PASS", "recs": ["1.1"], "screenshots": [], "observed": { "status": 201, "note": "order 251 stored with totalMinor 10000000" }
+      },
+      {
+        "id": "TC-2", "type": "backend", "kind": "negative", "source": "src/orders/orders.dto.ts:39", "acceptance": ["A1"],
+        "pre": "app on the qa port, user 4 has 5 orders",
+        "steps": ["tbx req GET /orders?userId=4&limit=100", "tbx req POST /orders -d '{\"userId\":4,\"totalMinor\":10000001}'", "tbx req GET /orders?userId=4&limit=100"],
+        "expect": "400 totalMinor must not be greater than 10000000; user 4 has the same 5 orders before and after",
+        "result": "PASS", "recs": ["1.2", "1.3", "1.4"], "screenshots": [], "observed": { "status": 200, "note": "the POST answered 400; orders 20, 19, 18, 17, 16 before and after" }
+      },
+      {
+        "id": "TC-3", "type": "backend", "kind": "negative", "source": "A3", "acceptance": ["A3"],
+        "pre": "app on the qa port",
+        "steps": ["tbx req POST /orders -d '{\"userId\":2,\"totalMinor\":0}'", "tbx req POST /orders -d '{\"userId\":2,\"totalMinor\":10.5}'"],
+        "expect": "400 each",
+        "result": "PASS", "recs": ["1.5", "1.6"], "screenshots": [], "observed": { "status": 400, "note": "totalMinor must not be less than 1; totalMinor must be an integer number" }
+      },
+      {
+        "id": "TC-4", "type": "backend", "kind": "negative", "source": "A3", "acceptance": ["A3"],
+        "pre": "app on the qa port",
+        "steps": ["tbx req POST /orders -d '{\"userId\":9999,\"totalMinor\":100}'"],
+        "expect": "422 for an unknown user",
+        "result": "PASS", "recs": ["1.7"], "screenshots": [], "observed": { "status": 422, "note": "user 9999 does not exist" }
+      }
+    ],
+    "findings": []
+  },
+  "recs": [
+    { "method": "POST", "path": "/orders", "body": { "userId": 3, "totalMinor": 10000000 }, "status": 201,
+      "res": { "id": 251, "userId": 3, "totalMinor": 10000000, "status": "pending", "createdAt": "2026-10-14T09:12:03.418Z" } },
+    { "method": "GET", "path": "/orders?userId=4&limit=100", "status": 200, "res": { "data": [
+      { "id": 20, "userId": 4, "totalMinor": 1512, "status": "pending", "createdAt": "2026-02-02T00:00:00.000Z" },
+      { "id": 19, "userId": 4, "totalMinor": 1421, "status": "paid", "createdAt": "2026-01-26T00:00:00.000Z" },
+      { "id": 18, "userId": 4, "totalMinor": 1330, "status": "paid", "createdAt": "2026-01-19T00:00:00.000Z" },
+      { "id": 17, "userId": 4, "totalMinor": 1239, "status": "paid", "createdAt": "2026-01-12T00:00:00.000Z" },
+      { "id": 16, "userId": 4, "totalMinor": 1148, "status": "paid", "createdAt": "2026-01-05T00:00:00.000Z" }], "nextCursor": null } },
+    { "method": "POST", "path": "/orders", "body": { "userId": 4, "totalMinor": 10000001 }, "status": 400,
+      "res": { "message": ["totalMinor must not be greater than 10000000"], "error": "Bad Request", "statusCode": 400 } },
+    { "method": "GET", "path": "/orders?userId=4&limit=100", "status": 200, "res": { "data": [
+      { "id": 20, "userId": 4, "totalMinor": 1512, "status": "pending", "createdAt": "2026-02-02T00:00:00.000Z" },
+      { "id": 19, "userId": 4, "totalMinor": 1421, "status": "paid", "createdAt": "2026-01-26T00:00:00.000Z" },
+      { "id": 18, "userId": 4, "totalMinor": 1330, "status": "paid", "createdAt": "2026-01-19T00:00:00.000Z" },
+      { "id": 17, "userId": 4, "totalMinor": 1239, "status": "paid", "createdAt": "2026-01-12T00:00:00.000Z" },
+      { "id": 16, "userId": 4, "totalMinor": 1148, "status": "paid", "createdAt": "2026-01-05T00:00:00.000Z" }], "nextCursor": null } },
+    { "method": "POST", "path": "/orders", "body": { "userId": 2, "totalMinor": 0 }, "status": 400,
+      "res": { "message": ["totalMinor must not be less than 1"], "error": "Bad Request", "statusCode": 400 } },
+    { "method": "POST", "path": "/orders", "body": { "userId": 2, "totalMinor": 10.5 }, "status": 400,
+      "res": { "message": ["totalMinor must be an integer number"], "error": "Bad Request", "statusCode": 400 } },
+    { "method": "POST", "path": "/orders", "body": { "userId": 9999, "totalMinor": 100 }, "status": 422,
+      "res": { "message": "user 9999 does not exist", "error": "Unprocessable Entity", "statusCode": 422 } }
+  ],
+  "expect": {
+    "verdict": "pass",
+    "state": "final_gate",
+    "waiting": "close",
+    "no_blocking": true,
+    "summary_verdict": ["shipped", "partial"],
+    "verdict_doc": true,
+    "evidence": true,
+    "squash": true
+  },
+  "docs": {
+    "verdict": "# Verdict: POST /orders maximum total\n\n## Verdict\n\n**PASS**\n\n- plan: PASS: one task, three acceptance criteria\n- work: PASS: T1 done\n- review: PASS: review 1, no finding\n- QA: PASS: 4 cases, all captured by tbd\n- final: PASS: no finding\n\n```mermaid\nflowchart LR\n  R[POST /orders] --> V{ValidationPipe}\n  V -->|totalMinor above 10000000| E[400]\n  V -->|ok| S[OrdersService.create]\n```\n\n## All work done\n\n- T1 maximum order total on POST /orders: done\n\n## All changes, before → after\n\n- src/orders/orders.dto.ts: before: totalMinor had no upper bound. After: @Max(MAX_TOTAL_MINOR), 10 000 000 inclusive.\n- test/orders.e2e-spec.ts: before: the lower bound only. After: tests at and above the maximum.\n- README.md: before: an integer > 0. After: an integer from 1 to 10 000 000.\n\nTesting evidence: see Evidence below.\n",
+    "verification": "# Final verification\n\n```mermaid\nflowchart LR\n  A1 --> TC2[TC-2 + e2e test]\n  A2 --> TC1[TC-1 + e2e test]\n  A3 --> TC34[TC-3, TC-4]\n```\n\n- A1: TC-2 (captured by tbd) and the e2e test above the maximum.\n- A2: TC-1 (captured by tbd) and the e2e test at the maximum.\n- A3: TC-3, TC-4 (captured by tbd).\n\n**Verdict:** PASS\n"
+  },
+  "example": {
+    "verdict": "pass",
+    "findings": [],
+    "verdict_doc": "docs/verdicts/final-e1.md",
+    "verification_doc": "docs/verification/final-e1.md",
+    "summary": {
+      "title": "POST /orders refuses an order total above 100 000.00",
+      "description": "CreateOrderDto.totalMinor gains @Max(10 000 000), inclusive: a bigger total is a 400 and is not stored.\nTwo e2e tests and QA cover both sides of the bound.",
+      "worked_on": ["src/orders/orders.dto.ts: MAX_TOTAL_MINOR and @Max on totalMinor, maximum in the OpenAPI property", "test/orders.e2e-spec.ts: tests at the maximum (201) and above it (400, nothing stored)", "README.md: the POST /orders row"],
+      "blocker": "none",
+      "need_review": "none",
+      "verdict": "shipped"
+    }
+  }
+}

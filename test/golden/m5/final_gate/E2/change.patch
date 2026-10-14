@@ -1,0 +1,108 @@
+diff --git a/README.md b/README.md
+index 9d6566b..954d2cd 100644
+--- a/README.md
++++ b/README.md
+@@ -16,6 +16,7 @@ erDiagram
+ | GET | `/users` | cursor pagination: `cursor`, `limit` (default 20, max 100) |
+ | GET | `/users/:id` | one user |
+ | GET | `/orders?userId=` | orders of one user, newest first, same pagination |
++| GET | `/orders/:id` | one order of the caller (header `X-User-Id`); 401 without a caller, 404 when unknown |
+ | POST | `/orders` | body `{ userId, totalMinor }`, `totalMinor` is an integer > 0 (minor units) |
+ | GET | `/health` | liveness probe, no auth, no DB; returns `{"status":"ok"}` |
+ 
+diff --git a/src/common/caller.guard.ts b/src/common/caller.guard.ts
+new file mode 100644
+index 0000000..19c4cf2
+--- /dev/null
++++ b/src/common/caller.guard.ts
+@@ -0,0 +1,14 @@
++import { CanActivate, ExecutionContext, Injectable, UnauthorizedException } from '@nestjs/common';
++import type { Request } from 'express';
++
++/** The caller is the X-User-Id header (the shop's auth stub until login lands): a positive integer, else 401. */
++@Injectable()
++export class CallerGuard implements CanActivate {
++  canActivate(ctx: ExecutionContext): boolean {
++    const req = ctx.switchToHttp().getRequest<Request & { callerId?: number }>();
++    const raw = req.header('x-user-id') ?? '';
++    if (!/^[1-9][0-9]{0,8}$/.test(raw)) throw new UnauthorizedException('X-User-Id must be a positive integer');
++    req.callerId = Number(raw);
++    return true;
++  }
++}
+diff --git a/src/orders/orders.controller.ts b/src/orders/orders.controller.ts
+index 3dbdc37..8c0f07c 100644
+--- a/src/orders/orders.controller.ts
++++ b/src/orders/orders.controller.ts
+@@ -1,5 +1,6 @@
+-import { Body, Controller, Get, Post, Query } from '@nestjs/common';
+-import { ApiCreatedResponse, ApiOkResponse, ApiTags } from '@nestjs/swagger';
++import { Body, Controller, Get, Param, ParseIntPipe, Post, Query, UseGuards } from '@nestjs/common';
++import { ApiCreatedResponse, ApiHeader, ApiOkResponse, ApiTags } from '@nestjs/swagger';
++import { CallerGuard } from '../common/caller.guard.js';
+ import { CreateOrderDto, ListOrdersQueryDto, OrderDto, OrderPageDto } from './orders.dto.js';
+ import { OrdersService } from './orders.service.js';
+ 
+@@ -14,6 +15,14 @@ export class OrdersController {
+     return this.orders.list(query);
+   }
+ 
++  @Get(':id')
++  @UseGuards(CallerGuard)
++  @ApiHeader({ name: 'X-User-Id', description: "the caller's user id (auth stub)" })
++  @ApiOkResponse({ type: OrderDto })
++  get(@Param('id', ParseIntPipe) id: number) {
++    return this.orders.get(id);
++  }
++
+   @Post()
+   @ApiCreatedResponse({ type: OrderDto })
+   create(@Body() dto: CreateOrderDto) {
+diff --git a/src/orders/orders.service.ts b/src/orders/orders.service.ts
+index 0d9ca71..af233a2 100644
+--- a/src/orders/orders.service.ts
++++ b/src/orders/orders.service.ts
+@@ -1,4 +1,4 @@
+-import { Injectable, UnprocessableEntityException } from '@nestjs/common';
++import { Injectable, NotFoundException, UnprocessableEntityException } from '@nestjs/common';
+ import { pageArgs, toPage } from '../common/pagination.js';
+ import { PrismaService } from '../prisma/prisma.service.js';
+ import { CreateOrderDto, ListOrdersQueryDto } from './orders.dto.js';
+@@ -16,6 +16,12 @@ export class OrdersService {
+     return toPage(rows, query.limit);
+   }
+ 
++  async get(id: number) {
++    const order = await this.prisma.order.findUnique({ where: { id } });
++    if (!order) throw new NotFoundException(`order ${id} not found`);
++    return order;
++  }
++
+   async create(dto: CreateOrderDto) {
+     try {
+       return await this.prisma.order.create({ data: dto });
+diff --git a/test/orders.e2e-spec.ts b/test/orders.e2e-spec.ts
+index 1ab840e..92d783e 100644
+--- a/test/orders.e2e-spec.ts
++++ b/test/orders.e2e-spec.ts
+@@ -37,6 +37,20 @@ describe('orders (e2e)', () => {
+     await server().post('/orders').send({ userId: 9999, totalMinor: 100 }).expect(422);
+   });
+ 
++  it("GET /orders/:id returns the caller's order", async () => {
++    const { body } = await server().get('/orders/11').set('X-User-Id', '3').expect(200);
++    expect(body).toMatchObject({ id: 11, userId: 3 });
++  });
++
++  it('GET /orders/:id needs a caller', async () => {
++    await server().get('/orders/11').expect(401);
++    await server().get('/orders/11').set('X-User-Id', 'abc').expect(401);
++  });
++
++  it('GET /orders/:id answers 404 for an unknown order', async () => {
++    await server().get('/orders/99999').set('X-User-Id', '3').expect(404);
++  });
++
+   it('GET /orders requires userId', async () => {
+     await server().get('/orders').expect(400);
+   });

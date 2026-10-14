@@ -61,6 +61,7 @@ const QUESTIONS = { kind: 'questions', questions: [Q], facts: ['src/users.js: no
 const task0 = (over) => ({ ...PLAN, tasks: [{ ...T1, ...over }, T2] });
 const qs = (over) => ({ ...QUESTIONS, questions: [{ ...Q, ...over }] });
 const dec = (d) => ({ ...PLAN, decisions: [...PLAN.decisions.slice(0, 2), d] });
+const kid = (id, blocked_by) => ({ id, title: `child ${id}`, text: 'do it', blocked_by });
 
 test('J16 J17 J18: a valid plan and questions result pass; every path in ONE git cat-file --batch-check (+ one package.json read); folder tag: no git', async () => {
   calls.length = 0;
@@ -110,6 +111,10 @@ test('J16 J17 J18: one negative per rule group → its exact reason, no other', 
     ['K6 a new test file in an existing folder passes', task0({ test_cmd: 'npm test -- src/invoice.test.ts' }), {}, []],
     ['K10 allowed_* exact grammar', { ...PLAN, allowed_schema_changes: ['User.nickname dropped'], allowed_api_changes: ['GET /users: add optional cursor'] }, {},
       ['allowed_schema_changes[0] "User.nickname dropped": not one change in the exact form', 'allowed_api_changes[0] "GET /users: add optional cursor": not one change in the exact form']],
+    // C15 (D-0091): a child's blockers form one chain ("parent" counts), else it would need a rebase
+    ['C15 sibling blockers that diverge', { ...PLAN, children: [kid('C1', ['parent']), kid('C2', ['parent']), kid('C3', ['C1', 'C2', 'parent'])] }, {},
+      ['child "C3": blockers diverge: no rebase (D-0091): "C1" and "C2"']],
+    ['C15 sibling blockers in one chain pass', { ...PLAN, children: [kid('C1', ['parent']), kid('C2', ['C1']), kid('C3', ['C2', 'C1', 'parent'])] }, {}, []],
     // M2: TBD/TODO upper case only, error handling / edge cases only as the whole step, no bare "fill in": real steps pass
     ['placeholder words', task0({ steps: ['wire the route', 'Add appropriate error handling', 'Add a todo list filter', 'Add error handling for 404 from gh', 'fill in the default tag in the form', 'TODO'] }), {},
       ['tasks[0].steps[1]: placeholder "Add appropriate error handling"', 'tasks[0].steps[5]: placeholder "TODO"']],

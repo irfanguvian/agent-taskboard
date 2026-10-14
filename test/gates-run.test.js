@@ -7,7 +7,7 @@ const assert = require('node:assert/strict');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const { summary } = require('../lib/gates/task');
-const { globRe } = require('../lib/gates/run');
+const { globRe, GATES } = require('../lib/gates/run');
 
 const ESC = String.fromCharCode(27);
 
@@ -42,12 +42,18 @@ test('K5 deny globs → SBPL regex: * one part, ** any depth (zero too), [class]
   assert.throws(() => globRe('/w/[abc'), /unclosed/);
 });
 
-test('RAM: no lib/gates module is loaded by what tbd requires at boot (working, planning, runner, doctor, metrics, monitor, tbx)', () => {
+// M5.3: lib/final.js (the final gate's decisions, squash, close) loads at boot too and never requires lib/gates
+test('RAM: no lib/gates module is loaded by what tbd requires at boot (working, final, planning, runner, doctor, metrics, monitor, tbx)', () => {
   const REPO = path.join(__dirname, '..');
-  const code = `for (const m of ['store', 'working', 'planning', 'runner', 'doctor', 'metrics', 'monitor', 'tbx', 'slots']) require('./lib/' + m);
+  const code = `for (const m of ['store', 'working', 'final', 'planning', 'runner', 'doctor', 'metrics', 'monitor', 'tbx', 'slots']) require('./lib/' + m);
     process.stdout.write(String(Object.keys(require.cache).filter((k) => k.includes('/lib/gates/')).length));`;
   const env = { ...process.env, TB_HOME: path.join(require('node:os').tmpdir(), 'gates-run-no-home') };
   assert.equal(execFileSync(process.execPath, ['-e', code], { cwd: REPO, env, encoding: 'utf8' }), '0');
   const after = `require('./lib/gates'); process.stdout.write(String(Object.keys(require.cache).some((k) => k.includes('/lib/gates/run.js'))));`;
   assert.equal(execFileSync(process.execPath, ['-e', after], { cwd: REPO, env, encoding: 'utf8' }), 'true', 'positive control: the entry loads the runner');
+});
+
+// M5 C10 (D-0089): the final gate = every working gate check, then the tag's e2e
+test('C10 GATES.code.final = GATES.code.working + e2e', () => {
+  assert.deepEqual(GATES.code.final, [...GATES.code.working, 'e2e']);
 });

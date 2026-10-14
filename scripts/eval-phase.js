@@ -6,8 +6,9 @@
 // what the scripted checks hold the result to (example: an ideal result, the --fake answer).
 // Per case: a worktree of tb-sandbox at main + the case's commits + the ticket seeded in review (round 2: review/01.json
 // and t.review at the first commit) → tbd starts → the real code/review run (lib/review.js seed + handler) → stop when
-// the ticket leaves review (qa or Blocked; working waits manual: code/working/prompt.md is dropped from the phases copy,
-// so a blocking result never starts a fix session) → collect → scripted checks → cleanup (only our worktree).
+// the ticket leaves review (qa or Blocked; working and qa wait manual: their prompt.md is dropped from the phases copy,
+// so a blocking result never starts a fix session nor a pass a QA run) → collect → scripted checks → cleanup (only
+// our worktree).
 // Usage: node scripts/eval-phase.js (--fake | --real) [--cases E1,E2,E3] [--model <m> [--effort <e>]] [--prompt <md>]
 //   [--claude <bin>] [--keep] [--out <md>] [--packet <dir>] [--no-ram-wait]
 //   --real: claude_bin = the pinned version; tbd keeps the real HOME (claude's keychain login); TB_HOME is temp. Model =
@@ -26,6 +27,14 @@
 // order: rec 1.1, 1.2, ...; the report written). Stop when the ticket leaves qa (final_gate; working: fix task opened,
 // waits manual; blocked). Checks read qa/01.json, the ticket and runs/<n>.rec.jsonl, never the agent's claim. Then every
 // process with its cwd in the worktree (the app) is killed. No --packet (the review's blind score only).
+// --phase final_gate: the final review evals E1-E3 (M5.3, C10-C12; cases test/golden/m5/final_gate/E<n>/case.json):
+// the ticket seeded in final_gate after review (review/01.json passed) and QA (qa/01.json, runs/1.rec.jsonl with its
+// meta line, the QA report mirrored), on its own branch tb/<id>-eval (the squash CAS'es it). The tag sets no checks:
+// the final gate = its logic checks only (integrity, plan, history, trailer, protected, scope, tests; heavy checks
+// and e2e skipped, D24): the eval judges the agent, not the gate. --fake: one exec step writes the example's two docs.
+// Stop when the ticket leaves final_gate (working: fix task opened, waits manual; blocked) or waits close (squashed).
+// Checks read final/01.json, the ticket, the mirrored docs, summary.md, gates/NN.json and git, never the agent's
+// claim. Cleanup also deletes the branch and refs/tb/<id>/* (final-pre-<n>).
 // Exit 0 = every case clean and every scripted check passed.
 const crypto = require('node:crypto');
 const fs = require('node:fs');
@@ -40,19 +49,30 @@ const { SANDBOX, arr, sleep, readJson, write, git, events, runNs, runInfo, metri
 const { codeCopy, freshPath, guardHome, contamination } = require('./golden-working');
 const { configBaseline } = require('../lib/spawn');
 
-const PHASES = ['review', 'qa'];
+const PHASES = ['review', 'qa', 'final_gate'];
+const MILESTONE = { review: 1, qa: 2, final_gate: 3 };
+const FILES = { review: 'review', qa: 'qa', final_gate: 'final' }; // the dir of the phase's result files (NN.json)
+const NEXT = { review: 'qa', qa: 'final_gate' }; // where a pass goes: unbuilt in the eval's phases copy (final_gate: done is Irfan's)
 const CASES = ['E1', 'E2', 'E3'];
 const ARROW = String.fromCodePoint(0x2192);
 const DIFF_MAX = 64 * 1024;
 const SETUP = ['ci', '--prefer-offline']; // the golden tag's setup (scripts/golden-working.js goldenTag)
+const QA_PORT = 50461; // final_gate: the port in the seeded QA recs (no app runs)
+const EVIDENCE = '## Evidence (captured by tbd)';
 const iso = () => new Date().toISOString();
 const memLevel = () => Number(execFileSync('/usr/sbin/sysctl', ['-n', 'kern.memorystatus_level'], { encoding: 'utf8' }).trim());
+// plan_hash as approve sets it (lib/planning.js canon: keys sorted at every level; not required here: it loads lib/store)
+const canon = (v) => (Array.isArray(v) ? `[${v.map(canon).join(',')}]`
+  : v && typeof v === 'object' ? `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canon(v[k])}`).join(',')}}` : JSON.stringify(v));
+const sha256 = (s) => crypto.createHash('sha256').update(s).digest('hex');
+const readText = (f) => (fs.existsSync(f) ? fs.readFileSync(f, 'utf8') : null);
 
-// a phase's case.json with its plan + patch paths resolved (relative to the case dir)
+// a phase's case.json with its plan + patch paths resolved (relative to the case dir); final_gate: + the QA report text
 function caseOf(phase, key) {
   const dir = path.join(REPO, 'test', 'golden', 'm5', phase, key);
   const c = JSON.parse(fs.readFileSync(path.join(dir, 'case.json'), 'utf8'));
-  return { ...c, key, plan: JSON.parse(fs.readFileSync(path.join(dir, c.plan), 'utf8')), commits: c.commits.map((p) => path.join(dir, p)) };
+  return { ...c, key, plan: JSON.parse(fs.readFileSync(path.join(dir, c.plan), 'utf8')), commits: c.commits.map((p) => path.join(dir, p)),
+    ...(c.qa_report && { qaReport: fs.readFileSync(path.join(dir, c.qa_report), 'utf8') }) };
 }
 const loadCase = (key) => caseOf('review', key);
 
@@ -63,6 +83,15 @@ function parseWhere(w) {
   return m ? { path: m[1], lo: Number(m[2]), hi: Number(m[3] ?? m[2]) } : null;
 }
 const fText = (f) => `${f.id} ${f.severity} (${f.confidence}) ${f.where}`;
+// an expected finding's places: where [{path, lines}] (any one), or path + lines
+const places = (want) => want.where ?? [{ path: want.path, lines: want.lines }];
+const placeText = (want) => places(want).map((x) => `${x.path}:${x.lines.join('-')}`).join(' or ');
+// f has want's severity (one of), confidence (when set) and a where range overlapping one of want's places
+function hits(f, want) {
+  const w = parseWhere(f.where);
+  return !!w && want.severity.includes(f.severity) && (!want.confidence || f.confidence === want.confidence)
+    && places(want).some((x) => w.path === x.path && w.lo <= x.lines[1] && w.hi >= x.lines[0]);
+}
 // The scripted checks of one case: r = {accepted, why, result}. expect: verdict; findings [{severity: [..], confidence?,
 // path, lines: [lo, hi] (the where range must overlap), new? (an id the earlier review did not have)}], each open (not
 // in closed); closed: ids closed and not kept in findings; max_findings.
@@ -76,12 +105,8 @@ function score(c, r) {
   const checks = [chk('result accepted by lib/review.js: review/NN.json written, no refusal', r.accepted, r.why)];
   if (e.verdict) checks.push(chk(`verdict ${e.verdict}`, out.verdict === e.verdict, `verdict ${out.verdict ?? '-'}`));
   for (const want of arr(e.findings)) {
-    const hit = found.find((f) => {
-      const w = parseWhere(f.where);
-      return w && want.severity.includes(f.severity) && (!want.confidence || f.confidence === want.confidence) && w.path === want.path
-        && w.lo <= want.lines[1] && w.hi >= want.lines[0] && !(want.new && prior.has(f.id)) && !closed.includes(f.id);
-    });
-    checks.push(chk(`${want.new ? 'a new' : 'an'} open ${want.severity.join('/')}${want.confidence ? ` ${want.confidence}-confidence` : ''} finding at ${want.path}:${want.lines.join('-')}`,
+    const hit = found.find((f) => hits(f, want) && !(want.new && prior.has(f.id)) && !closed.includes(f.id));
+    checks.push(chk(`${want.new ? 'a new' : 'an'} open ${want.severity.join('/')}${want.confidence ? ` ${want.confidence}-confidence` : ''} finding at ${placeText(want)}`,
       hit, hit ? fText(hit) : `findings: ${list}`));
   }
   for (const id of arr(e.closed)) checks.push(chk(`${id} closed, not kept open`, closed.includes(id) && !found.some((f) => f.id === id), `closed: ${closed.join(', ') || 'none'}; findings: ${list}`));
@@ -130,7 +155,74 @@ function scoreQa(c, r) {
       hit ? qText(hit) : `cases: ${list}; recs: ${[...recs.values()].map((l) => `${l.n} ${l.method} ${l.url} ${l.res?.status ?? l.error}`).join(', ') || 'none'}`));
   }
   if (e.no_pass) checks.push(chk('no PASS: every case BLOCKED or ASSISTED, a BLOCKED one cause env', cases.length && cases.every((x) => x.result === 'ASSISTED' || (x.result === 'BLOCKED' && x.cause === 'env')), list));
-  if (e.fix) checks.push(chk(`fix task ${e.fix} opened (fix 1)`, arr(t.work?.tasks).some((x) => x.id === e.fix) && t.fixes === 1, `tasks ${arr(t.work?.tasks).map((x) => x.id).join(', ') || 'none'}; fixes ${t.fixes ?? '-'}`));
+  if (e.fix) checks.push(fixChk(e.fix, t));
+  return checks;
+}
+const fixChk = (id, t) => chk(`fix task ${id} opened (fix 1)`, arr(t.work?.tasks).some((x) => x.id === id) && t.fixes === 1, `tasks ${arr(t.work?.tasks).map((x) => x.id).join(', ') || 'none'}; fixes ${t.fixes ?? '-'}`);
+
+// lib/review.js blocking() as the final review applies it (no closed list): CRIT, HIGH or MED with high confidence
+const blocks = (f) => ['CRIT', 'HIGH', 'MED'].includes(f.severity) && f.confidence === 'high';
+// Irfan's verdict format (C11), in the agent's prose (before tbd's evidence section)
+/** @type {[string, RegExp][]} */
+const DOC_PARTS = [
+  ['Verdict with PASS, FAIL or PARTIAL', /(?:verdict|Verdict|VERDICT)[\s\S]{0,400}?\b(?:PASS|FAIL|PARTIAL)\b/],
+  ...['plan', 'work', 'review', 'QA', 'final'].map((p) => /** @type {[string, RegExp]} */ ([`a ${p} line`, new RegExp(`\\b${p}\\b`, 'i')])),
+  ['all work done', /work done/i], ['changes before → after', /\bbefore\b[\s\S]*\bafter\b/i],
+];
+// The scripted checks of one final review case, from what tbd kept: r = {accepted, why, result (final/01.json, else the
+// last output), ticket, gate (the last gates/NN.json of gate final), report + verification (the two docs in the mirror),
+// summaryMd, git (the squash facts: sha, head, branch, parents, tree, testedTree, pre, subject), base, tested}. Always:
+// accepted, final checks green, verdict, stop state, both docs mirrored, the summary's 6 fields. expect: summary_verdict;
+// no_blocking; findings [{severity, confidence, where: [{path, lines}]}]; gap (a regex a blocking finding's text
+// matches: the unproven acceptance); verdict_doc (C11 sections); evidence (D-0106 section: every QA case + rec + the
+// final checks); squash (C12: 1 commit on base, the tested tree, final-pre-<n>, the summary title; summary.md); fix.
+function scoreFinal(c, r) {
+  const e = c.expect;
+  const out = r.result ?? {};
+  const found = arr(out.findings);
+  const t = r.ticket ?? {};
+  const s = out.summary ?? {};
+  const list = found.map(fText).join('; ') || 'none';
+  const str = (v, max) => typeof v === 'string' && v.trim().length > 0 && v.length <= max;
+  const bad = [!str(s.title, 120) && 'title', !str(s.description, 600) && 'description', !(arr(s.worked_on).length >= 1 && arr(s.worked_on).length <= 15) && 'worked_on',
+    !str(s.blocker, 2048) && 'blocker', !str(s.need_review, 2048) && 'need_review', !['shipped', 'partial', 'blocked'].includes(s.verdict) && 'verdict'].filter(Boolean);
+  const checks = [chk('result accepted by lib/final.js: final/01.json written, no refusal', r.accepted, r.why),
+    chk('final checks green (the last gates/NN.json of gate final)', r.gate?.ok === true, r.gate ? `gate ${r.gate.n}: ok ${r.gate.ok}, ${arr(r.gate.checks).length} check line(s)${r.gate.why ? `: ${r.gate.why}` : ''}` : 'no final gate file'),
+    chk(`verdict ${e.verdict}`, out.verdict === e.verdict, `verdict ${out.verdict ?? '-'}`),
+    chk(`ticket stops in ${e.state}${e.waiting ? ` waiting ${e.waiting}` : ''}`, t.state === e.state && (!e.waiting || t.waiting?.reason === e.waiting), `${t.state ?? '-'}${t.waiting ? ` (waiting ${t.waiting.reason})` : ''}`),
+    chk('both docs in the mirror (tickets/<id>/docs/...)', r.report != null && r.verification != null, `${out.verdict_doc ?? '-'}: ${r.report == null ? 'missing' : 'there'}; ${out.verification_doc ?? '-'}: ${r.verification == null ? 'missing' : 'there'}`),
+    chk('summary: the 6 fields (title ≤ 120, description ≤ 600, worked_on 1..15, blocker, need_review, verdict)', !bad.length, bad.length ? `bad: ${bad.join(', ')}` : `${JSON.stringify(s.title)}; ${arr(s.worked_on).length} worked_on; verdict ${s.verdict}`)];
+  if (e.summary_verdict) checks.push(chk(`summary verdict ${e.summary_verdict.join(' or ')}`, e.summary_verdict.includes(s.verdict), `verdict ${s.verdict ?? '-'}`));
+  if (e.no_blocking) checks.push(chk('no blocking finding (CRIT, HIGH or MED with high confidence)', !found.some(blocks), `findings: ${list}`));
+  for (const want of arr(e.findings)) {
+    const hit = found.find((f) => hits(f, want));
+    checks.push(chk(`a ${want.severity.join('/')}${want.confidence ? ` ${want.confidence}-confidence` : ''} finding at ${placeText(want)}`, hit, hit ? fText(hit) : `findings: ${list}`));
+  }
+  if (e.gap) {
+    const re = new RegExp(e.gap, 'i');
+    const hit = found.find((f) => blocks(f) && re.test(`${f.problem}\n${f.failure_scenario}\n${f.fix}`));
+    checks.push(chk(`a blocking finding names the unproven acceptance (/${e.gap}/i)`, hit, hit ? `${fText(hit)}: ${String(hit.problem).slice(0, 300)}` : `findings: ${list}`));
+  }
+  const [prose, evidence] = String(r.report ?? '').split(EVIDENCE);
+  if (e.verdict_doc) {
+    const miss = DOC_PARTS.filter(([, re]) => !re.test(prose)).map(([n]) => n);
+    checks.push(chk('verdict doc: Verdict + a line per phase + all work done + changes before → after', r.report != null && !miss.length, r.report == null ? 'no doc' : miss.length ? `missing: ${miss.join(', ')}` : 'all there'));
+  }
+  if (e.evidence) {
+    const ids = c.recs.map((_, i) => `1.${i + 1}`);
+    const lost = [...arr(c.qa?.cases).map((x) => `| ${x.id} |`), ...ids.map((n) => `#### rec ${n}\n`), '### Final checks'].filter((x) => !evidence?.includes(x));
+    const curls = (evidence?.match(/```\ncurl /g) ?? []).length;
+    checks.push(chk(`tbd appended "${EVIDENCE}" to the mirrored verdict doc: every QA case, every rec as curl, the final checks`, evidence !== undefined && !lost.length && curls === ids.length,
+      evidence === undefined ? 'no evidence section' : `missing: ${lost.join(', ') || 'none'}; ${curls}/${ids.length} curl`));
+  }
+  if (e.squash) {
+    const g = r.git;
+    const ok = !!g && g.head === g.sha && g.branch === g.sha && g.parents.length === 1 && g.parents[0] === r.base && g.tree === g.testedTree && g.pre === r.tested
+      && g.subject === s.title && t.final?.tested_sha === r.tested;
+    checks.push(chk('squash: HEAD + branch = final.sha, one commit on base, the tested tree, final-pre-<n> = tested, subject = summary title', ok, g ? JSON.stringify({ ...g, base: r.base, tested: r.tested }) : 'no final.sha'));
+    checks.push(chk('summary.md written', !!r.summaryMd, r.summaryMd ? r.summaryMd.split('\n')[0] : 'missing'));
+  }
+  if (e.fix) checks.push(fixChk(e.fix, t));
   return checks;
 }
 
@@ -148,8 +240,9 @@ async function seed(env, c) {
   const id = `t_${crypto.randomBytes(3).toString('hex')}`;
   const dir = path.join(env.tbHome, 'tickets', id);
   const wt = path.join(env.tbHome, 'worktrees', id);
+  const branch = env.phase === 'final_gate' ? `tb/${id}-eval` : null; // the squash CAS'es the ticket's branch
   fs.mkdirSync(path.dirname(wt), { recursive: true, mode: 0o700 });
-  git(SANDBOX, 'worktree', 'add', '--detach', wt, env.base);
+  git(SANDBOX, 'worktree', 'add', ...(branch ? ['-b', branch] : ['--detach']), wt, env.base);
   let heads;
   let gitDir;
   let baseline = null;
@@ -160,12 +253,10 @@ async function seed(env, c) {
       return git(wt, 'rev-parse', 'HEAD').trim();
     });
     gitDir = fs.realpathSync(git(wt, 'rev-parse', '--absolute-git-dir').trim());
-    if (env.phase === 'qa' && !env.fake) {
-      execFileSync('npm', SETUP, { cwd: wt, stdio: ['ignore', 'ignore', 'pipe'], timeout: 15 * 60_000 }); // approve's setup (D-0072: 15 min)
-      baseline = await configBaseline({ base_sha: env.base, git_dir: gitDir, common_dir: env.commonDir }, wt);
-    }
+    if (env.phase === 'qa' && !env.fake) execFileSync('npm', SETUP, { cwd: wt, stdio: ['ignore', 'ignore', 'pipe'], timeout: 15 * 60_000 }); // approve's setup (D-0072: 15 min)
+    if ((env.phase === 'qa' && !env.fake) || env.phase === 'final_gate') baseline = await configBaseline({ base_sha: env.base, git_dir: gitDir, common_dir: env.commonDir }, wt); // final gate: the integrity check's tripwire (no node_modules)
   } catch (e) {
-    cleanup(wt);
+    cleanup(wt, branch, id);
     throw e;
   }
   const p = c.prior;
@@ -179,12 +270,32 @@ async function seed(env, c) {
       tasks: [{ id: 'T1', status: 'done', attempt: 1, pre: env.base, head: heads[0] }, ...(p ? [{ id: '@rv1', status: 'done', attempt: 1, pre: priorHead, head: heads.at(-1) }] : [])] },
     fixes: p?.fixes ?? 0,
     ...(p && { review: { n: 1, head: priorHead, open: p.open } }),
-    ...(env.phase === 'qa' && { review: { n: 1, head: heads.at(-1), open: [] } }),
+    ...(env.phase !== 'review' && { review: { n: 1, head: heads.at(-1), open: [] } }),
     ...(baseline && { config_baseline: baseline }),
+    ...(branch && { branch, plan_hash: sha256(canon(c.plan)), qa: qaOf(c, heads.at(-1), qaReport(env, id)) }),
   });
   write(path.join(dir, 'plan.json'), c.plan);
   if (p) write(path.join(dir, 'review', '01.json'), { n: 1, at: now, round: 1, head: priorHead, ...p.review });
-  return { id, dir, wt, heads, priorHead };
+  if (branch) seedQa(env, c, id, dir, heads.at(-1), now);
+  return { id, dir, wt, heads, priorHead, branch };
+}
+
+// final_gate: what review 1 and QA 1 left (lib/review.js, lib/qa.js): review/01.json, qa/01.json (each case's evidence
+// label as qa.js sets it), runs/1.rec.jsonl (the meta line, then the case's recs 1.1, 1.2, ... on QA_PORT) and the
+// QA report in the docs mirror
+const qaReport = (env, id) => `docs/verification/${env.date}-${id}-qa.md`;
+const qaOf = (c, head, report) => ({ n: 1, head, verdict: c.qa.verdict, pass: c.qa.cases.filter((x) => x.result === 'PASS').length, fail: 0, blocked: 0, report });
+function seedQa(env, c, id, dir, head, now) {
+  const report = qaReport(env, id);
+  write(path.join(dir, 'review', '01.json'), { n: 1, at: now, round: 1, head, ...c.review });
+  write(path.join(dir, 'qa', '01.json'), { n: 1, at: now, round: 1, head, verdict: c.qa.verdict, report, findings: c.qa.findings, need_review: [],
+    cases: c.qa.cases.map((x) => ({ ...x, evidence: x.type === 'backend' && x.recs.length > 0 && !x.screenshots.length ? 'captured by tbd' : 'agent-made' })) });
+  write(path.join(dir, 'runs', '1.rec.jsonl'), [{ meta: true, ticket: id, run: 1, phase: 'qa', round: 1, gen: 1 }, ...c.recs.map((x, i) => ({
+    n: `1.${i + 1}`, at: now, method: x.method, url: `http://127.0.0.1:${QA_PORT}${x.path}`,
+    req: { headers: [...(x.body ? [['content-type', 'application/json']] : []), ...arr(x.headers)], body: x.body ? JSON.stringify(x.body) : null, truncated: false },
+    res: { status: x.status, headers: [['content-type', 'application/json; charset=utf-8']], body: JSON.stringify(x.res), truncated: false }, ms: 4 + i,
+  }))].map((l) => JSON.stringify(l)).join('\n') + '\n');
+  write(path.join(dir, report), c.qaReport);
 }
 
 // a run's last structured output (its result event), refused or not
@@ -213,6 +324,15 @@ function fakeExec(env, c) {
     `i=0; while ! ${req(first)} > "$out" 2>&1 && grep -q 'unknown run key' "$out" && [ $i -lt 100 ]; do i=$((i+1)); sleep 0.1; done`,
     ...rest.map((u) => `${req(u)} >> "$out" 2>&1`), 'kill $srv'] : [])].join('\n') + '\n');
   return { exec: ['/bin/sh', f('sh')] };
+}
+
+// --fake final_gate: the agent's tool work as one exec step: the case's two docs written where its example says
+function fakeDocs(env, c) {
+  const f = (k) => path.join(env.root, `fake-${c.key}-${k}.md`);
+  write(f('verdict'), c.docs.verdict);
+  write(f('verification'), c.docs.verification);
+  const { verdict_doc: v, verification_doc: w } = c.example;
+  return { exec: ['/bin/sh', '-c', `mkdir -p '${path.dirname(v)}' '${path.dirname(w)}' && cp '${f('verdict')}' '${v}' && cp '${f('verification')}' '${w}'`] };
 }
 
 // a listener on port that no run started (port_held): the app cannot bind there and tbx req refuses it
@@ -244,9 +364,12 @@ const recsOf = (dir, id) => (fs.existsSync(path.join(dir, 'runs')) ? fs.readdirS
   .flatMap((f) => { const [meta, ...ls] = metricLines(dir, path.join(dir, 'runs', f)); return meta?.meta === true && meta.ticket === id && meta.phase === 'qa' ? ls : []; });
 
 async function runCase(o, env, c) {
-  const { id, dir, wt, heads, priorHead } = await seed(env, c);
+  const { id, dir, wt, heads, priorHead, branch } = await seed(env, c);
   const scn = path.join(env.root, `scn-${c.key}`);
-  if (o.fake) write(path.join(scn, '1.json'), { steps: [...(env.phase === 'qa' ? [fakeExec(env, c)] : []), { result: { structured_output: c.example, num_turns: 1 } }] });
+  if (o.fake) {
+    const tools = env.phase === 'qa' ? [fakeExec(env, c)] : env.phase === 'final_gate' ? [fakeDocs(env, c)] : [];
+    write(path.join(scn, '1.json'), { steps: [...tools, { result: { structured_output: c.example, num_turns: 1 } }] });
+  }
   console.log(`eval: ${c.key}: ${id} seeded in ${env.phase} (${heads.length} commit(s))${c.port_held ? `, port ${env.port} held` : ''}`);
   const r = { key: c.key, title: c.title, id, text: c.ticket, phase: env.phase, notes: [], error: null };
   let tbd;
@@ -262,14 +385,14 @@ async function runCase(o, env, c) {
     });
   } catch (e) { // startTbd removed the root: our worktree goes too
     holder?.kill('SIGKILL');
-    cleanup(wt);
+    cleanup(wt, branch, id);
     throw e;
   }
   const t0 = Date.now();
   try {
     guardHome(env.tbHome, tbd.port);
     let said = Date.now();
-    for (let t = ticketOf(dir); t.state === env.phase && t.waiting?.reason !== 'manual'; t = ticketOf(dir)) {
+    for (let t = ticketOf(dir); t.state === env.phase && !['manual', 'close'].includes(t.waiting?.reason); t = ticketOf(dir)) { // close: squashed (final_gate)
       const low = !o.fake && memLevel() < 15; // the freeze guard
       if (env.aborted || low || Date.now() - t0 > env.runMs) {
         r.timeout = true;
@@ -303,8 +426,8 @@ async function runCase(o, env, c) {
   r.min = Math.round((Date.now() - t0) / 60_000);
   try {
     const t = ticketOf(dir);
-    const want = c.prior ? 2 : 1; // the review/NN.json (qa: qa/01.json) this run writes
-    const file = path.join(dir, env.phase, `${String(want).padStart(2, '0')}.json`);
+    const want = c.prior ? 2 : 1; // the review/NN.json (qa: qa/01.json, final_gate: final/01.json) this run writes
+    const file = path.join(dir, FILES[env.phase], `${String(want).padStart(2, '0')}.json`);
     const ns = runNs(dir);
     const metrics = metricLines(env.tbHome).filter((l) => l.t === 'run' && l.ticket === id);
     const runsEvents = ns.map((n) => ({ n, evs: events(path.join(dir, 'runs', `${n}.jsonl`)) }));
@@ -329,6 +452,22 @@ async function runCase(o, env, c) {
       const rp = typeof r.result?.report === 'string' && !r.result.report.split('/').includes('..') ? path.join(dir, r.result.report) : null; // the docs mirror
       r.report = rp && fs.existsSync(rp) ? fs.readFileSync(rp, 'utf8').slice(0, 8192) : null;
       r.checks = scoreQa(c, r);
+    } else if (env.phase === 'final_gate') {
+      r.result = saved ?? r.runs.findLast((x) => x.output)?.output ?? null;
+      const doc = (rel) => (typeof rel === 'string' && !rel.split('/').includes('..') ? readText(path.join(dir, rel)) : null); // the docs mirror
+      r.report = doc(r.result?.verdict_doc);
+      r.verification = doc(r.result?.verification_doc);
+      r.summaryMd = readText(path.join(dir, 'summary.md'));
+      const gates = fs.existsSync(path.join(dir, 'gates')) ? fs.readdirSync(path.join(dir, 'gates')).filter((f) => /^\d+\.json$/.test(f)).sort() : [];
+      r.gate = gates.map((f) => readJson(path.join(dir, 'gates', f))).findLast((g) => g?.gate === 'final') ?? null;
+      Object.assign(r, { base: env.base, tested: heads.at(-1) });
+      const g = (...a) => { try { return git(wt, ...a).trim(); } catch { return ''; } };
+      const sha = t.final?.sha;
+      if (sha) {
+        r.git = { sha, head: g('rev-parse', 'HEAD'), branch: g('rev-parse', `refs/heads/${branch}`), parents: g('rev-list', '--parents', '-n', '1', sha).split(' ').slice(1),
+          tree: g('rev-parse', `${sha}^{tree}`), testedTree: g('rev-parse', `${r.tested}^{tree}`), pre: g('rev-parse', `refs/tb/${id}/final-pre-${t.final.n}`), subject: g('log', '-1', '--format=%s', sha) };
+      }
+      r.checks = scoreFinal(c, r);
     } else {
       r.result = saved ? { verdict: saved.verdict, findings: saved.findings, closed: saved.closed, notes: saved.notes, declined: saved.declined } : r.runs.findLast((x) => x.output)?.output ?? null;
       r.checks = score(c, r);
@@ -337,16 +476,23 @@ async function runCase(o, env, c) {
     r.error = e.stack;
     r.checks ??= [chk('scripted checks ran', false, e.message)];
   }
-  if (!o.keep) cleanup(wt);
-  else r.notes.push(`kept; later: git -C ${SANDBOX} worktree remove --force ${wt} && git -C ${SANDBOX} worktree prune`);
+  if (!o.keep) cleanup(wt, branch, id);
+  else r.notes.push(`kept; later: git -C ${SANDBOX} worktree remove --force ${wt} && git -C ${SANDBOX} worktree prune${branch ? ` && git -C ${SANDBOX} branch -D ${branch} && git -C ${SANDBOX} update-ref -d refs/tb/${id}/final-pre-1` : ''}`);
   console.log(`eval: ${c.key}: ${r.ticket?.state ?? '?'} · ${r.checks.filter((x) => x.ok).length}/${r.checks.length} checks${arr(r.contaminated).length ? ' · CONTAMINATED' : ''} · ${usd(arr(r.runs).reduce((s, x) => s + costOf(x), 0))} · ${r.min} min`);
   return r;
 }
 
-// only our own worktree (detached: no branch, no ref) goes; never main, never another ticket's
-function cleanup(wt) {
-  try { git(SANDBOX, 'worktree', 'remove', '--force', wt); } catch (e) { console.log(`eval: worktree remove ${wt}: ${String(e.stderr || e.message).trim().slice(0, 200)}`); }
+// only our own worktree goes (review, qa: detached; final_gate: + its branch tb/<id>-eval and refs/tb/<id>/*, the
+// squash's final-pre-<n>); never main, never another ticket's
+function cleanup(wt, branch = null, id = null) {
+  const say = (what, e) => console.log(`eval: ${what}: ${String(e.stderr || e.message).trim().slice(0, 200)}`);
+  try { git(SANDBOX, 'worktree', 'remove', '--force', wt); } catch (e) { say(`worktree remove ${wt}`, e); }
   git(SANDBOX, 'worktree', 'prune');
+  if (!branch) return;
+  try { git(SANDBOX, 'branch', '-D', branch); } catch (e) { say(`branch -D ${branch}`, e); }
+  for (const ref of git(SANDBOX, 'for-each-ref', '--format=%(refname)', `refs/tb/${id}/`).split('\n').filter(Boolean)) {
+    try { git(SANDBOX, 'update-ref', '-d', ref); } catch (e) { say(`update-ref -d ${ref}`, e); }
+  }
 }
 
 // ---- report + blind packet ----------------------------------------------------------------------------------------
@@ -365,6 +511,13 @@ const MERMAID = {
     '  R --> M{lib/qa.js handler}',
     '  M -->|all PASS| F[final_gate: stop]', '  M -->|FAIL cause code| W[working @qa1: waits manual, stop]', '  M -->|BLOCKED or refused twice| B[blocked: stop]',
     '  F --> K[scripted checks: qa/01.json, ticket, rec files]', '  W --> K', '  B --> K', '  K --> E[run log]', '```'],
+  final_gate: ['```mermaid', 'flowchart LR',
+    '  C[case.json: ticket, plan, patches, review, QA cases + recs + report] --> S[seed: branch tb/id-eval at main + commits, ticket in final_gate]',
+    '  S --> T[dev tbd: temp TB_HOME, code copy, tag without checks]',
+    '  T --> G[final gate job: logic checks]', '  G -->|green| R[real final review run: reads the diff, writes 2 docs]',
+    '  R --> M{lib/final.js handler}',
+    '  M -->|pass| Q[squash + waiting close: stop]', '  M -->|block| W[working @fx1: waits manual, stop]', '  M -->|refused twice| B[blocked: stop]',
+    '  Q --> K[scripted checks: final/01.json, ticket, mirror docs, summary.md, git]', '  W --> K', '  B --> K', '  K --> E[run log]', '```'],
 };
 
 // a run's tool calls, one line each (Bash: its command, background or not; else the path / pattern)
@@ -389,11 +542,13 @@ function caseMd(r) {
     out.push('', '| rec | method | url | status | ms |', '|---|---|---|---|---|', ...r.recs.map((l) => `| ${l.n} | ${l.method} | ${cell(l.url)} | ${l.res?.status ?? cell(l.error ?? '-')} | ${l.ms ?? '-'} |`));
   }
   if (r.result) out.push('', details(`${r.phase} result`, fence('json', r.result)));
-  if (r.report) out.push('', details('report (docs mirror, first 8 KB)', fence('md', r.report)));
+  if (r.report) out.push('', details(`${r.phase === 'final_gate' ? 'verdict doc' : 'report'} (docs mirror, first 8 KB)`, fence('md', r.report.slice(0, 8192))));
+  if (r.verification) out.push('', details('verification doc (docs mirror, first 8 KB)', fence('md', r.verification.slice(0, 8192))));
+  if (r.summaryMd) out.push('', details('summary.md', fence('md', r.summaryMd)));
   for (const x of arr(r.runs).filter((y) => y.output && y.output !== r.result)) out.push('', details(`run ${x.n} structured output`, fence('json', x.output)));
   for (const x of arr(r.runs)) {
     out.push('', details(`runs/${x.n}.prompt (first 2 KB)`, fence('md', x.prompt)));
-    if (r.phase === 'qa') out.push('', details(`runs/${x.n} tool calls`, fence('text', toolLines(x.evs).join('\n') || 'none')));
+    if (r.phase !== 'review') out.push('', details(`runs/${x.n} tool calls`, fence('text', toolLines(x.evs).join('\n') || 'none')));
     if (x.err.trim()) out.push('', details(`runs/${x.n}.err (tail)`, fence('text', x.err)));
   }
   if (r.diff) out.push('', details('diff base..HEAD', fence('diff', r.diff)));
@@ -407,11 +562,12 @@ function report(o, env, results) {
   const all = clean.flatMap((r) => r.checks);
   const pass = all.filter((x) => x.ok).length;
   const green = clean.filter((r) => r.checks.every((x) => x.ok)).length;
-  const out = [`# M5.${env.phase === 'qa' ? 2 : 1} ${env.phase} evals: ${o.fake ? 'fake dry run' : 'real'} (${env.date})`, '',
+  const out = [`# M5.${MILESTONE[env.phase]} ${env.phase} evals: ${o.fake ? 'fake dry run' : 'real'} (${env.date})`, '',
     `Verdict (scripted): ${green === env.planned ? 'PASS' : 'FAIL'}, ${green}/${env.planned} cases, ${pass}/${all.length} checks, ${results.length - clean.length} contaminated.${env.phase === 'review' ? ' Blind score: separate packet (D-0069).' : ''}`, '',
     `- cmd \`node scripts/eval-phase.js ${process.argv.slice(2).join(' ')}\``,
-    `- claude_bin \`${env.claude}\` · ${env.phase} model: ${o.model ? `${o.model}/${o.effort} (--model)` : `config default models.${env.phase} (production)`} · one run at a time${o.noRamWait ? ' · --no-ram-wait: eval TB_HOME admits at once (no min_free, no phase need, no docker reserve); cancel at memory level < 15' : ''}`,
+    `- claude_bin \`${env.claude}\` · ${env.phase} model: ${o.model ? `${o.model}/${o.effort} (--model)` : `config default models.${env.phase} (production${env.phase === 'final_gate' ? ', spawn.finalModel: never the review model' : ''})`} · one run at a time${o.noRamWait ? ' · --no-ram-wait: eval TB_HOME admits at once (no min_free, no phase need, no docker reserve); cancel at memory level < 15' : ''}`,
     `- prompt \`${o.prompt}\` (${env.words} words, sha256 ${env.promptSha}) as code/${env.phase}/prompt.md${env.port ? ` · qa_ports [${env.port}]` : ''}`,
+    ...(env.phase === 'final_gate' ? ['- tag checks: none set → the final gate runs its logic checks only (integrity, plan, history, trailer, protected, scope, tests); generate, lint, typecheck, build, unit, prisma, openapi and e2e skip (not set, D24)'] : []),
     `- tbd ${o.fake ? 'this repo' : 'code copy (no test/golden)'}, own port per case · TB_HOME \`${env.tbHome}\` (${o.keep ? 'kept' : 'removed'}) · HOME ${o.fake ? 'temp' : 'real (keychain login)'}`,
     `- sandbox \`${SANDBOX}\` base \`${env.base.slice(0, 12)}\` · total cost ${usd(results.flatMap((r) => arr(r.runs)).reduce((s, x) => s + costOf(x), 0))}`,
     ...(env.labels ? [`- blind packet \`${o.packet}\`: ${Object.entries(env.labels).map(([k, v]) => `${v} = ${k}`).join(', ')}`] : []), '', ...MERMAID[env.phase], '',
@@ -512,13 +668,16 @@ async function main() {
   const phases = path.join(root, 'phases');
   fs.cpSync(path.join(REPO, 'phases'), phases, { recursive: true });
   write(path.join(phases, 'code', o.phase, 'prompt.md'), promptText);
-  fs.rmSync(path.join(phases, 'code', 'working', 'prompt.md'), { force: true }); // a blocking result waits in working (manual): no fix session
+  // a blocking result waits in working (manual): no fix session; a pass waits (manual) in the next phase: the QA, or the
+  // final gate's job and agent (M5.3: lib/final.js would run them on a ticket seeded for QA) never start
+  for (const ph of ['working', NEXT[o.phase]].filter(Boolean)) fs.rmSync(path.join(phases, 'code', ph, 'prompt.md'), { force: true });
   const port = o.phase === 'qa' ? await freePort() : null;
-  write(path.join(tbHome, 'tags.json'), { sandbox: { type: 'git', path: SANDBOX, base: 'main', checks: { typecheck: 'npm run typecheck', unit: 'npm test', e2e: 'npm run test:e2e' }, skills: [], ...(port && { qa_ports: [port] }) } });
+  const checks = o.phase === 'final_gate' ? {} : { typecheck: 'npm run typecheck', unit: 'npm test', e2e: 'npm run test:e2e' }; // final gate: logic checks only (header)
+  write(path.join(tbHome, 'tags.json'), { sandbox: { type: 'git', path: SANDBOX, base: 'main', checks, skills: [], ...(port && { qa_ports: [port] }) } });
   write(path.join(tbHome, 'config.json'), { // max_turns, wall cap, fable_billing: repo defaults
     claude_bin: claude,
     ...(o.model && { models: { [o.phase]: { model: o.model, effort: o.effort } } }),
-    ...((o.fake || o.noRamWait) && { memory: { min_free_gb: 0, phase_need_gb: { planning: 0, working: 0, review: 0, qa: 0 }, docker_reserved_gb: 0, start_at_warn_when_idle: true } }),
+    ...((o.fake || o.noRamWait) && { memory: { min_free_gb: 0, phase_need_gb: { planning: 0, working: 0, review: 0, qa: 0, final_gate: 0 }, docker_reserved_gb: 0, start_at_warn_when_idle: true } }),
     ...(o.fake && { disk: { warn_gb: 0, stop_gb: 0 } }),
   });
   const env = {
@@ -563,7 +722,7 @@ async function main() {
   process.exitCode = ok ? 0 : 1;
 }
 
-module.exports = { CASES, loadCase, caseOf, parseWhere, score, scoreQa, parse };
+module.exports = { CASES, loadCase, caseOf, parseWhere, score, scoreQa, scoreFinal, parse };
 
 if (require.main === module) {
   main().catch((e) => {

@@ -7,7 +7,7 @@ const os = require('node:os');
 const path = require('node:path');
 
 process.env.TB_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'metrics-')); // before lib/metrics loads (AC10: never the real home)
-const { exitOf, gate, GATE_FIELDS } = require('../lib/metrics');
+const { exitOf, gate, ticket, GATE_FIELDS } = require('../lib/metrics');
 const { EXITS } = require('../lib/stream');
 
 test('P5 t:gate: every contract field present (null when not given), detail cut to 200 chars, the line appended as returned', async () => {
@@ -15,6 +15,16 @@ test('P5 t:gate: every contract field present (null when not given), detail cut 
   assert.deepEqual(Object.keys(line), ['t', 'at', ...GATE_FIELDS]);
   assert.deepEqual([line.peak_rss_mb, line.slot_wait_ms, line.detail.length], [null, null, 200]);
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(process.env.TB_HOME, 'metrics.jsonl'), 'utf8').trim().split('\n').at(-1)), line);
+});
+
+test('M5.3 t:ticket phase_minutes: the final gate counts like any agent phase; a wait state (clarify) does not', async () => {
+  const dir = path.join(process.env.TB_HOME, 't_fin001');
+  fs.mkdirSync(dir);
+  const at = (min) => new Date(Date.parse('2026-10-14T00:00:00Z') + min * 60_000).toISOString();
+  const moves = [['qa', 'clarify', 10], ['clarify', 'qa', 30], ['qa', 'final_gate', 35], ['final_gate', 'done', 50]];
+  fs.writeFileSync(path.join(dir, 'events.jsonl'), moves.map(([from, to, min]) => JSON.stringify({ t: at(min), kind: 'transition', id: 't_fin001', from, to })).join('\n'));
+  const line = await ticket({ id: 't_fin001', kind: 'code', state: 'done', created_at: at(0) }, dir);
+  assert.deepEqual(line.phase_minutes, { qa: 15, final_gate: 15 });
 });
 
 test('t:run exit: every run end the runner records (App C enum + refusal, cancelled) as is; anything else → interrupted', () => {

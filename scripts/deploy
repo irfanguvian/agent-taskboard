@@ -1,6 +1,8 @@
 #!/bin/sh
 # Point the live worktree (~/taskboard-live) at a verified sha and restart tbd (D25).
-# Usage: deploy <sha> [--no-restart] [--check] [--yes]    --check: validate only, change nothing
+# Usage: deploy <sha> [--no-restart] [--check] [--yes] [--force]    --check: validate only, change nothing
+# Before the checkout, deploy-guard.js refuses while a flow is at work in review, qa or final_gate (C16, D-0091);
+# --force deploys anyway (the guard still lists them).
 # Rollback = deploy the previous sha (printed at the end, also in ~/.taskboard/deploy.log).
 # Dev repo = the repo holding this script, or $TB_DEV.
 set -eu
@@ -8,17 +10,18 @@ set -eu
 . "$(dirname "$0")/live-lib.sh"
 
 main() {
-  sha='' restart=1 check=0
+  sha='' restart=1 check=0 force=''
   for a in "$@"; do
     case $a in
       --no-restart) restart=0 ;;
       --check) check=1 ;;
       --yes) ;;
+      --force) force=--force ;;
       -*) die "unknown flag $a" ;;
       *) sha=$a ;;
     esac
   done
-  [ -n "$sha" ] || die "usage: deploy <sha> [--no-restart] [--check] [--yes]"
+  [ -n "$sha" ] || die "usage: deploy <sha> [--no-restart] [--check] [--yes] [--force]"
   guard_home "$@"
   dev=${TB_DEV:-$(cd "$(dirname "$0")/.." && pwd)}
   full=$(git -C "$dev" rev-parse --verify --quiet "$sha^{commit}") || die "unknown commit: $sha"
@@ -34,6 +37,7 @@ main() {
     exit 0
   fi
 
+  TB_HOME=$TBHOME "$NODE" "$(dirname "$0")/deploy-guard.js" ${force:+"$force"} || die "refused by deploy-guard (see above)"
   if [ "$prev" = none ]; then
     git -C "$dev" worktree prune
     git -C "$dev" worktree add -q --detach "$LIVE" "$full"

@@ -92,14 +92,17 @@ test('AC3 U1 U2 J6 J7: assign guards (blocker not merged, base ref missing, work
     t_dep002: { state: 'final_gate', pr: { merged_at: null } },
     t_base01: { state: 'backlog', tag: 'acme/nobase' },
     t_wtfl01: { state: 'backlog', tag: 'acme/api' },
+    t_noid01: { state: 'backlog', tag: 'acme/push' },
   }, {
-    files: { 'tags.json': { acme: {}, 'acme/api': { type: 'git', path: dir, base: 'main' }, 'acme/nobase': { type: 'git', path: dir, base: 'nope' } }, 'worktrees/t_wtfl01/taken.txt': 'x' },
+    files: { 'tags.json': { acme: {}, 'acme/api': { type: 'git', path: dir, base: 'main' }, 'acme/nobase': { type: 'git', path: dir, base: 'nope' },
+      'acme/push': { type: 'git', path: dir, base: 'main', push: { remote: 'mirror' } } }, 'worktrees/t_wtfl01/taken.txt': 'x' },
     env: { FAKE_CLAUDE_SCENARIO_DIR: scn, TEST_PRESSURE: 'normal' }, // two live runs at once (D2: none at warn)
   });
   await until(() => read(tbd, 't_hang01').lease?.pid, 15_000, 'other run live');
 
   // U2 negatives over HTTP: 409 with the reason, the ticket stays in backlog, no worktree
-  for (const [id, re] of /** @type {[string, RegExp][]} */ ([['t_neg001', /blocker t_dep002 is not merged yet/], ['t_base01', /tag acme\/nobase fails doctor: base branch nope not found/], ['t_wtfl01', /git worktree add .*t_wtfl01 failed: .*; the ticket stays in backlog/]])) {
+  for (const [id, re] of /** @type {[string, RegExp][]} */ ([['t_neg001', /blocker t_dep002 is not merged yet/], ['t_base01', /tag acme\/nobase fails doctor: base branch nope not found/], ['t_wtfl01', /git worktree add .*t_wtfl01 failed: .*; the ticket stays in backlog/],
+    ['t_noid01', /tag acme\/push fails doctor: ident not set: run tb doctor --tag acme\/push --ident$/]])) { // M5 F3b: a push tag needs Irfan's ident
     const r = await tbd.api('POST', `/api/tickets/${id}/assign`);
     assert.equal(r.status, 409, id);
     assert.match(r.json.error, re, id);
@@ -323,10 +326,11 @@ test('item 8 E2E (U8 U9 J3 J12 AC3 AC4 AC8): assign → questions → tb answer 
   const sk = tk(tbd, id, 'skills', '.claude', 'skills', 'learning');
   assert.deepEqual([fs.lstatSync(path.join(sk, 'SKILL.md')).isFile(), fs.readdirSync(sk)], [true, ['SKILL.md']]);
   assert.match(fs.readFileSync(path.join(wt, 'node_modules', '.lease'), 'utf8'), /^\S{8,}\n$/, 'TBX_LEASE: setup ran in the heavy slot');
-  // J3: children in Backlog, parent + blocked_by mapped, auto_assign; not assigned while the parent is not merged (J5)
+  // J3: children in Backlog, parent + blocked_by mapped, auto_assign; not assigned while the parent is not merged (J5).
+  // C15 (D-0091) contract change: a code child always waits on its parent too (C2 named only C1: was [c1.id])
   assert.equal(p.children.length, 2);
   const [c1, c2] = p.children.map((c) => read(tbd, c));
-  for (const [c, title, by] of [[c1, 'docs', [id]], [c2, 'client', [c1.id]]]) {
+  for (const [c, title, by] of [[c1, 'docs', [id]], [c2, 'client', [c1.id, id]]]) {
     assert.deepEqual([c.state, c.kind, c.tag, c.parent, c.blocked_by, c.auto_assign, c.title, c.waiting], ['backlog', 'code', 'acme/api', id, by, true, title, null]);
     // J16: the parent's locked decisions, ids prefixed with the parent's (the child's own rounds count from R1 again)
     assert.deepEqual(c.locked_decisions, [L1, L2, R2C].map((d) => ({ ...d, id: `${id}.${d.id}` })));
@@ -453,6 +457,72 @@ test('J5: an approval-made child is assigned by tbd once its blockers are merged
   assert.deepEqual([read(tbd, 't_kid004').state, alerts(tbd).filter((a) => a.title === 'Blocker cancelled').length], ['backlog', 1]);
   const man = await tbd.api('POST', '/api/tickets/t_kid004/assign');
   assert.deepEqual([man.status, man.json.ticket?.state], [200, 'planning'], JSON.stringify(man.json));
+});
+
+// ---- M5.3 C15 (contract F6; D-0091 A16): children start on their blockers' final commit ---------------------------
+test('C15 F6: a child auto-assigns on its parent\'s final commit once the parent is squashed (waiting close), on the blocker final commit that holds the others\'; a parent not squashed holds it; a plan child naming no blocker waits on its parent after approve; diverging blockers → waiting blockers_diverge, one alert; a rework at close during the assign → its CAS refuses: assign_failed, worktree removed', async (t) => {
+  const dir = repo();
+  const base = git(dir, 'rev-parse', 'main');
+  // final commits (lane A squashes; plain commits here): P on base, S on P (holds P), D on base (off S's chain)
+  const commit = (on, msg) => git(dir, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit-tree', '-p', on, '-m', msg, `${on}^{tree}`);
+  const P = commit(base, 'parent squash');
+  const S = commit(P, 'sibling squash');
+  const D = commit(base, 'off-chain squash');
+  const squashed = (sha) => ({ state: 'final_gate', tag: 'acme/api', waiting: { reason: 'close', since: NOW }, final: { n: 1, sha, tested_sha: sha, at: NOW, verdict: 'pass' } });
+  const kid = (...blocked_by) => ({ state: 'backlog', tag: 'acme/api', auto_assign: true, blocked_by });
+  const wt = path.join(fs.mkdtempSync(path.join(ROOT, 'wt-')), 'w');
+  git(dir, 'worktree', 'add', '-q', '--detach', wt, base);
+  const scn = fs.mkdtempSync(path.join(ROOT, 'scn-'));
+  for (const n of [1, 2]) fs.writeFileSync(path.join(scn, `${n}.json`), JSON.stringify({ steps: [result(QUESTIONS)] }));
+  // the race, in tbd: its doctor.settingsCheck (between the worktree build and the assign CAS) first clears t_par012's
+  // final, as a rework at close does
+  const race = path.join(ROOT, `race-${process.pid}.js`);
+  fs.writeFileSync(race, `if (process.argv[1]?.endsWith('tbd.js')) {
+  const doctor = require(${JSON.stringify(path.join(REPO, 'lib', 'doctor'))});
+  const store = require(${JSON.stringify(path.join(REPO, 'lib', 'store'))});
+  const check = doctor.settingsCheck;
+  doctor.settingsCheck = async (tag, wt) => {
+    if (wt.endsWith('t_kid014')) await store.updateTicket('t_par012', ({ final: _f, ...k }) => ({ ...k, state: 'working', waiting: null }));
+    return check(tag, wt);
+  };
+}
+`);
+  const tbd = await boot(t, {
+    t_par010: squashed(P),
+    t_sib010: squashed(S),
+    t_off010: squashed(D),
+    t_par011: { state: 'final_gate', tag: 'acme/api' }, // in its final gate, not squashed yet
+    t_par012: squashed(P),
+    t_kid010: kid('t_par010'),
+    t_kid011: kid('t_par010', 't_sib010'), // P first: the pick moves on to S
+    t_kid012: kid('t_par011'),
+    t_kid013: kid('t_sib010', 't_off010'),
+    t_kid014: kid('t_par012'),
+    t_apr010: { state: 'plan_approval', tag: 'acme/api', base_sha: base, worktree: wt },
+  }, {
+    files: {
+      'tags.json': { acme: {}, 'acme/api': { type: 'git', path: dir, base: 'main' } },
+      'tickets/t_apr010/rounds/01-plan.json': { ...PLAN, children: [{ id: 'C1', title: 'free', text: 'names no blocker', blocked_by: [] }] },
+    },
+    env: { FAKE_CLAUDE_SCENARIO_DIR: scn, NODE_OPTIONS: `${RUN_SPY} --require ${race}` },
+  });
+  const wtOf = (id) => path.join(tbd.tbHome, 'worktrees', id);
+  await until(() => ['t_kid010', 't_kid011'].every((id) => read(tbd, id).state !== 'backlog'), 30_000, 'children assigned');
+  assert.deepEqual(['t_kid010', 't_kid011'].map((id) => [read(tbd, id).base_sha, git(wtOf(id), 'rev-parse', 'HEAD')]), [[P, P], [S, S]]);
+  await until(() => read(tbd, 't_kid013').waiting?.reason === 'blockers_diverge', 10_000, 'blockers_diverge');
+  assert.match(read(tbd, 't_kid013').waiting.error, /blockers diverge: t_sib010 [0-9a-f]{12}, t_off010 [0-9a-f]{12}: no final commit holds the others'/);
+  await until(() => read(tbd, 't_kid014').waiting?.reason === 'assign_failed', 10_000, 'race: assign_failed');
+  assert.match(read(tbd, 't_kid014').waiting.error, /a blocker's final commit changed during the assign/);
+  // approve: the plan's child names no blocker; stored blocked by its parent (C15), so never assigned beside it
+  assert.equal((await tbd.api('POST', '/api/tickets/t_apr010/approve')).status, 202);
+  await until(() => read(tbd, 't_apr010').state === 'working', 30_000, 'approved');
+  const [child] = read(tbd, 't_apr010').children;
+  assert.deepEqual(read(tbd, child).blocked_by, ['t_apr010']);
+  await new Promise((r) => setTimeout(r, 2500)); // more ticks: nothing retried, nothing assigned early
+  assert.deepEqual(['t_kid012', 't_kid013', 't_kid014', child].map((id) => [read(tbd, id).state, read(tbd, id).waiting?.reason ?? null]),
+    [['backlog', null], ['backlog', 'blockers_diverge'], ['backlog', 'assign_failed'], ['backlog', null]]);
+  assert.equal(fs.existsSync(wtOf('t_kid014')), false, 'the race\'s worktree is removed');
+  assert.deepEqual(['Blockers diverge', 'Auto-assign failed'].map((x) => alerts(tbd).filter((a) => a.title === x).length), [1, 1]);
 });
 
 // ---- P4e (contract J15 J16 J17) -------------------------------------------------------------------------------------

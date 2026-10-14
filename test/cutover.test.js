@@ -5,9 +5,11 @@
 // ~/taskboard* or ~/.taskboard; the real home is only ever read (guard test).
 const { test, after } = require('node:test');
 const assert = require('node:assert/strict');
-const { spawn, spawnSync } = require('node:child_process');
+const { spawn, spawnSync, execFile } = require('node:child_process');
+const crypto = require('node:crypto');
 const { once } = require('node:events');
 const fs = require('node:fs');
+const { createServer } = require('node:http');
 const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
@@ -466,4 +468,76 @@ test('deploy after ~/taskboard-live was deleted by hand: --check says so, the re
   assert.equal(r.status, 0, out(r));
   assert.equal(w.git(w.live, 'rev-parse', 'HEAD'), sha);
   assert.equal(w.run('deploy', sha, '--check').stderr, '', 'a healthy live tree is not reported');
+});
+
+// ---- C16 (contract F7; D-0091 D-0092 G6): deploy-guard -----------------------------------------------------------
+// A fake tbd on 127.0.0.1:port: /api/whoami answers HMAC(token, n), /api/state answer() ([status, body]) only with the
+// token, else 401. seen: [route, the X-TB-Token it carried].
+async function fakeTbd(port, token, answer) {
+  const seen = [];
+  const srv = createServer((req, res) => {
+    const u = new URL(req.url ?? '/', 'http://x');
+    const tok = req.headers['x-tb-token'] ?? null;
+    seen.push([u.pathname, tok]);
+    const [code, body] = u.pathname === '/api/whoami' ? [200, { mac: crypto.createHmac('sha256', token).update(u.searchParams.get('n') ?? '').digest('hex') }]
+      : u.pathname !== '/api/state' ? [404, {}] : tok === token ? answer() : [401, { error: 'unauthorized' }];
+    res.writeHead(code, { 'content-type': 'application/json' });
+    res.end(JSON.stringify(body));
+  }).listen(port, '127.0.0.1');
+  await once(srv, 'listening');
+  return { seen, close: () => new Promise((r) => srv.close(r)) };
+}
+// execFile, not spawnSync: the fake tbd answers from this process's event loop
+const runAsync = (file, args, env) => new Promise((resolve) => {
+  execFile(file, args, { env, encoding: 'utf8', timeout: 60_000 }, (err, stdout, stderr) => resolve({ status: err ? err.code : 0, stdout, stderr }));
+});
+
+test('C16 F7 deploy-guard: flows at work in review | qa | final_gate → exit 1 listing them; --force → exit 0, listed; only Irfan waits (close, manual, children) → exit 0; tbd down → exit 0 + warning; tbd refusing /api/state → exit 1 (fail closed)', async (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'tbg-'));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(home, 'token'), 'tok-1\n', { mode: 0o600 });
+  const port = await freePort();
+  const guard = (...args) => runAsync(process.execPath, [path.join(SCRIPTS, 'deploy-guard.js'), ...args], { PATH: process.env.PATH, HOME: home, TB_HOME: home, TB_PORT: String(port) });
+
+  const down = await guard();
+  assert.deepEqual([down.status, down.stderr], [0, `deploy-guard: warning: tbd not answering on port ${port}: no flow to protect, deploying\n`]);
+
+  const AT_WORK = [{ id: 't_rev001', state: 'review', waiting: null }, { id: 't_qa0001', state: 'qa', waiting: { reason: 'memory' } }, { id: 't_fin001', state: 'final_gate', waiting: null }];
+  const IRFAN = [{ id: 't_cls001', state: 'final_gate', waiting: { reason: 'close' } }, { id: 't_man001', state: 'review', waiting: { reason: 'manual' } },
+    { id: 't_chl001', state: 'final_gate', waiting: { reason: 'children' } }, { id: 't_wrk001', state: 'working', waiting: null }];
+  /** @type {() => [number, any]} */
+  let answer = () => [200, { reminders: [], flows: [...AT_WORK, ...IRFAN] }];
+  const fake = await fakeTbd(port, 'tok-1', () => answer());
+  t.after(fake.close);
+  const listed = 't_rev001 (review), t_qa0001 (qa, waiting memory), t_fin001 (final_gate)';
+  const no = await guard();
+  assert.equal(no.status, 1, out(no));
+  assert.ok(no.stderr.includes(`flows at work: ${listed}: a deploy restarts tbd`), no.stderr);
+  const forced = await guard('--force');
+  assert.deepEqual([forced.status, forced.stderr], [0, `deploy-guard: --force: deploying over flows at work: ${listed}\n`]);
+  answer = () => [200, { reminders: [], flows: IRFAN }];
+  assert.deepEqual(await guard(), { status: 0, stdout: '', stderr: '' });
+  assert.ok(fake.seen.every(([route, tok]) => tok === (route === '/api/state' ? 'tok-1' : null)), `the token goes only to /api/state, after whoami: ${JSON.stringify(fake.seen)}`);
+  answer = () => [401, { error: 'unauthorized' }];
+  const closed = await guard();
+  assert.equal(closed.status, 1, out(closed));
+  assert.match(closed.stderr, /tbd answered 401 to GET \/api\/state \(fail closed: pass --force/);
+});
+
+test('C16 F7 scripts/deploy runs deploy-guard before the checkout and passes --force on', async (t) => {
+  const w = await world();
+  const sha = w.git(w.dev, 'rev-parse', 'HEAD');
+  fs.mkdirSync(w.tbHome);
+  fs.writeFileSync(path.join(w.tbHome, 'token'), 'tok-w\n', { mode: 0o600 });
+  const fake = await fakeTbd(w.port, 'tok-w', () => [200, { flows: [{ id: 't_rev001', state: 'review', waiting: null }] }]);
+  t.after(fake.close);
+  const deploy = (...args) => runAsync(path.join(w.dev, 'scripts', 'deploy'), args, w.env);
+  const no = await deploy(sha, '--no-restart');
+  assert.equal(no.status, 1, out(no));
+  assert.match(no.stderr, /flows at work: t_rev001 \(review\).*\n.*refused by deploy-guard/);
+  assert.equal(fs.existsSync(w.live), false, 'refused before the checkout');
+  const yes = await deploy(sha, '--no-restart', '--force');
+  assert.equal(yes.status, 0, out(yes));
+  assert.match(yes.stderr, /--force: deploying over flows at work: t_rev001 \(review\)/);
+  assert.equal(w.git(w.live, 'rev-parse', 'HEAD'), sha);
 });

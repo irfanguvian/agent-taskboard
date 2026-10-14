@@ -237,6 +237,30 @@ test('tag add/list round trip; new -f and promote of an unbuilt kind surface the
   assert.equal((await tb('new', 'x', '--fix-of', 't_q7r8s9')).code, 2); // --fix-of needs -f
 }));
 
+test('M5 D-0104 tag add / doctor --tag with --ident --push-remote: merged into the stored tag (ident from your global git config); git ident missing or no --tag → usage error, unknown tag → error, nothing stored', () => withBoard(async (t, tb) => {
+  const cfg = path.join(t.home, 'my.gitconfig');
+  fs.writeFileSync(cfg, '[user]\n\tname = Irfan G\n\temail = irfan@example.com\n');
+  const as = (gitCfg, ...args) => runTb(args, t, { GIT_CONFIG_GLOBAL: gitCfg });
+  const tags = async () => (await t.api('GET', '/api/tags')).json.tags;
+  assert.equal((await tb('tag', 'add', 'acme/api', '--type', 'folder', '--path', t.tbHome)).code, 0);
+  const add = await as(cfg, 'tag', 'add', 'acme/api', '--ident', '--push-remote', 'mirror');
+  assert.equal(add.code, 0, add.stdout);
+  assert.match(add.stdout, /^updated: tag acme\/api · folder · .+ · ident Irfan G <irfan@example\.com> · push mirror$/m);
+  const ident = { name: 'Irfan G', email: 'irfan@example.com' };
+  assert.deepEqual((await tags())['acme/api'], { type: 'folder', path: path.resolve(t.tbHome), push: { remote: 'mirror' }, ident });
+  // doctor --tag merges too (its checks fail here: no claude in this board; the merge comes first)
+  await as(cfg, 'doctor', '--tag', 'acme/api', '--push-remote', 'origin');
+  assert.deepEqual((await tags())['acme/api'], { type: 'folder', path: path.resolve(t.tbHome), push: { remote: 'origin' }, ident });
+
+  const before = await tags();
+  const none = await as('/dev/null', 'tag', 'add', 'acme/api', '--ident');
+  assert.deepEqual([none.code, none.stdout], [2, 'error: --ident: git user.name is not set\nhelp: git config --global user.name "<your name>"\n']);
+  assert.equal((await as(cfg, 'doctor', '--ident')).code, 2, '--ident needs --tag');
+  const unknown = await as(cfg, 'tag', 'add', 'acme/nope', '--push-remote', 'mirror');
+  assert.deepEqual([unknown.code, /^error: no tag acme\/nope$/m.test(unknown.stdout)], [1, true], unknown.stdout);
+  assert.deepEqual(await tags(), before);
+}));
+
 test('new -f and promote create a flow once the kind is built; list --flows and show read it', async () => {
   const phases = phaseFixture(fs.mkdtempSync(path.join(os.tmpdir(), 'tb-phases-')), { 'code/working': PHASE_FILES });
   const t = await startTbd({ files: { 'tasks.json': { tasks: SEED } }, env: { TB_PHASES_DIR: phases, NODE_OPTIONS: FAKE_HANDLERS } });
@@ -286,7 +310,9 @@ test('new -f and promote create a flow once the kind is built; list --flows and 
 test('list: a flow\'s waiting column is its reason (children done/total), empty when none, never [object Object]', async () => {
   const since = '2026-10-12T00:00:00.000Z';
   const files = Object.fromEntries([
-    ticket('t_wait01', { state: 'final_gate', waiting: { reason: 'children', done: 1, total: 2, blocked: 0, since } }),
+    // a D9 parent: its own pass recorded (pr.merged_at), as lib/pass.js leaves it; M5.3: a code final gate without one is
+    // the runner's (final checks), which would move this fixture
+    ticket('t_wait01', { state: 'final_gate', pr: { sha: 'a'.repeat(40), merged_at: since }, waiting: { reason: 'children', done: 1, total: 2, blocked: 0, since } }),
     ticket('t_wait02', { state: 'clarify', waiting: { reason: 'manual', since } }),
     ticket('t_wait03', { state: 'clarify' }),
   ].map(k => [`tickets/${k.id}/ticket.json`, k]));
@@ -299,6 +325,49 @@ test('list: a flow\'s waiting column is its reason (children done/total), empty 
       }
       assert.doesNotMatch(out, /object Object/);
     }
+  } finally {
+    await t.stop();
+  }
+});
+
+// M5.3 C13 C20: tb close, tb rework at close, the final gate in tb show / list --flows. A final gate waiting close is
+// left alone by the runner (lib/final.js next), so these fixtures stay put without a worktree.
+test('M5.3 tb close: waiting close + squash → done (squash line); refused 409 → exit 1 with tbd\'s why (not squashed, already done); tb rework at close with a started dependent → "cancel children first"; show + list --flows name the wait; show has the push line + the tag ident (or the hint on a push tag without one)', async () => {
+  const since = '2026-10-14T00:00:00.000Z', tested = 'b'.repeat(40), sq = 'c'.repeat(40);
+  const atClose = (id, over = {}) => ticket(id, { state: 'final_gate', round: 6, fixes: 2, waiting: { reason: 'close', since },
+    final: { n: 1, tested_sha: tested, verdict: 'pass', sha: sq, at: since }, ...over });
+  const push = { remote: 'mirror' }, def = { type: 'git', path: '/nonexistent/acme', base: 'main', push };
+  /** @type {Record<string, any>} */
+  const files = Object.fromEntries([
+    atClose('t_cls001', { tag: 'acme/api', push: { state: 'failed', remote: 'mirror', ref: 'refs/heads/tb/t_cls001-x', sha: sq, why: 'rejected\u202e' } }),
+    atClose('t_cls002', { tag: 'acme/noid', final: { n: 1, tested_sha: tested, verdict: 'pass' } }), atClose('t_cls003'),
+    ticket('t_dep003', { state: 'clarify', blocked_by: ['t_cls003'] }),
+  ].map(k => [`tickets/${k.id}/ticket.json`, k]));
+  files['tags.json'] = { acme: {}, 'acme/api': { ...def, ident: { name: 'Irfan G', email: 'i@example.com' } }, 'acme/noid': def };
+  const t = await startTbd({ files });
+  try {
+    assert.ok((await runTb(['list', '--flows'], t)).stdout.includes('  t_cls001,code,acme/api,final_gate,close,run t_cls001\n'));
+    const show = (await runTb(['show', 't_cls001'], t)).stdout;
+    for (const line of ['  waiting: "waits for close: tb close, tb push or tb rework"', '  fix: 2/3', '  final: pass · final 1 · squash cccccccccccc · tested bbbbbbbbbbbb',
+      '  push: failed · mirror tb/t_cls001-x · cccccccccccc · rejected', '  ident: Irfan G <i@example.com>']) {
+      assert.ok(show.includes(`${line}\n`), `${line}\n${show}`);
+    }
+    const noid = (await runTb(['show', 't_cls002'], t)).stdout;
+    assert.ok(noid.includes('  ident: "not set: run tb doctor --tag acme/noid --ident"\n') && !noid.includes('  push:'), noid);
+    const ok = await runTb(['close', 't_cls001'], t);
+    assert.deepEqual([ok.code, ok.stdout], [0, `close: ok · t_cls001 · done · run t_cls001\nsquash: ${sq}\n`]);
+    assert.equal((await t.api('GET', '/api/tickets/t_cls001')).json.ticket.state, 'done');
+    for (const [args, why] of /** @type {[string[], RegExp][]} */ ([[['close', 't_cls001'], /^error: t_cls001: done → done is not allowed for you$/],
+      [['close', 't_cls002'], /^error: t_cls002: .*not ready to close: the final gate has not passed$/]])) {
+      const r = await runTb(args, t);
+      assert.equal(r.code, 1, args.join(' '));
+      assert.match(r.stdout.split('\n')[0], why);
+    }
+    const rw = await runTb(['rework', 't_cls003', '--feedback', 'rename byId'], t);
+    assert.equal(rw.code, 1);
+    assert.match(rw.stdout, /^error: t_cls003: .*cancel children first\n/);
+    for (const id of ['t_cls002', 't_cls003']) assert.equal((await t.api('GET', `/api/tickets/${id}`)).json.ticket.waiting?.reason, 'close', `${id} stays at close`);
+    assert.equal((await runTb(['close'], t)).code, 2);
   } finally {
     await t.stop();
   }

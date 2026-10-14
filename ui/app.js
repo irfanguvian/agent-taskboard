@@ -16,14 +16,14 @@ const FLOW_COLS = [
 const YOU = new Set(['clarify', 'plan_approval', 'blocked']); // states that wait on Irfan
 const STAGE = { backlog: 'idle', done: 'done', blocked: 'blocked', clarify: 'you', plan_approval: 'you' };
 const KINDS = ['code', 'research', 'brainstorm', 'design'];
-const AGENT = ['planning', 'working', 'review', 'qa']; // phases with agent runs (fsm.AGENT)
+const AGENT = ['planning', 'working', 'review', 'qa', 'final_gate']; // phases with agent runs (fsm.AGENT)
 const NOW_LIMIT = 3, DONE_SHOWN = 15, GB = 2 ** 30, MB = 2 ** 20, DASH = '—';
 
 let state = null; // { reminders, flows, system, calendar } after first load
 let es = null; // the one EventSource
 let trusted = false; // tbd proved itself and the stream has not dropped since: only then do requests carry the cookie
 let wait = 1000; // reconnect backoff, ms (max 30 s)
-const ui = { drag: null, editing: null, tray: null, promote: null, pick: { kind: KINDS[0], tag: '' }, dirty: false, tags: [], tagsLoaded: false, locked: false,
+const ui = { drag: null, editing: null, tray: null, promote: null, pick: { kind: KINDS[0], tag: '' }, dirty: false, tags: [], tagDefs: {}, tagsLoaded: false, locked: false,
   runs: new Map(), open: null, ticket: null, log: null, act: null, arm: null, // runs: id → `run` event; open: the drawer's flow id + its ticket, log tail, last action, Cancel / Approve armed
   round: null, plan: null, drafts: new Map(), busy: new Map(), err: null, // the open ticket's newest planning round and frozen plan, Clarify / Reject drafts (`${id}:${n}` → draft), planning action in flight (id → role), its refusal
   csrf: null, ask: null, gates: null, ivs: null, fb: null, pass: null, phase: new Map() }; // P5: synchronizer token, the open working ask, gate / intervention pages + a feedback file (on demand), the pass check, Resume's phase pick (id → phase)
@@ -641,7 +641,7 @@ function drawerBody(f, ticket, error) {
   const foc = drawerFocus(), scroll = logScroll();
   const dd = (k, v) => v == null || v === '' ? null : [el('dt', null, k), el('dd', null, String(v))];
   const k = ticket || {};
-  const w = waitLabel(ticket ? k.waiting : f.waiting, f.tag || k.tag);
+  const w = waitLabel(ticket ? k.waiting : f.waiting, f.tag || k.tag), tg = f.tag || k.tag, td = tagDef(tg);
   // L7: once frozen (plan_hash) the plan shown is the one approve froze (GET's plan), never a newer round file
   const r = ticket ? (k.plan_hash && ui.plan ? { ...ui.plan, n: ui.round?.n } : ui.round) : null, st = k.state;
   const plan = r?.kind === 'plan' && (st === 'plan_approval' || k.plan_hash) ? planView(f.id, k, r) : null; // a rejected plan (hash cleared) is not shown
@@ -652,7 +652,9 @@ function drawerBody(f, ticket, error) {
     el('dl', { class: 'facts' },
       dd('Kind', f.kind), dd('Tag', f.tag), dd('State', stateLabel(st || f.state)), dd('Waiting', w), dd('Rework', k.rework ?? f.rework), dd('Fix', k.fixes > 0 ? `${k.fixes}/${ui.fixMax}` : null),
       dd('QA', k.qa?.verdict ? `${k.qa.verdict} · ${k.qa.pass} pass · ${k.qa.fail} fail · ${k.qa.blocked} blocked` : null),
-      dd('Branch', k.branch), dd('Base', k.base_sha?.slice(0, 12)),
+      dd('Final', isObj(k.final) ? finalText(k.final) : null),
+      dd('Branch', k.branch), dd('Base', k.base_sha?.slice(0, 12)), dd('Push', isObj(k.push) ? pushText(k.push, k) : null),
+      fact('Ident', identText(td) ?? (td?.push ? noIdent(tg) : null)),
       dd('Created', when(k.created_at)), dd('Updated', when(k.updated_at || f.updated_at)), dd('Id', f.id)),
     ticket && [
       notice(f.id, k.waiting),
@@ -667,6 +669,8 @@ function drawerBody(f, ticket, error) {
         : r?.kind === 'questions' && Array.isArray(r.questions) ? clarifyForm(f.id, r) : el('p', { class: 'hint' }, 'No open questions found.')),
       st === 'plan_approval' && (plan || el('p', { class: 'hint' }, 'No plan found.')),
       ['review', 'qa', 'final_gate'].includes(st) && stageActs(f.id, k),
+      pushView(f.id, k, tg),
+      isObj(k.final) && finalView(f.id, k),
       isObj(k.work) && workView(f.id, k),
       isObj(k.work) && gatesView(f.id),
       isObj(k.review) && reviewView(f.id, k),
@@ -700,7 +704,7 @@ function runBox(id, k) {
     onclick: () => runAction(id, op), ...extra }, op === 'cancel' && sure ? 'Confirm cancel?' : OPS[op]);
   // from blocked: the phase it blocked in, or an earlier one (tb resume --phase)
   const at = s => FLOW_COLS.findIndex(([c]) => c === s);
-  const back = st === 'blocked' ? [...AGENT, 'final_gate'].filter(p => at(p) <= at(k.blocked_from) && !(p === 'qa' && k.kind === 'brainstorm')) : [];
+  const back = st === 'blocked' ? AGENT.filter(p => at(p) <= at(k.blocked_from) && !(p === 'qa' && k.kind === 'brainstorm')) : [];
   const acts = [
     back.length > 1 && el('label', { class: 'pick' }, 'Resume in ',
       el('select', { 'data-role': 'resume-phase', onchange: e => ui.phase.set(id, e.target.value) },
@@ -800,12 +804,13 @@ const reloadOpen = debounce(readOpen, 200);
 
 async function openTicket(id) {
   const d = $('#drawer');
-  if (ui.open !== id) Object.assign(ui, { log: null, ticket: null, round: null, plan: null, arm: null, err: null, ask: null, gates: null, ivs: null, fb: null, pass: null, qa: null, rec: null });
+  if (ui.open !== id) Object.assign(ui, { log: null, ticket: null, round: null, plan: null, arm: null, err: null, ask: null, gates: null, ivs: null, fb: null, pass: null, qa: null, rec: null, final: null });
   ui.open = id;
   drawerBody(flowOf(id), ui.ticket);
   if (!d.open) d.showModal();
   else { d.scrollTop = 0; $('#drawer [data-role="close"]').focus(); } // moved to a parent, child or blocker inside the drawer
-  await readOpen();
+  // M5 C20: the tag's ident + push remote for the drawer, read per open (set by the CLI only; none read = no Push button)
+  await Promise.all([readOpen(), api('GET', '/api/tags').then(j => { ui.tagDefs = j.tags || {}; redraw(); }, () => {})]);
 }
 // A held Enter repeats clicks on the refocused button: the first repeat after 400 ms would confirm Approve or Cancel.
 $('#drawer').addEventListener('keydown', e => { if (e.repeat && e.key === 'Enter' && e.target.closest?.('button')) e.preventDefault(); });
@@ -830,6 +835,8 @@ const SENT = { // button role → [label, label while sending, toast title, toas
   'deny-change': ['Deny change', 'Sending…', 'Change denied', 'A fix session reverts it.'],
   rework: ['Send back', 'Sending…', 'Sent back', 'A fix task works on your feedback.'],
   pass: ['Pass', 'Passing…', 'Passed', 'tbd recorded your pass.'],
+  push: ['Push', 'Pushing…', 'Push started', 'Leak scan first, then git push. The outcome shows in the drawer.'],
+  close: ['Close', 'Closing…', 'Closed', 'The flow is done. Nothing was pushed; the worktree stays until tb gc.'],
   'pass-check': ['Check sha', 'Checking…', '', ''],
 };
 const WAIT = {
@@ -837,6 +844,7 @@ const WAIT = {
   setup_failed: 'Setup failed. The plan stays as approved. Fix the cause, then approve again.',
   assign_failed: 'Auto-assign failed. Fix the cause, then assign it.',
   blocker_cancelled: 'A ticket this one waits for was cancelled. Assign it to go on without it, or cancel this ticket.',
+  blockers_diverge: 'Blockers diverge: no final commit of the tickets this one waits for holds the others, and tbd does not rebase. Cancel it, or re-plan it.',
   // P5: why working blocked (waiting.why says more), then Resume
   infra: 'Blocked: a gate could not run (infra: a missing tool, a port in use, a timeout over the base run). Fix the cause, then Resume.',
   integrity: 'Blocked: node_modules or an env file changed since setup (integrity). Check the worktree, then Resume.',
@@ -847,6 +855,8 @@ const WAIT = {
   // M5.2: QA not proven (a BLOCKED or ASSISTED case, or a 4th fix), the DB guard (a database URL not on this Mac)
   qa: 'Blocked: QA did not prove the change (or a 4th fix was needed). Read the QA below, then Resume.',
   db: 'Blocked: the DB guard refused an env file (a database not on this Mac). Fix the tag\'s env file, then Resume.',
+  // M5.3 C12 C13: squashed, waiting on Irfan
+  close: 'Waits for close: the final gate passed and the squash is made. Close it, push it, or send it back below.',
 };
 const BLOCKS = ['infra', 'integrity', 'config', 'work', 'scope', 'rework', 'qa', 'db'];
 const code = s => el('code', null, vis(s));
@@ -987,9 +997,11 @@ function askPanel(id, k, a) {
     errLine(id, 'work-answer', 'replan', 'scope-allow', 'scope-deny', ...changes.flatMap((_, i) => [`allow-change-${i}`, `deny-change-${i}`])));
 }
 
-// review / qa / final gate while unbuilt (K1 K2): pass it on or send it back. D26 park: pass = push OK.
+// review / qa / final gate while unbuilt (K1 K2): pass it on or send it back. M5.3: a code final gate is built (its
+// end: tb close / tb push; D26's leak_check park is gone, tbd refuses that pass); at waiting close (C13): Close, or send
+// it back (tbd refuses that once a child started: its 409 shows)
 function stageActs(id, k) {
-  const st = k.state, parked = st === 'final_gate' && k.waiting?.reason === 'manual', merged = !!k.pr?.merged_at;
+  const st = k.state, merged = !!k.pr?.merged_at, built = st === 'final_gate' && k.kind === 'code' && !merged, close = built && k.waiting?.reason === 'close';
   const next = st === 'review' && k.kind !== 'brainstorm' ? 'qa' : 'final_gate';
   const d = draftOf(id, 'rw');
   const box = el('textarea', { id: 'rw', rows: 3, maxLength: 65536, 'data-role': 'rework-text', 'aria-describedby': d.errs.rw ? 'rw-err' : null, oninput: e => { d.comment = e.target.value; } });
@@ -1005,16 +1017,39 @@ function stageActs(id, k) {
   };
   return el('section', { class: 'part', 'aria-labelledby': 'sg-h' },
     el('h3', { id: 'sg-h' }, `${stateLabel(st)}: your call`),
-    !merged && !parked && el('p', { class: 'hint' }, 'While this phase is not built you stand in for it: pass the work on, or send it back with feedback.'),
+    !merged && !built && el('p', { class: 'hint' }, 'While this phase is not built you stand in for it: pass the work on, or send it back with feedback.'),
     st !== 'final_gate' && el('div', { class: 'acts' }, armBtn(id, 'pass', 'pass', () => post(id, 'pass', {}, 'pass'), { cls: 'primary', label: `Pass to ${stateLabel(next)}` })),
-    parked && [el('p', null, 'The leak scan parked it here: passing is your push OK.'),
-      el('div', { class: 'acts' }, armBtn(id, 'pass', 'pass', () => post(id, 'pass', {}, 'pass'), { cls: 'primary', label: 'Push OK' }))],
-    st === 'final_gate' && !parked && !merged && passForm(id),
+    built && el('p', { class: 'hint' }, 'tbd runs the final gate: checks, a final review, the squash. Then you close it (tb close) or push it (tb push).'),
+    // role close-flow: data-role close is the drawer's own × (refocus)
+    close && el('div', { class: 'acts' }, armBtn(id, 'close', 'close-flow', () => post(id, 'close', {}, 'close-flow', 'close'), { cls: 'primary', sent: 'close' })),
+    st === 'final_gate' && !built && !merged && passForm(id),
     merged && el('p', { class: 'hint' }, 'Passed with ', code(String(k.pr.sha ?? '').slice(0, 12)), ` at ${when(k.pr.merged_at)}.`),
-    // parked = a BUILT final gate (D26): tbd refuses a rework there (409), so no send-back box
-    !merged && !parked && isObj(k.work) && [el('label', { for: 'rw' }, `Send back to working (sent back ${k.rework ?? 0} times; a 3rd time blocks it)`), box,
+    // a BUILT final gate: tbd refuses a rework there (409) but at waiting close, so the send-back box only then
+    !merged && (!built || close) && isObj(k.work) && [el('label', { for: 'rw' }, `Send back to working (sent back ${k.rework ?? 0} times; a 3rd time blocks it)`), box,
       d.errs.rw && el('p', { class: 'err', id: 'rw-err' }, d.errs.rw), el('div', { class: 'acts' }, armBtn(id, 'rework', 'rework', back))],
-    errLine(id, 'pass', 'pass-check', 'rework'));
+    errLine(id, 'pass', 'pass-check', 'rework', 'close-flow'));
+}
+
+// M5 C14 C20: the tag's ident + push remote, read only (set by the CLI only: tb tag add / tb doctor --tag), and the push
+// state. Push: a tag with a push remote, the flow squashed (final gate waiting close, or done); refused (disabled) without
+// the tag's ident; two clicks, the confirm names remote, branch and sha12. git's why reaches the DOM as text only.
+const tagDef = t => (t && Object.hasOwn(ui.tagDefs, t) ? ui.tagDefs[t] : null);
+const identText = d => (d?.ident ? `${d.ident.name} <${d.ident.email}>` : null);
+const noIdent = t => ['ident not set: run ', code(`tb doctor --tag ${t} --ident`)];
+const pushText = (p, k) => [p.state, `${p.remote ?? ''} ${String(p.ref ?? k.branch ?? '').replace(/^refs\/heads\//, '')}`.trim(), String(p.sha ?? '').slice(0, 12), p.why]
+  .filter(Boolean).join(' · ');
+function pushView(id, k, tag) {
+  const d = tagDef(tag), remote = d?.push?.remote, sha = String(k.final?.sha ?? '');
+  if (!remote || !((k.state === 'final_gate' && k.waiting?.reason === 'close') || (k.state === 'done' && sha))) return null;
+  return el('section', { class: 'part', 'aria-labelledby': 'pu-h' },
+    el('h3', { id: 'pu-h' }, 'Push'),
+    el('p', { class: 'hint' }, 'Sends the squash to the tag\'s push remote: a leak scan first, then git push with a lease. Never automatic.'),
+    !d.ident && el('p', { class: 'err' }, ...noIdent(tag)),
+    // one span: .notice is a grid, so loose text nodes + <code> would each take a row
+    armed(id, 'push') && el('p', { class: 'notice' }, el('span', null, 'Push ', code(sha.slice(0, 12)), ' to ', code(remote), ' as branch ', code(k.branch ?? ''), '?')),
+    el('div', { class: 'acts' }, armBtn(id, 'push', 'push', () => post(id, 'push'), { cls: 'primary', disabled: !d.ident || !sha || k.push?.state === 'running' })),
+    isObj(k.push) && el('p', { class: k.push.state === 'failed' ? 'err' : 'hint' }, 'Last push: ', pushText(k.push, k)),
+    errLine(id, 'push'));
 }
 
 // D9: tbd checks the sha (GET …/pass?sha: every M15 check, nothing written); the confirm shows the full sha + its subject
@@ -1151,18 +1186,48 @@ function reviewView(id, k) {
       el('button', { type: 'button', class: 'ghost', 'data-role': 'review', onclick: () => loadReview(id) }, r ? 'Refresh' : 'Show review')),
     r?.error && el('p', { class: 'hint' }, r.error),
     r?.data && [el('p', { class: 'hint' }, `Review ${r.data.n}: `, el('span', { class: `chip ${r.data.verdict === 'pass' ? 'pass' : 'fail'}` }, vis(r.data.verdict)), r.data.at ? ` · ${when(r.data.at)}` : '', r.data.truncated ? ' · cut to fit' : ''),
-      rows.length ? el('table', { class: 'dtable rtable' }, el('caption', { class: 'sr' }, `Review ${r.data.n}: findings`),
-        // the drawer is 540 px: short fields in one row, the long texts in a full-width row under it
-        el('thead', null, el('tr', null, ...['Id', 'Sev', 'Conf', 'Where', 'State'].map(h => el('th', { scope: 'col' }, h)))),
-        el('tbody', null, ...rows.flatMap(([x, st, why]) => [
-          el('tr', null, el('td', null, code(String(x.id))), el('td', null, vis(x.severity ?? DASH)), el('td', null, vis(x.confidence ?? DASH)),
-            el('td', null, x.where ? code(x.where) : DASH),
-            el('td', null, el('span', { class: `chip ${st === 'open' ? 'fail' : st === 'closed' ? 'pass' : 'warn'}` }, st))),
-          el('tr', { class: 'rdetail' }, el('td', { colSpan: 5 }, ...(st === 'closed' ? [['How fixed', why]] : [['Problem', x.problem], ['Scenario', why], ['Fix', x.fix]])
-            .map(([h, v]) => el('p', null, el('b', null, `${h}: `), vis(v || DASH)))))]))) : el('p', { class: 'hint' }, 'No findings.')]);
+      findingsTable(`Review ${r.data.n}: findings`, rows)]);
+}
+// Review and Final findings, rows [finding, open | need review | closed, scenario or how fixed]. The drawer is 540 px:
+// short fields in one row, the long texts in a full-width row under it.
+function findingsTable(caption, rows) {
+  return rows.length ? el('table', { class: 'dtable rtable' }, el('caption', { class: 'sr' }, caption),
+    el('thead', null, el('tr', null, ...['Id', 'Sev', 'Conf', 'Where', 'State'].map(h => el('th', { scope: 'col' }, h)))),
+    el('tbody', null, ...rows.flatMap(([x, st, why]) => [
+      el('tr', null, el('td', null, code(String(x.id))), el('td', null, vis(x.severity ?? DASH)), el('td', null, vis(x.confidence ?? DASH)),
+        el('td', null, x.where ? code(x.where) : DASH),
+        el('td', null, el('span', { class: `chip ${st === 'open' ? 'fail' : st === 'closed' ? 'pass' : 'warn'}` }, st))),
+      el('tr', { class: 'rdetail' }, el('td', { colSpan: 5 }, ...(st === 'closed' ? [['How fixed', why]] : [['Problem', x.problem], ['Scenario', why], ['Fix', x.fix]])
+        .map(([h, v]) => el('p', null, el('b', null, `${h}: `), vis(v || DASH)))))]))) : el('p', { class: 'hint' }, 'No findings.');
 }
 async function loadReview(id) {
   try { ui.review = { id, data: await api('GET', `/api/tickets/${enc(id)}/report?kind=review`) }; } catch (e) { ui.review = { id, error: e.status === 404 ? 'No review kept yet.' : e.message }; }
+  redraw();
+}
+
+// M5.3 Final (lib/final.js, C11 C13 C20): GET …/report?kind=final (the newest final review: verdict, findings with tbd's
+// blocking rule, the doc paths), ?kind=summary (summary.md: the handoff block) and ?kind=verdict (the verdict doc with
+// tbd's evidence), loaded together on demand; md as text in a <pre>, never rendered; the verification doc as a link to
+// the docs route (tbd checks the path again). Agent text: el() / textContent only, never markup.
+const finalText = f => [f.verdict, f.sha && `squash ${String(f.sha).slice(0, 12)}`, f.tested_sha && `tested ${String(f.tested_sha).slice(0, 12)}`].filter(Boolean).join(' · ') || null;
+function finalView(id, k) {
+  const v = ui.final?.id === id ? ui.final : null, d = v?.final?.data, ver = d && docUrl(id, d.verification_doc);
+  const text = (x, role, label) => (x.text != null ? el('pre', { class: 'log', 'data-role': role, tabindex: '0', 'aria-label': label }, vis(x.text)) : el('p', { class: 'hint' }, x.error));
+  return el('section', { class: 'part', 'aria-labelledby': 'fn-h' },
+    el('div', { class: 'log-head' }, el('h3', { id: 'fn-h' }, 'Final', el('span', { class: 'count' }, `fix ${k.fixes ?? 0}/${ui.fixMax}`)),
+      el('button', { type: 'button', class: 'ghost', 'data-role': 'final', onclick: () => loadFinal(id) }, v ? 'Refresh' : 'Show final')),
+    v && [...(d ? [el('p', { class: 'hint' }, `Final review ${d.n}: `, el('span', { class: `chip ${d.verdict === 'pass' ? 'pass' : 'fail'}` }, vis(d.verdict)), d.at ? ` · ${when(d.at)}` : '', d.truncated ? ' · cut to fit' : ''),
+      findingsTable(`Final review ${d.n}: findings`, d.findings.map(x => [x, x.blocking ? 'open' : 'need review', x.failure_scenario])),
+      el('p', { class: 'hint' }, 'Verification doc: ', ver ? el('a', { href: ver, target: '_blank', rel: 'noopener' }, vis(d.verification_doc)) : code(String(d.verification_doc ?? DASH)))]
+      : [el('p', { class: 'hint' }, v.final.error)]),
+    el('h4', null, 'Summary'), text(v.summary, 'final-summary', 'Summary, as text'),
+    el('h4', null, 'Verdict doc'), text(v.verdict, 'final-verdict', 'Verdict doc with the evidence tbd captured, as text')]);
+}
+async function loadFinal(id) {
+  const get = (kind, none) => api('GET', `/api/tickets/${enc(id)}/report?kind=${kind}`).then(data => ({ data, text: data.text }), e => ({ error: e.status === 404 ? none : e.message }));
+  const [final, summary, verdict] = await Promise.all([get('final', 'No final review kept yet.'),
+    get('summary', 'No summary yet: a passing final review writes it.'), get('verdict', 'No verdict doc yet: it comes with a passing final review.')]);
+  ui.final = { id, final, summary, verdict };
   redraw();
 }
 

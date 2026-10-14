@@ -265,6 +265,16 @@ test('J16 bash-guard planning (TB_PHASE=planning): git that writes, leaves the r
   }
 });
 
+test('D-0107 SEC-6 bash-guard final_gate: git --output (= or spaced), --ext-diff, --textconv, -c / --config-env, VAR= in front denied; plain reads pass; review unchanged (Need Review)', () => {
+  const F = { TB_PHASE: 'final_gate' };
+  for (const c of ['git log --output=x', 'git log -1 --output x', 'git diff --ext-diff base..head', 'git show --textconv HEAD:a',
+    'git -c diff.external=x diff', 'git --config-env=core.pager=X log', 'GIT_EXTERNAL_DIFF=x git diff']) {
+    assert.match(guard(c, F)?.deny ?? 'allowed', /^bash-guard: the final gate (only reads|runs git with no VAR=value)/, c);
+  }
+  for (const c of ['git log -1', 'git diff base..head', 'git show HEAD:src/a.js']) assert.equal(guard(c, F), null, c);
+  assert.equal(guard('git log --output=x', { TB_PHASE: 'review' }), null);
+});
+
 test('P5 D5 RO2 bash-guard working (TB_PHASE=working): npx, npm exec / x, pnpm dlx, yarn dlx denied (also behind env, timeout, sh -c); local bins and npm scripts pass; other phases unchanged', () => {
   const W = { TB_PHASE: 'working' };
   for (const c of ['npx prisma generate', 'npm exec -- jest', 'npm x tsc', 'pnpm dlx create-x', 'yarn dlx foo', 'env CI=1 npx jest', 'timeout 60 npx tsc', "sh -c 'npx -y evil'", 'cd a && /usr/local/bin/npx x', 'npm -y exec x', 'npm --yes exec x', 'npm init x', 'npm create x', 'yarn create x', 'pnpm create x', 'bun x x', 'pnpm --silent dlx x']) {

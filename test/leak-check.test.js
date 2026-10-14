@@ -121,6 +121,16 @@ test('denylist word only in a commit message is refused', () => {
   assert.ok(!out(r).includes(WORD));
 });
 
+test('D-0108 SEC-5 a token only in a commit message is refused by gitleaks (stdin): WHERE = the commit, never the token', () => {
+  const w = world();
+  w.commit('a.txt', 'clean\n', `fix: use ${FAKE_PAT} for now`);
+  const sha = w.git('rev-parse', 'HEAD').stdout.trim();
+  w.commit('b.txt', 'clean\n', 'docs: clean');
+  const r = w.check('HEAD~2..HEAD');
+  assert.equal(r.status, 1, out(r));
+  assert.equal(out(r), `gitleaks github-pat commit message ${sha.slice(0, 12)}\n`);
+});
+
 test('denylist word only in a branch name is refused', () => {
   const w = world();
   w.commit('a.txt', 'clean\n');

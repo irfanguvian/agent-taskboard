@@ -247,9 +247,12 @@ test('P5c reads: gates newest first, paged (default 20, 1-100, cursor n), ≤ 64
   assert.match(cliG.stdout, /help: tb gates t_gat001 --n 24 for older ones\n$/);
 });
 
-test('AC9 M15 tb pass table: review → qa → final gate; final unbuilt (D9, leak_check or not) → --sha checked → done + merged_at + full sha; built + leak_check parked (D26) → waiting manual cleared only; built without → 409; every refusal writes nothing', async (t) => {
+test('AC9 M15 tb pass table: review → qa → final gate; final unbuilt (D9, leak_check or not) → --sha checked → done + merged_at + full sha; built (leak_check or not; M5 C13, was D26) → 409 tb close / tb push; every refusal writes nothing', async (t) => {
   const files = {
     'tags.json': TAGS,
+    // M5.3: code/final_gate is built and an agent phase: no run slot, so the runner never starts one for the built final
+    // gates below (it only sets their wait: slot) and their pass refusals stay the thing tested
+    'config.json': { max_concurrent: 0 },
     'tickets/t_neg001/ticket.json': T('t_neg001', { state: 'final_gate' }),
     'tickets/t_d9nol1/ticket.json': T('t_d9nol1', { state: 'final_gate' }),
     'tickets/t_d9lek1/ticket.json': T('t_d9lek1', { state: 'final_gate', tag: 'acme/leak' }),
@@ -308,13 +311,13 @@ test('AC9 M15 tb pass table: review → qa → final gate; final unbuilt (D9, le
   assert.deepEqual([k('t_d9lek1').state, k('t_d9lek1').pr.sha, ivs(tbd, 't_d9lek1')], ['done', squash, [['ui', 'pass', null]]]);
   assert.equal((await pass('t_d9nol1', { sha: squash })).status, 409, 'done: nothing to pass');
 
-  // D26: built final gate + leak_check parked → waiting cleared, state kept, no pr; a sha is refused; no leak_check → 409
-  assert.equal((await pass('t_d26ok1', { sha: squash })).status, 400);
-  assert.equal((await pass('t_d26ok1', {})).status, 200);
-  assert.deepEqual([k('t_d26ok1').state, k('t_d26ok1').waiting, k('t_d26ok1').pr], ['final_gate', null, undefined]);
-  assert.equal((await pass('t_d26ok1', {})).status, 409, 'not parked any more');
-  const built = await pass('t_d26no1', {});
-  assert.deepEqual([built.status, built.json.error], [409, 't_d26no1: phase code/final_gate is built; the runner moves it']);
+  // M5 C13 (K2 contract change; was D26: a leak_check park passed = waiting cleared): a built final gate is never passed,
+  // leak_check or not, sha or not → 409 tb close / tb push; nothing written (the runner owns its wait: no intervention)
+  for (const [id, body] of /** @type {[string, any][]} */ ([['t_d26ok1', {}], ['t_d26ok1', { sha: squash }], ['t_d26no1', {}]])) {
+    const built = await pass(id, body);
+    assert.deepEqual([built.status, built.json.error], [409, `${id}: phase code/final_gate is built: use tb close / tb push`], JSON.stringify(body));
+  }
+  assert.deepEqual(['t_d26ok1', 't_d26no1'].map((id) => [k(id).pr, fs.existsSync(tk(tbd, id, 'interventions.jsonl'))]), [[undefined, false], [undefined, false]]);
 
   // review → qa → final gate (brainstorm: review → final gate); a sha before the final gate is refused
   assert.equal((await pass('t_rev001', { sha: squash })).status, 400);

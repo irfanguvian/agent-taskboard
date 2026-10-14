@@ -74,9 +74,22 @@ git -c core.quotepath=false log -m --name-only --no-color --format='commit %H' $
   /^commit [0-9a-f]+$/ { sha = substr($2, 1, 12); next }
   length { print sha " path\t" $0 }' | scan || die "path scan failed"
 # shellcheck disable=SC2086
-git log --format='commit %H%n%B' $range | awk '
-  /^commit [0-9a-f]+$/ { sha = substr($2, 1, 12); next }
-  { print "commit message " sha "\t" $0 }' | scan || die "message scan failed"
+git log --format='commit %H%n%B' $range > "$tmp/msgs" || die "message read failed"
+awk '/^commit [0-9a-f]+$/ { sha = substr($2, 1, 12); next }
+  { print "commit message " sha "\t" $0 }' "$tmp/msgs" | scan || die "message scan failed"
+# D-0108 (SEC-5): gitleaks reads patches only; the messages go through its stdin scan, same config. Its CSV report (secrets
+# redacted) gives the line of each finding: the commit is the last "commit <sha>" line before it. Only a rule id and the
+# line number are read from a row (a quoted field with a comma shifts them: then "?", or no line → a WHERE-less hit).
+gitleaks stdin --redact --no-banner --no-color --exit-code 99 -c "$tmp/gitleaks.toml" -i "$tmp/noignore" --ignore-gitleaks-allow \
+  -f csv -r "$tmp/glm.csv" < "$tmp/msgs" > "$tmp/glm.out" 2>&1
+case $? in
+  0) ;;
+  99) awk 'NR == FNR { if (FNR > 1 && split($0, f, ",") >= 7 && f[7] ~ /^[0-9]+$/) hit[f[7]] = hit[f[7]] " " (f[1] ~ /^[A-Za-z0-9_.-]+$/ ? f[1] : "?"); next }
+           /^commit [0-9a-f]+$/ { sha = substr($2, 1, 12) }
+           FNR in hit { print "gitleaks" hit[FNR] " commit message " sha; n++ }
+           END { if (!n) print "gitleaks commit message" }' "$tmp/glm.csv" "$tmp/msgs" | tee -a "$tmp/hits" || die "cannot read gitleaks output" ;;
+  *) die "gitleaks failed: $(tail -n 3 "$tmp/glm.out")" ;;
+esac
 # Annotated tags on a commit in the range travel with the push; their message is text nobody else scans.
 # After the header block (object/type/tag/tagger: the tagger email is not scanned, D34) comes the message.
 git for-each-ref --format='%(objecttype) %(refname)' refs/tags | while read -r kind ref; do

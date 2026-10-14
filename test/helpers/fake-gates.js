@@ -2,7 +2,7 @@
 // Test preload (NODE_OPTIONS=--require <this>, after run-spy.js) for the P5a working tests. Production never loads it;
 // lib/gates is never required here (the RAM test reads require.cache through it).
 // 1. lib/working.js gets scripted gates (setGates, first wins): each call takes the next step of
-//    TB_HOME/fake-gates/<ticket>.json {task: [step], working: [step], base: [step], openapi: [step]} (missing → green);
+//    TB_HOME/fake-gates/<ticket>.json {task: [step], working: [step], final: [step], base: [step], openapi: [step]} (missing → green);
 //    the step count per kind is kept in <ticket>.<kind>.n, so a restarted tbd goes on. A step is merged into a whole
 //    GateResult (head = the worktree's real HEAD) and saved as tickets/<id>/gates/NN.json, as lib/gates does. Like the real
 //    gate: integrity.ok false → class integrity; step.allow: [paths] → a scope ask unless the call's allow covers them.
@@ -102,7 +102,7 @@ async function gate(kind, o) {
 const restored = new Set(); // tickets whose swap was restored once (restore_ms slows only that one)
 working.setGates({
   runTaskGate: (o) => gate('task', o),
-  runWorkingGate: (o) => gate('working', o),
+  runWorkingGate: (o) => gate(o.kind === 'final' ? 'final' : 'working', o), // M5 C10: the final checks' steps under `final`
   runBaseChecks: async (o) => {
     const s = await step(o.t.id, 'base');
     await log({ fn: 'base', ticket: o.t.id });

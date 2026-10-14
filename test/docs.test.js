@@ -11,7 +11,7 @@ const path = require('node:path');
 const ROOT = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'docs-')));
 after(() => fs.rmSync(ROOT, { recursive: true, force: true }));
 process.env.TB_HOME = path.join(ROOT, 'tb');
-const { mirror } = require('../lib/docs');
+const { mirror, clean } = require('../lib/docs');
 
 let seq = 0;
 // a worktree holding files (string → a file, {link} → a symlink, {hard} → a hard link, {size} → a sparse file)
@@ -76,4 +76,32 @@ test('C8 mirror caps: a file over 5 MB, past 20 MB in all, past 200 entries → 
   const many = world(Object.fromEntries(Array.from({ length: 205 }, (_, i) => [`docs/verification/${String(i).padStart(3, '0')}.md`, 'x'])));
   assert.deepEqual(await mirror(many.t), { copied: 200, skipped: 1 }); // the 201st entry ends the walk
   assert.equal(many.mirrored().length, 200);
+});
+
+// M5.3 (D-0105 stuck path): QA and the final review may edit a tracked doc; the visit's end puts it back to HEAD (the
+// mirror kept their copy), so the next final gate never meets a tracked change. A repo without docs dirs: nothing to do.
+test('M5.3 clean: untracked docs out; a tracked doc edited or deleted back to HEAD; a change outside the docs dirs kept; no docs dirs → no error', async () => {
+  const { execFileSync } = require('node:child_process');
+  const git = (cwd, ...a) => execFileSync('/usr/bin/git', ['-C', cwd, ...a], { encoding: 'utf8', env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } });
+  const w = world({ 'docs/verification/old.md': '# old\n', 'docs/verdicts/v.md': '# v\n', 'src/a.js': 'a\n' });
+  git(w.wt, 'init', '-q');
+  git(w.wt, 'add', '.');
+  git(w.wt, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'base');
+  fs.writeFileSync(path.join(w.wt, 'docs/verification/old.md'), 'require("x")\n');
+  fs.rmSync(path.join(w.wt, 'docs/verdicts/v.md'));
+  fs.writeFileSync(path.join(w.wt, 'docs/verification/new.md'), 'new\n');
+  fs.writeFileSync(path.join(w.wt, 'src/a.js'), 'b\n');
+  await clean(w.t);
+  assert.deepEqual([fs.readFileSync(path.join(w.wt, 'docs/verification/old.md'), 'utf8'), fs.readFileSync(path.join(w.wt, 'docs/verdicts/v.md'), 'utf8')], ['# old\n', '# v\n']);
+  assert.equal(git(w.wt, 'status', '--porcelain'), ' M src/a.js\n', 'only the change outside the docs dirs is left');
+  const bare = world({ 'src/a.js': 'a\n' });
+  git(bare.wt, 'init', '-q');
+  await clean(bare.t); // resolves: no docs dirs, nothing tracked there
+});
+
+test('M5.3 L4 mirror first: the result\'s docs are copied before the walk (205 other docs can\'t use the entry cap up first); one with a .. segment is never copied (its dest would leave the docs mirror)', async () => {
+  const w = world({ ...Object.fromEntries(Array.from({ length: 205 }, (_, i) => [`docs/verification/${String(i).padStart(3, '0')}.md`, 'x'])), 'docs/verdicts/v.md': '# v\n', 'summary.md': 'forged\n' });
+  await mirror(w.t, ['docs/verdicts/v.md', 'docs/verdicts/../../summary.md']);
+  assert.ok(w.mirrored().includes('verdicts/v.md'), 'the verdict doc mirrored though the walk stopped at 200 entries in verification/');
+  assert.equal(fs.existsSync(path.join(w.out, 'summary.md')), false, 'never tickets/<id>/summary.md');
 });
