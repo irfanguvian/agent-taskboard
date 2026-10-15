@@ -47,6 +47,14 @@ main() {
   mkdir -p "$TBHOME"
   (umask 077; echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) $prev -> $full" >> "$TBHOME/deploy.log")
   chmod 600 "$TBHOME/deploy.log" # a log from an older deploy keeps its old mode otherwise
+  # M5.4 C18: the pinned lavish renderer, lockfile + integrity, no install scripts (A03). A sha without it (rollback) skips;
+  # a failed install never stops the deploy: Clarify still works in the board and tb answer (tb doctor shows the fail).
+  if [ -f "$LIVE/tools/lavish/package-lock.json" ]; then
+    # npm's #!/usr/bin/env node must find D30's node, not one from the caller's PATH; fetch capped (old tbd runs meanwhile)
+    PATH="$(dirname "$NODE"):$PATH" "$(dirname "$NODE")/npm" ci --ignore-scripts --no-audit --no-fund --fetch-timeout=20000 --fetch-retries=1 \
+      --prefix "$LIVE/tools/lavish" >/dev/null ||
+      echo "deploy: lavish install failed; Clarify works in the board + tb answer (see tb doctor)" >&2
+  fi
   echo "deployed $full (was $prev)"
   [ "$prev" = none ] || echo "rollback: scripts/deploy $prev"
   [ "$restart" = 0 ] || launchctl kickstart -k "$DOMAIN/$LABEL"

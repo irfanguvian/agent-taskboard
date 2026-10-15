@@ -145,19 +145,21 @@ test('AC3 U1 U2 J6 J7: assign guards (blocker not merged, base ref missing, work
 test('U3 U4 J3: schema-invalid, changed locked decision, must_ask + plan, unknown skill, child cycle → resumed once with the reason → Blocked (or accepted); plan → plan_approval; U7 opus refusal → Blocked', async (t) => {
   const bad = (out) => ({ steps: [result(out)], resume_steps: [result(out)] });
   const tbd = await boot(t, {
-    t_okpl01: { scenario: { steps: [result(PLAN)] } },
+    t_okpl01: { locked_decisions: [D1], scenario: { steps: [result(PLAN)] } }, // D-0116: past round 1 (an inherited lock), so a plan may come
+    t_frsh01: { scenario: bad(PLAN) }, // D-0116 I1: a fresh ticket's round-0 plan is refused
+    t_frsq01: { scenario: { steps: [result(QUESTIONS)] } }, // D-0116 I1: its questions are taken
     t_schm01: { scenario: bad({ ...PLAN, tasks: [] }) },
     t_lock01: { locked_decisions: [D1], scenario: bad({ ...PLAN, decisions: [{ ...D1, text: 'offset' }] }) },
     t_must01: { must_ask: true, scenario: { steps: [result(PLAN)], resume_steps: [result(QUESTIONS)] } },
-    t_skil01: { scenario: bad({ ...PLAN, skills: ['learning', 'no-such-skill'] }) },
-    t_chld01: { scenario: { steps: [result({ ...PLAN, children: [{ ...PLAN.children[0], blocked_by: ['C2'] }, PLAN.children[1]] })], resume_steps: [result(PLAN)] } },
+    t_skil01: { locked_decisions: [D1], scenario: bad({ ...PLAN, skills: ['learning', 'no-such-skill'] }) },
+    t_chld01: { locked_decisions: [D1], scenario: { steps: [result({ ...PLAN, children: [{ ...PLAN.children[0], blocked_by: ['C2'] }, PLAN.children[1]] })], resume_steps: [result(PLAN)] } },
     t_rfse01: { scenario: { steps: ['refusal'] } },
   }, { env: { FAKE_CLAUDE_SCENARIO: 'scenario.json' } }); // <cwd = ticket dir>/scenario.json
-  const blocked = ['t_schm01', 't_lock01', 't_skil01', 't_rfse01'];
-  const ids = [...blocked, 't_okpl01', 't_must01', 't_chld01'];
+  const blocked = ['t_schm01', 't_lock01', 't_skil01', 't_rfse01', 't_frsh01'];
+  const ids = [...blocked, 't_okpl01', 't_must01', 't_chld01', 't_frsq01'];
   await until(() => ids.every((id) => read(tbd, id).lease?.exit && !read(tbd, id).lease.pending && read(tbd, id).state !== 'planning'), 60_000, 'every ticket left planning');
   const states = Object.fromEntries(ids.map((id) => [id, read(tbd, id).state]));
-  assert.deepEqual(states, { t_schm01: 'blocked', t_lock01: 'blocked', t_skil01: 'blocked', t_rfse01: 'blocked', t_okpl01: 'plan_approval', t_must01: 'clarify', t_chld01: 'plan_approval' });
+  assert.deepEqual(states, { t_schm01: 'blocked', t_lock01: 'blocked', t_skil01: 'blocked', t_rfse01: 'blocked', t_frsh01: 'blocked', t_okpl01: 'plan_approval', t_must01: 'clarify', t_chld01: 'plan_approval', t_frsq01: 'clarify' });
   const prompt = (id, n) => fs.readFileSync(tk(tbd, id, 'runs', `${n}.prompt`), 'utf8');
   const runs = (id) => fs.readdirSync(tk(tbd, id, 'runs')).filter((f) => f.endsWith('.prompt')).length;
   // the reject reason reaches the resume (same session), once; a second refusal blocks
@@ -165,6 +167,7 @@ test('U3 U4 J3: schema-invalid, changed locked decision, must_ask + plan, unknow
     ['t_schm01', 'the result does not match the schema: /tasks: must have at least 1 item'],
     ['t_lock01', `decisions[0] "D1": Irfan locked it as "cursor, not offset": return his text exactly or leave it out`], // J17 (was: echo it exactly once)
     ['t_must01', 'Irfan asked to be asked more first (must_ask)'],
+    ['t_frsh01', 'round 1 must be questions (no answers or locked decisions yet)'],
     ['t_skil01', 'unknown skills "no-such-skill"'],
     ['t_chld01', 'children blocked_by form a cycle: "C1", "C2"'],
   ]) {
@@ -266,6 +269,7 @@ test('item 8 E2E (U8 U9 J3 J12 AC3 AC4 AC8): assign → questions → tb answer 
     [{ answers: {}, extra: 1 }, 400, /body must be/]])) {
     const r = await post('answer', body);
     assert.deepEqual([r.status, re.test(r.json.error), k().state], [status, true, 'clarify'], `${JSON.stringify(body)}: ${r.json.error}`);
+    assert.equal(fs.existsSync(tk(tbd, id, 'interventions.jsonl')), false, `D-0117: a refused answer writes no intervention row: ${JSON.stringify(body)}`);
   }
   const file = path.join(ROOT, `answers-${process.pid}.json`);
   fs.writeFileSync(file, JSON.stringify({ Q1: { pick: '50' }, Q2: { use: 'recommended' }, Q3: { use: 'you_decide' } }));
@@ -369,7 +373,7 @@ test('item 8 E2E (U8 U9 J3 J12 AC3 AC4 AC8): assign → questions → tb answer 
   assert.equal(m.length, 1);
   assert.deepEqual({ ...m[0], phase_minutes: Object.keys(m[0].phase_minutes).sort() }, {
     t: 'ticket', ticket: id, kind: 'code', tag: 'acme/api', outcome: 'cancelled', rounds: 4, decisions: { you: 3, ticket: 0, adr: 0, planner: 1 },
-    rework: 0, interventions: 0, phase_minutes: ['planning', 'working'], pr_edited: null, fix_of: null,
+    rework: 0, interventions: 2, phase_minutes: ['planning', 'working'], pr_edited: null, fix_of: null,
   });
   assert.ok(Object.values(m[0].phase_minutes).every(Number.isInteger));
 });
@@ -567,7 +571,7 @@ test('J15 J16 J17 runner: a rule broken at base_sha → resumed once with the re
   const d = tbd.dumps().find((x) => x.prompt === seed);
   assert.deepEqual([d.env.TB_PHASE, d.env.TB_PLAN_CTX], ['planning', tk(tbd, 't_rule01', 'runs', '1.plan-ctx.json')]);
   // P5 RO4 (contract change; was without test_scripts): the tag's test_scripts regex (default) rides along for the hook
-  assert.deepEqual(json(d.env.TB_PLAN_CTX), { locked: [L1], must_ask: false, skills: ['learning'], base_sha: base, cwd: wtRule, test_scripts: '^test(:|$)' });
+  assert.deepEqual(json(d.env.TB_PLAN_CTX), { locked: [L1], must_ask: false, round1: false, skills: ['learning'], base_sha: base, cwd: wtRule, test_scripts: '^test(:|$)' });
 
   // J16: the run wrote to its worktree → Blocked, its result not kept, one alert naming the file
   const k = read(tbd, 't_dirt02');

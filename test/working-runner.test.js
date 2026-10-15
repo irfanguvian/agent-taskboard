@@ -71,13 +71,13 @@ test('m4: Resume out of Blocked (a recovery run) keeps the round-start dirty bas
 
 test('m12: a planning run with no baseline at all (a recovery of an older lease) is judged on its own: a clean result is taken', async (t) => {
   const lease = { gen: 1, pid: null, lstart: '', pgid: null, phase: 'planning', round: 1, task: null, session: crypto.randomUUID(), log: 'runs/1.jsonl', exit: 'crash', failure: true, started_at: NOW, ended_at: NOW, last_event_at: NOW };
-  const { k } = await boot(t, { round: 1, lease }, [{ steps: [plan] }]);
+  const { k } = await boot(t, { round: 1, lease, locked_decisions: [{ id: 'R1Q1', text: 'Page size? → 50', source: 'answer:R1Q1' }] }, [{ steps: [plan] }]); // D-0116: past round 1, so a plan may come
   await until(() => k().state === 'plan_approval', 30_000, 'plan taken');
   assert.equal(k().plan_dirty, undefined, 'no baseline was taken by the recovery');
 });
 
 test('K4: an empty keep on a first plan (no work yet) is no keep: taken, no resume', async (t) => {
-  const { k, tbd, id } = await boot(t, { round: 1 }, [{ steps: [{ result: { structured_output: { ...PLAN, keep: [] } } }] }]);
+  const { k, tbd, id } = await boot(t, { round: 1, locked_decisions: [{ id: 'R1Q1', text: 'Page size? → 50', source: 'answer:R1Q1' }] }, [{ steps: [{ result: { structured_output: { ...PLAN, keep: [] } } }] }]); // D-0116: past round 1
   await until(() => k().state === 'plan_approval', 30_000, 'plan taken');
   assert.equal(fs.existsSync(path.join(tbd.tbHome, 'tickets', id, 'runs', '2.jsonl.gz')), false, 'no resume');
 });

@@ -98,12 +98,23 @@ function world(auth = AUTH.ok) {
   fakeClaude(bin, { authFile });
   fs.writeFileSync(authFile, JSON.stringify(auth));
   const codesign = fakeCodesign(path.join(root, 'codesign'));
+  // M5.4 C18: lavish pinned + installed at the pin (each test may rewrite either file)
+  const lavishDir = path.join(root, 'lavish');
+  const setLavish = (installed) => {
+    fs.rmSync(path.join(lavishDir, 'node_modules'), { recursive: true, force: true });
+    if (!installed) return;
+    fs.mkdirSync(path.join(lavishDir, 'node_modules', 'lavish-axi'), { recursive: true });
+    fs.writeFileSync(path.join(lavishDir, 'node_modules', 'lavish-axi', 'package.json'), JSON.stringify({ name: 'lavish-axi', version: installed }));
+  };
+  fs.mkdirSync(lavishDir);
+  fs.writeFileSync(path.join(lavishDir, 'package.json'), JSON.stringify({ private: true, dependencies: { 'lavish-axi': '0.1.86' } }));
+  setLavish('0.1.86');
   const w = {
-    root, home, tbHome, authFile, bin, node, codesign,
+    root, home, tbHome, authFile, bin, node, codesign, lavishDir, setLavish,
     versions: path.join(home, '.local', 'share', 'claude', 'versions'),
     setAuth: (a) => fs.writeFileSync(authFile, JSON.stringify(a)),
     store: fakeStore(bin),
-    make: (extra = {}) => createDoctor({ store: w.store, env: { PATH: process.env.PATH }, home, tbHome, codesign: codesign.path, ...extra }),
+    make: (extra = {}) => createDoctor({ store: w.store, env: { PATH: process.env.PATH }, home, tbHome, codesign: codesign.path, lavishDir, ...extra }),
     check: (res, name) => res.checks.find((c) => c.name === name),
   };
   return w;
@@ -167,6 +178,22 @@ describe('claude_bin, fable_billing, node', () => {
     assert.match(w.check(await d.run({}), 'claude_bin').detail, /missing or not executable/);
     fs.writeFileSync(w.store.config.claude_bin, '#!/bin/sh\n', { mode: 0o644 });
     assert.match(w.check(await d.run({}), 'claude_bin').detail, /missing or not executable/, 'not executable');
+  });
+
+  test('M5.4 C18 lavish: installed at the pin passes; another version or none installed fails with the npm ci fix; interview.lavish false skips', async () => {
+    const w = world();
+    const d = w.make();
+    assert.deepEqual(w.check(await d.run({}), 'lavish'), { name: 'lavish', ok: true, detail: `0.1.86 (TB_LAVISH_DIR override: ${w.lavishDir})` });
+    w.setLavish('0.1.88');
+    let c = w.check(await d.run({}), 'lavish');
+    assert.equal(c.ok, false);
+    assert.equal(c.detail, 'installed 0.1.88, pinned 0.1.86');
+    assert.equal(c.fix, `npm ci --ignore-scripts --prefix ${w.lavishDir}`);
+    w.setLavish(null);
+    c = w.check(await d.run({}), 'lavish');
+    assert.deepEqual([c.ok, c.detail], [false, 'lavish-axi 0.1.86 not installed']);
+    w.store.config.interview = { lavish: false };
+    assert.equal(w.check(await d.run({}), 'lavish').ok, true);
   });
 
   test('fable_billing: plan / credits_ok / credits_no are reported, anything else fails', async () => {
@@ -605,7 +632,7 @@ describe('run: doctor.json', () => {
     const d = w.make({ now: () => new Date('2026-10-08T00:00:00Z') });
     const res = await d.run({});
     assert.equal(res.ok, true);
-    assert.deepEqual(res.checks.map((c) => c.name), ['auth', 'claude_bin', 'fable_billing', 'node', 'config']);
+    assert.deepEqual(res.checks.map((c) => c.name), ['auth', 'claude_bin', 'fable_billing', 'node', 'lavish', 'config']);
     const file = path.join(w.tbHome, 'doctor.json');
     assert.equal(fs.statSync(file).mode & 0o777, 0o600);
     assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), { at: '2026-10-08T00:00:00.000Z', ok: true, checks: res.checks });
@@ -715,7 +742,7 @@ describe('e2e: POST /api/doctor and tb doctor on a real tbd', () => {
     assert.equal((await t.api('POST', '/api/doctor', { version: '2.1.295' })).status, 400);
     const r = await t.api('POST', '/api/doctor', {});
     assert.equal(r.status, 200);
-    assert.deepEqual(r.json.checks.map((c) => [c.name, c.ok]), [['auth', true], ['claude_bin', true], ['fable_billing', true], ['node', true], ['config', true]]);
+    assert.deepEqual(r.json.checks.map((c) => [c.name, c.ok]), [['auth', true], ['claude_bin', true], ['fable_billing', true], ['node', true], ['lavish', true], ['config', true]]);
     assert.equal(r.json.checks.at(-1).warn, undefined, 'D-0080: a fresh config.json changes no default');
     assert.equal(r.json.ok, true);
     assert.equal(fs.statSync(path.join(t.tbHome, 'doctor.json')).mode & 0o777, 0o600);
@@ -760,13 +787,13 @@ describe('e2e: POST /api/doctor and tb doctor on a real tbd', () => {
     fs.writeFileSync(authFile, JSON.stringify(AUTH.apiKey));
     const bad = await tb('doctor');
     assert.equal(bad.code, 1, bad.stdout);
-    assert.match(bad.stdout, /^doctor: FAIL \(1 of 5 checks\)$/m);
+    assert.match(bad.stdout, /^doctor: FAIL \(1 of 6 checks\)$/m);
     assert.match(bad.stdout, /^ {2}auth,fail,"authMethod apiKey: runs must use the claude\.ai subscription",/m);
     fs.writeFileSync(authFile, JSON.stringify(AUTH.ok));
     const good = await tb('doctor');
     assert.equal(good.code, 0, good.stdout);
     assert.match(good.stdout, /^doctor: ok$/m);
-    assert.match(good.stdout, /^checks\[5\]\{name,status,detail,fix\}:$/m);
+    assert.match(good.stdout, /^checks\[6\]\{name,status,detail,fix\}:$/m);
     assert.match(good.stdout, /^ {2}fable_billing,ok,plan,""$/m);
   });
 

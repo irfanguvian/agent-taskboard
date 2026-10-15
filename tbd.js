@@ -20,6 +20,7 @@ require('./lib/review'); // registers the code/review handler, seed + next hook 
 require('./lib/qa'); // registers the code/qa handler, seed + next hook (M5 C5)
 require('./lib/final'); // registers the code/final_gate handler, seed + next hook, tells working.js a final gate's result (M5 C10-C13)
 const pass = require('./lib/pass');
+const interview = require('./lib/interview'); // M5.4 C18: Clarify rounds on a lavish page
 const metrics = require('./lib/metrics');
 
 // P5 Wire: lib/gates loads with the first gate job, never at boot (RAM). First wins: a test preload's fakes stay.
@@ -62,6 +63,7 @@ async function stop(code = 0) {
   if (stopping) return;
   stopping = true;
   monitor?.stop();
+  interview.stop(); // its polls end; the next tbd polls again
   server.close();
   server.closeAllConnections();
   await working.stop(); // gate jobs aborted (shutdown) + killed: their gates run again after the restart
@@ -84,6 +86,7 @@ function boot() {
     store.init();
     notifier = createNotifier({ store, system: () => monitor?.snapshot() ?? null }); // D-0079: RAM free in a memory wait's banner
     store.on('transition', (t) => metrics.ticket(t, store.ticketDir(t.id))); // AC8: t:ticket on done, blocked, cancelled
+    store.on('transition', interview.onTransition); // M5.4 X5: a planning clarify round opens its page; leaving it ends it
   } catch (e) {
     die(e.message);
   }
@@ -103,6 +106,7 @@ function boot() {
       autoAssign: planning.autoAssign, // J5: approval-made children, once their blockers are merged / done
     });
     planning.lostSetups(runner.alert); // an approve's setup dies with its tbd: waiting setup → setup_failed (J12)
+    await interview.boot({ alert: runner.alert }).catch((e) => console.error(`tbd: lavish boot: ${e.message}`)); // orphan polls, leftover sends (D-0119), open rounds polled again; before runs start (no round opens meanwhile)
     monitor.on('wake', (e) => runner.wake(e)); // §8 sleep: the OS wake carries the slept time; a wall jump alone is a hint
     await working.boot(); // P5: pre-P5 working tickets get a work cursor; a swap left by a killed tbd is restored first
     pass.watch({ alert: runner.alert }); // parents waiting on children: one alert per newly blocked child

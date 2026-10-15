@@ -92,7 +92,8 @@ async function approved(t, { tasks, planOver = {}, gates = {}, sessions = [], ta
   const files = {
     'config.json': CONFIG,
     'tags.json': { acme: {}, 'acme/api': { type: 'git', path: dir, base: 'main', env_files: ['.env.test'], checks: { unit: 'npm test' }, ...tag } },
-    [`tickets/${id}/ticket.json`]: ticket(id, { state: 'plan_approval', tag: 'acme/api', title: 'users work', base_sha: base, worktree: wt, round: 3, ...ticketOver }),
+    [`tickets/${id}/ticket.json`]: ticket(id, { state: 'plan_approval', tag: 'acme/api', title: 'users work', base_sha: base, worktree: wt, round: 3,
+      locked_decisions: [{ id: 'R1Q1', text: 'Page size? → 50', source: 'answer:R1Q1' }], ...ticketOver }), // D-0116: past round 1, so a replan may plan at once,
     ...Object.fromEntries(Object.entries(extra).map(([f, v]) => [`tickets/${id}/${f}`, v])),
     [`tickets/${id}/rounds/01-plan.json`]: p,
     [`fake-gates/${id}.json`]: gates,

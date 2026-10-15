@@ -6,6 +6,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const http = require('node:http');
+const { lavishDir } = require('./fake-lavish');
 
 const REPO = path.join(__dirname, '..', '..');
 const TBD = path.join(REPO, 'tbd.js');
@@ -16,7 +17,7 @@ process.on('exit', () => children.forEach((c) => c.kill('SIGKILL')));
 // Inherited env minus every TB_* / TBX_* var, plus the isolated paths and the tbd's test run key (SLOT_ROOT).
 function isolatedEnv({ home, tbHome, port, runKey = undefined }, extra = {}) {
   const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^TB[DX]?_/.test(k))); // TB_, TBX_, TBD_SOCK: never a parent tbd's
-  return { ...env, HOME: home, TB_HOME: tbHome, TB_PORT: String(port), TB_NOTIFY: '0', ...(runKey && { TBX_RUN: runKey }), ...extra };
+  return { ...env, HOME: home, TB_HOME: tbHome, TB_PORT: String(port), TB_NOTIFY: '0', TB_LAVISH_DIR: lavishDir(), ...(runKey && { TBX_RUN: runKey }), ...extra };
 }
 
 // Raw HTTP so tests control every header (fetch refuses to set Host). agent: false = a fresh socket each time: tbd

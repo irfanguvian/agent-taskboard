@@ -1,0 +1,21 @@
+session:
+  file: /tmp/tbfix/interview/t_fix001-r01/page.html
+  status: feedback
+prompts[2]:
+  - uid: "1"
+    prompt: "Q1: 20\n\nContext data:\n{\n  \"question\": \"Q1\",\n  \"kind\": \"pick\",\n  \"value\": \"20\",\n  \"nonce\": \"{{NONCE}}\",\n  \"round\": 1\n}"
+    selector: "html > body > form:nth-of-type(1)"
+    tag: tb-answer
+    text: "Q1: 20"
+  - uid: "2"
+    prompt: "Q2: hello from the page\n\nContext data:\n{\n  \"question\": \"Q2\",\n  \"kind\": \"text\",\n  \"value\": \"hello from the page\",\n  \"nonce\": \"{{NONCE}}\",\n  \"round\": 1\n}"
+    selector: "html > body > form:nth-of-type(2)"
+    tag: tb-answer
+    text: "Q2: hello from the page"
+    target:
+      kind: element
+      selector: form
+    attachments[1]{id,path,mime,width,height}:
+      a1,/tmp/tbfix/a1.png,image/png,10,10
+next_step: Apply the requested changes to /tmp/tbfix/interview/t_fix001-r01/page.html.
+dom_snapshot: "uid=3 body \"Questions\""

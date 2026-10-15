@@ -12,7 +12,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { execFileSync, spawn } = require('node:child_process');
 const sh = require('../lib/sh');
-const { check, testArgv, parseAllowed, isAllowed, markAllowed } = require('../lib/plan-rules');
+const { check, ctxOf, testArgv, parseAllowed, isAllowed, markAllowed } = require('../lib/plan-rules');
 
 const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'plan-rules-'));
 after(() => fs.rmSync(ROOT, { recursive: true, force: true }));
@@ -44,7 +44,7 @@ const git = (args, input) => {
   return sh('/usr/bin/git', ['-C', REPO, ...args], { env: GIT_ENV, timeout: 10_000, input });
 };
 const LOCKED = [{ id: 'R1Q1', text: 'Page size? → 50', source: 'answer:R1Q1' }, { id: 'R2C', text: 'keep /users/all', source: 'reject:R2' }];
-const ctx = (over = {}) => ({ locked: LOCKED, must_ask: false, skills: ['learning'], base_sha: BASE, cwd: REPO, git, ...over });
+const ctx = (over = {}) => ({ locked: LOCKED, must_ask: false, round1: false, skills: ['learning'], base_sha: BASE, cwd: REPO, git, ...over });
 const T1 = { id: 'T1', title: 'cursor pagination', files: ['src/users.js', 'src/cursor.js'], modules: ['src'], blocked_by: [], acceptance: ['A1'], type: 'new', test_cmd: 'npm test', steps: ['add a cursor param to list()'] };
 const T2 = { id: 'T2', title: 'keep /users/all', files: ['src/users.js'], modules: ['src', 'docs/adr/'], blocked_by: ['T1'], acceptance: ['A2'], type: 'preserve', test_cmd: 'npm test -- src/users.js src/users.test.js', steps: ['route /users/all to the old list()'] };
 const PLAN = {
@@ -82,6 +82,9 @@ test('J16 J17 J18: one negative per rule group → its exact reason, no other', 
     ['shape: questions + plan fields', { ...QUESTIONS, summary: 'x', tasks: [] }, {}, ['kind "questions" carries plan fields summary, tasks: leave them out']],
     ['shape: plan missing a field', (({ ui: _ui, ...p }) => p)(PLAN), {}, ['a plan needs ui']],
     ['must_ask + plan', PLAN, { must_ask: true }, ['Irfan asked to be asked more first (must_ask)']],
+    ['D-0116 round 1 is questions', PLAN, { round1: true }, ['round 1 must be questions (no answers or locked decisions yet)']],
+    ['I5 recommended listed first', qs({ recommended: '50' }), {}, ['questions[0].options: list the recommended option "50" first']],
+    ['M5.4 sec: an empty question id (page form key) is refused', qs({ id: '' }), {}, ['questions[0].id "": 1-16 letters, digits, _ or - (e.g. "Q1")']],
     ['options 2-4', qs({ options: ['20', '50', '100', '200', '500'] }), {}, ['questions[0].options: 2 to 4 options, got 5']],
     ['recommended = an option, byte for byte', qs({ recommended: '20 ' }), {}, ['questions[0].recommended "20 ": must be exactly one of its options']],
     ['why non-empty', qs({ why: '  ' }), {}, ['questions[0].why: say why the answer matters']],
@@ -128,6 +131,14 @@ test('J16 J17 J18: one negative per rule group → its exact reason, no other', 
   }
   const many = await check({ ...PLAN, facts: Array.from({ length: 25 }, (_, i) => `fact ${i}`) }, ctx());
   assert.deepEqual([many.length, many.at(-1)], [21, '(+5 more)'], 'reasons capped');
+});
+
+test('D-0116 I1 I1b: ctxOf asks round 1 of a fresh ticket (questions pass, plan refused); a child with inherited locked decisions, or a past answer, may plan', async () => {
+  const fresh = ctxOf({ id: 't1' }, ['learning']);
+  assert.deepEqual(await check(PLAN, fresh), ['round 1 must be questions (no answers or locked decisions yet)']);
+  assert.deepEqual(await check(QUESTIONS, fresh), []);
+  for (const t of [{ id: 't2', locked_decisions: [LOCKED[0]] }, { id: 't3', answers: [{ id: 'R1Q1' }] }]) assert.deepEqual(await check({ ...PLAN, decisions: PLAN.decisions.slice(1) }, ctxOf(t, ['learning'])), [], t.id);
+  assert.match((await check(PLAN, ctxOf({ id: 't4', must_ask: true, locked_decisions: [LOCKED[0]] }, ['learning'])))[0], /^Irfan asked to be asked more first \(must_ask\)/, 'the flag keeps its own text');
 });
 
 test('MED3 task ids: a git-ref-safe name, never @fix or a path-like one (table); T1, t-2.a pass', async () => {
@@ -254,7 +265,7 @@ const call = (out) => ({ hook_event_name: 'PreToolUse', tool_name: 'StructuredOu
 
 test('J15 plan-check hook: a broken result → deny with every reason + "call again"; a valid one → exit 0 silent; missing or garbled ctx → fail open (exit 0, one stderr line)', async () => {
   const file = path.join(ROOT, 'plan-ctx.json');
-  fs.writeFileSync(file, JSON.stringify({ locked: LOCKED, must_ask: false, skills: ['learning'], base_sha: BASE, cwd: REPO }));
+  fs.writeFileSync(file, JSON.stringify({ locked: LOCKED, must_ask: false, round1: false, skills: ['learning'], base_sha: BASE, cwd: REPO }));
   const bad = await hook(call(task0({ files: ['lib/new/x.js'], steps: ['TBD'] })), { TB_PLAN_CTX: file });
   assert.equal(bad.code, 0);
   const o = JSON.parse(bad.stdout).hookSpecificOutput;

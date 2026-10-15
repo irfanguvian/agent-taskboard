@@ -1,0 +1,22 @@
+(version 1)
+; tbd's lavish-axi profile (M5.4 D-0124, SEC-1). Every lavish call tbd makes (open, poll, end, stop, reopen) runs as
+; `/usr/bin/sandbox-exec -f lib/lavish.sb -D K=V ... node cli.mjs ...`; the detached server it starts inherits it.
+; Params (-D, real paths): HOME, TB_HOME, NODE_DIR (node's install: bin + lib), LAVISH_DIR (realpath of the pinned
+; install), PAGES (TB_HOME/interview: every round's page dir; the one server serves every ticket), STATE (TB_HOME/lavish),
+; PORT. Base: allow default, then narrowed. Later rule wins: order is part of the policy.
+(allow default)
+
+; reads: nothing under HOME or TB_HOME but node, the install, the pages and lavish's state; dirs stat-able (realpath)
+(deny file-read* (subpath (param "HOME")) (subpath (param "TB_HOME")))
+(allow file-read* (subpath (param "NODE_DIR")) (subpath (param "LAVISH_DIR")) (subpath (param "PAGES")) (subpath (param "STATE")))
+(allow file-read-metadata (vnode-type DIRECTORY))
+
+; writes: lavish's state dir only
+(deny file-write*)
+(allow file-write* (subpath (param "STATE")) (literal "/dev/null") (literal "/dev/tty"))
+
+; network: bind only localhost:PORT, outbound only to loopback (no telemetry, no share, no other host)
+(deny network-bind)
+(allow network-bind (local ip (string-append "localhost:" (param "PORT"))))
+(deny network-outbound)
+(allow network-outbound (remote ip "localhost:*"))

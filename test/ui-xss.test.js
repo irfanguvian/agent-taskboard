@@ -217,3 +217,18 @@ test('XSS: M5.3 Final view (findings, summary, verdict doc) renders agent text a
   assert.ok(w2.text.includes(`docs/verification/${P}.md`), 'it stays text');
   assert.ok(!role(drawer, 'close-flow') && !role(drawer, 'rework-text'), 'a final gate not waiting close: neither');
 });
+
+test('XSS: a question topic renders as a heading text; questions group by topic in first-appearance order; Open in Lavish button', () => {
+  const ctx = sandbox();
+  const run = (code) => vm.runInContext(code, ctx);
+  run('state = { reminders: [], flows: [], system: {}, calendar: {} };');
+  const qs = [{ id: 'Q1', question: 'one', why: 'w', options: ['a'], recommended: 'a', topic: P }, { id: 'Q2', question: 'two', why: 'w', options: ['a'], recommended: 'a' },
+    { id: 'Q3', question: 'three', why: 'w', options: ['a'], recommended: 'a', topic: P }];
+  const tree = run(`clarifyForm("t_xss001", { n: 1, questions: ${JSON.stringify(qs)} })`);
+  const w = walk(tree);
+  assert.ok(w.tags.every((t) => !['img', 'script', 'iframe', 'svg', 'object'].includes(t)), `no element from a payload: ${w.tags}`);
+  assert.deepEqual(w.attrs.filter((a) => /^(on\w+|src|srcdoc|formaction)=/i.test(a)), []);
+  assert.equal(w.text.filter((s) => s === P).length, 1, 'one heading for the shared topic, as text');
+  assert.deepEqual(w.text.filter((s) => ['one', 'two', 'three'].includes(s)), ['one', 'three', 'two'], 'Q3 joins Q1 under the topic; Q2 (no topic) follows');
+  assert.ok(w.text.includes('Open in Lavish'));
+});

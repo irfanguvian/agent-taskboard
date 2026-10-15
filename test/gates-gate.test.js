@@ -195,6 +195,27 @@ test('M5 C7 profile: the localhost:5432 deny is dropped only for the checks (tes
   }
 });
 
+test('M5.4 C18 D-0121 profile: the lavish port (config interview.port 7799) and Irfan\'s 4387 are denied outbound and bind (SEC-8), each line after the allow lines it narrows (last rule wins, N9)', async () => {
+  const was = store.config.interview;
+  store.config.interview = { ...was, port: 7799 };
+  const w = world();
+  const ctx = await R.open({ t: w.t, wt: w.wt, tag: w.tag, gate: 'task', quiet: true });
+  try {
+    for (const mode of /** @type {('test' | 'setup')[]} */ (['test', 'setup'])) {
+      const lines = fs.readFileSync(await R.profile(ctx, mode), 'utf8').split('\n');
+      const after = Math.max(lines.indexOf('(allow network-bind (local ip "*:*"))'), lines.indexOf('(allow network-outbound (remote ip "localhost:*"))'));
+      assert.ok(lines.includes('(allow network-bind (local ip "*:*"))') && lines.includes('(allow network-outbound (remote ip "localhost:*"))'), mode);
+      for (const deny of ['(deny network-outbound (remote ip "localhost:7799"))', '(deny network-bind (local ip "*:7799"))', '(deny network-outbound (remote ip "localhost:4387"))',
+        '(deny network-bind (local ip "*:4387"))']) {
+        assert.ok(lines.indexOf(deny) > after, `${mode}: ${deny} after the allow lines`);
+      }
+    }
+  } finally {
+    store.config.interview = was;
+    await R.close(ctx);
+  }
+});
+
 test('git in a check (D-0077): /usr/bin/git (the xcode-select shim) runs inside the gate; the global git config is never read', async () => {
   fs.writeFileSync(path.join(process.env.HOME, '.gitconfig'), '[user]\n\temail = FAKE-GLOBAL@example.invalid\n');
   try {

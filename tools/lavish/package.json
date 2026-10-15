@@ -1,0 +1,8 @@
+{
+  "name": "tb-lavish",
+  "private": true,
+  "description": "Pinned lavish-axi: renders Clarify rounds (M5.4 C18). Install: npm ci --ignore-scripts --prefix tools/lavish",
+  "dependencies": {
+    "lavish-axi": "0.1.86"
+  }
+}

@@ -676,6 +676,7 @@ async function main() {
   write(path.join(tbHome, 'tags.json'), { sandbox: { type: 'git', path: SANDBOX, base: 'main', checks, skills: [], ...(port && { qa_ports: [port] }) } });
   write(path.join(tbHome, 'config.json'), { // max_turns, wall cap, fable_billing: repo defaults
     claude_bin: claude,
+    interview: { lavish: false }, // M5.4: harness tbds never start a real lavish page or browser tab
     ...(o.model && { models: { [o.phase]: { model: o.model, effort: o.effort } } }),
     ...((o.fake || o.noRamWait) && { memory: { min_free_gb: 0, phase_need_gb: { planning: 0, working: 0, review: 0, qa: 0, final_gate: 0 }, docker_reserved_gb: 0, start_at_warn_when_idle: true } }),
     ...(o.fake && { disk: { warn_gb: 0, stop_gb: 0 } }),

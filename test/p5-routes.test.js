@@ -97,7 +97,7 @@ test('P5c routes: CSRF on the cookie verbs, RO6 cookie scope-allow 401, answer d
   // CSRF: each cookie verb without the token, with a wrong one, or without Sec-Fetch-Site → 403 before the route (a
   // ticket that does not exist: a hole would answer 404); the CLI needs neither
   const CSRF_ERR = 'missing or wrong X-TB-CSRF token: reload the page';
-  const VERBS = [['scope', { allow: false }], ['rework', { feedback: 'x' }], ['pass', {}], ['answer', { text: 'x' }], ['allow-change', { change: 'drop A.b' }], ['deny-change', { change: 'drop A.b' }]];
+  const VERBS = [['scope', { allow: false }], ['rework', { feedback: 'x' }], ['pass', {}], ['answer', { text: 'x' }], ['allow-change', { change: 'drop A.b' }], ['deny-change', { change: 'drop A.b' }], ['lavish', {}], ['close', {}], ['push', {}]];
   for (const [verb, body] of VERBS) {
     for (const [h, err] of /** @type {[any, string][]} */ ([[{ 'x-tb-csrf': undefined }, CSRF_ERR], [{ 'x-tb-csrf': 'f'.repeat(64) }, CSRF_ERR], [{ 'x-tb-csrf': ui.csrf.slice(0, 63) }, CSRF_ERR],
       [{ 'x-tb-csrf': ui.csrf.toUpperCase() }, CSRF_ERR], [{ 'sec-fetch-site': undefined }, 'cross-site request refused']])) {

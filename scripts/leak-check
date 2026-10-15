@@ -25,6 +25,9 @@ grep -v -e '^#' -e '^$' "$DENY" > "$tmp/deny"
 
 # stdin: "WHERE<TAB>text" lines. Prints "WHERE: denylist entry #N" per hit.
 # WHERE itself (a file path) may contain a denylist word: it is masked as *** before printing.
+# D-0115: in a lockfile line only (npm, yarn, pnpm), an entry under 8 chars is matched with exact SRI tokens cut out: a
+# 3-char word shows up by chance in sha512 base64. Entries of 8+ chars still match inside them; any other file keeps the
+# full match (a 4-7 char SECRET-named env value is in the denylist too, util.envSecrets).
 match() {
   awk -v deny="$tmp/deny" '
     BEGIN { while ((getline l < deny) > 0) d[++n] = tolower(l) }
@@ -37,8 +40,10 @@ match() {
       }
       return w
     }
-    { i = index($0, "\t"); t = tolower(substr($0, i + 1)); w = ""
-      for (k = 1; k <= n; k++) if (index(t, d[k])) { if (w == "") w = mask(substr($0, 1, i - 1)); print w ": denylist entry #" k } }'
+    { i = index($0, "\t"); t = tolower(substr($0, i + 1)); w = ""; s = substr($0, i + 1)
+      lock = substr($0, 1, i - 1) ~ /(^|[ \/])(package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml):[0-9]+$/
+      gsub(/sha1-[A-Za-z0-9+\/]{27}=|sha256-[A-Za-z0-9+\/]{43}=|sha384-[A-Za-z0-9+\/]{64}|sha512-[A-Za-z0-9+\/]{86}==/, "#", s); s = tolower(s)
+      for (k = 1; k <= n; k++) if (index(lock && length(d[k]) < 8 ? s : t, d[k])) { if (w == "") w = mask(substr($0, 1, i - 1)); print w ": denylist entry #" k } }'
 }
 scan() { match | tee -a "$tmp/hits"; }
 

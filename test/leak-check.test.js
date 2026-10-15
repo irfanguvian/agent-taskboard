@@ -150,6 +150,29 @@ test('denylist word in a PR body file is refused', () => {
   assert.match(out(r), /pr\.md:2: denylist entry #1/);
 });
 
+// D-0115 (D-0109): in a lockfile, a short denylist word (< 8 chars) inside an exact SRI token is hash noise, not a leak.
+test('D-0115 short word inside a lockfile SRI hash passes; outside it, in a non-lockfile, or a long word inside it, is refused', () => {
+  const w = world();
+  fs.appendFileSync(w.env.TB_DENYLIST, 'qzx\n');
+  const sri = (mid) => `sha512-${'A'.repeat(40)}${mid}${'B'.repeat(46 - mid.length)}==`;
+  const refused = (file, entry) => {
+    const r = w.check('HEAD~1..HEAD');
+    assert.equal(r.status, 1, out(r));
+    assert.match(out(r), new RegExp(`${file.replace('.', '\\.')}:1: denylist entry #${entry}`));
+  };
+  w.commit('package-lock.json', `{"integrity": "${sri('qZx')}"}\n`);
+  assert.equal(w.check('HEAD~1..HEAD').status, 0, 'short word inside a lockfile hash: no hit');
+  w.commit('b.json', `{"name": "qzx-pkg", "integrity": "${sri('qZx')}"}\n`);
+  refused('b.json', 2);
+  w.commit('c.json', `{"integrity": "${sri('qZx')}"}\n`);
+  refused('c.json', 2); // same hash outside a lockfile: full match
+  w.commit('package-lock.json', `{"integrity": "${sri(WORD)}"}\n`);
+  refused('package-lock.json', 1);
+  fs.appendFileSync(w.env.TB_DENYLIST, 'qzxwvutk\n'); // exactly 8 chars: the < 8 skip does not apply
+  w.commit('package-lock.json', `{"integrity": "${sri('qzxwvutk')}"}\n`);
+  refused('package-lock.json', 3);
+});
+
 test('missing denylist fails closed with exit 2', () => {
   const w = world();
   fs.rmSync(w.env.TB_DENYLIST);

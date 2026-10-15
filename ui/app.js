@@ -837,6 +837,7 @@ const SENT = { // button role → [label, label while sending, toast title, toas
   pass: ['Pass', 'Passing…', 'Passed', 'tbd recorded your pass.'],
   push: ['Push', 'Pushing…', 'Push started', 'Leak scan first, then git push. The outcome shows in the drawer.'],
   close: ['Close', 'Closing…', 'Closed', 'The flow is done. Nothing was pushed; the worktree stays until tb gc.'],
+  lavish: ['Open in Lavish', 'Opening…', 'Lavish', 'The questions page opens in your browser.'],
   'pass-check': ['Check sha', 'Checking…', '', ''],
 };
 const WAIT = {
@@ -1330,12 +1331,21 @@ function clarifyForm(id, r) {
   return el('section', { class: 'part', 'aria-labelledby': 'cq-h' },
     el('h3', { id: 'cq-h' }, `Questions · round ${r.n}`),
     el('p', { class: 'hint' }, "Answer each one, or press Enough, plan now: what you leave open is the planner's call."),
-    ...r.questions.map((x, i) => question(d, x, i)),
+    el('div', { class: 'acts' }, actBtn(id, 'lavish', () => post(id, 'lavish', {}), { sent: 'lavish' })),
+    errLine(id, 'lavish'),
+    ...byTopic(r.questions).flatMap(([topic, qs]) => [topic && el('h4', null, vis(topic)), ...qs.map(([x, i]) => question(d, x, i))]),
     d.errs._ && el('p', { class: 'err' }, d.errs._),
     el('div', { class: 'acts' },
       actBtn(id, 'answer', () => sendAnswers(id, r, false), { cls: 'primary' }),
       actBtn(id, 'plan-now', () => sendAnswers(id, r, true)),
       el('span', { class: 'hint', 'data-count': '' }, answered(d, r))));
+}
+
+// questions under one heading per topic, first-appearance order; each keeps its index i (radio names, focus roles)
+function byTopic(qs) {
+  const g = new Map();
+  qs.forEach((x, i) => g.set(x.topic ?? '', [...(g.get(x.topic ?? '') ?? []), [x, i]]));
+  return [...g];
 }
 
 function question(d, x, i) {

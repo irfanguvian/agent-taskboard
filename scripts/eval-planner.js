@@ -50,6 +50,19 @@ const E3_QS = [
   { id: 'Q2', question: 'Unknown state value', why: 'ListOrdersQueryDto validates with class-validator; a bad value can be refused or ignored.', options: ['400 Bad Request', 'ignore the filter'], recommended: '400 Bad Request' },
 ];
 const E3_PICK = { Q1: 'state (not status)', Q2: '400 Bad Request' };
+// D-0116: a fresh ticket's round 1 must be questions, so E2 starts past round 1 (as E3): one answered question, the plan comes in round 2.
+const E2_Q = { id: 'Q1', question: 'Which response shape?', why: 'GET /orders already returns a list item shape.', options: ['the list item shape', 'a new detail shape'], recommended: 'the list item shape' };
+const E2_SEED = {
+  extra: {
+    round: 2,
+    answers: [{ id: 'R1Q1', question: E2_Q.question, answer: { pick: E2_Q.recommended } }],
+    locked_decisions: [{ id: 'R1Q1', text: `${E2_Q.question} ${ARROW} ${E2_Q.recommended}`, source: 'answer:R1Q1' }],
+  },
+  files: {
+    'rounds/01-questions.json': { kind: 'questions', round: 1, questions: [E2_Q], facts: [], decisions: [] },
+    'facts.json': [],
+  },
+};
 const E3_SEED = {
   extra: {
     round: 2,
@@ -65,7 +78,7 @@ const E3_SEED = {
 const CASES = {
   e1: { title: 'E1 vague goal: questions', text: 'Make user accounts easier to manage.',
     rubric: 'questions are decisions (which operations: edit, delete, search; soft vs hard delete; who may do it; API only vs schema change), each tied to code read; none answerable from the repo; sane recommendations.' },
-  e2: { title: 'E2 clear goal: plan', text: 'Add GET /orders/:id that returns one order in the same shape as the list items. 404 when it does not exist.',
+  e2: { title: 'E2 clear goal: plan', seed: E2_SEED, text: 'Add GET /orders/:id that returns one order in the same shape as the list items. 404 when it does not exist.',
     rubric: 'one or two right-sized tasks, test-first steps with real test names/paths, 404 covered by a test at an existing seam (e2e or service spec), no extra scope.' },
   e3: { title: 'E3 locked decisions kept', text: 'Let GET /orders filter by order status.', seed: E3_SEED,
     rubric: 'plan follows both decisions everywhere (DTO validation, tests, docs), no re-asking settled points.' },
@@ -108,23 +121,23 @@ function mapAnswers(questions, canned) {
 // ---- fake results (--fake) -----------------------------------------------------------------------------------------
 // Shaped to pass phases/code/planning/result.schema.json + lib/plan-rules.js at the tb-sandbox base (paths exist, npm
 // scripts in package.json, acceptance covered, no placeholder words). E3 adds one StructuredOutput deny before its result
-// (the hook-denial count). bad: E2 lists no API change and no preserve criterion (checks 4 and 5 go red).
+// (the hook-denial count). bad: E2 lists a breaking API change and no preserve criterion (checks 4 and 5 go red).
 function fakeResults(bad) {
-  const test = 'npm run test:e2e -- orders';
+  const test = 'npm run test:e2e -- test/orders.e2e-spec.ts'; // K6: a real path (the file or its folder exists at base)
   const red = (name, fails) => `In test/orders.e2e-spec.ts add the test "${name}": ${fails}`;
   const e2Acc = [{ id: 'A1', text: 'GET /orders/:id returns the order in the list item shape', type: 'new' }, { id: 'A2', text: 'GET /orders/:id answers 404 for an unknown id', type: 'new' }];
   if (!bad) e2Acc.push({ id: 'A3', text: 'GET /orders?userId= answers as before', type: 'preserve' });
   return {
     e1: [{ kind: 'questions', round: 1, questions: [
       { id: 'Q1', question: 'Which account operations are in scope?', why: 'src/users/users.controller.ts serves only GET /users and GET /users/:id: every write is a new endpoint.', options: ['edit name and nickname', 'soft delete', 'both'], recommended: 'edit name and nickname' },
-      { id: 'Q2', question: 'Who may manage an account?', why: 'src/main.ts sets up no auth guard: any caller could change any user.', options: ['the user only', 'an admin only'], recommended: 'an admin only' }],
+      { id: 'Q2', question: 'Who may manage an account?', why: 'src/main.ts sets up no auth guard: any caller could change any user.', options: ['an admin only', 'the user only'], recommended: 'an admin only' }],
     facts: ['src/users/users.controller.ts: GET /users and GET /users/:id only', 'prisma/schema.prisma: User has id, email, name, nickname, createdAt'], decisions: [] }],
-    e2: [{ kind: 'plan', summary: 'Add GET /orders/:id returning one order in the list item shape; 404 when it does not exist.', acceptance: e2Acc,
+    e2: [{ kind: 'plan', round: 2, summary: 'Add GET /orders/:id returning one order in the list item shape; 404 when it does not exist.', acceptance: e2Acc,
       tasks: [{ id: 'T1', title: 'GET /orders/:id with 404', files: ['src/orders/orders.controller.ts', 'src/orders/orders.service.ts', 'test/orders.e2e-spec.ts'], modules: ['src/orders'],
         blocked_by: [], acceptance: e2Acc.map((a) => a.id), type: 'new', test_cmd: test,
         steps: [red('GET /orders/:id returns one order', 'expect(res.status).toBe(200) fails with 404'), `Run ${test}: red`,
           'Add OrdersService.get(id: number): Promise<OrderDto | null> and OrdersController @Get(":id") that throws NotFoundException on null', `Run ${test}: green`] }],
-      allowed_schema_changes: [], allowed_api_changes: bad ? [] : ['GET /orders/:id: new endpoint'], skills: [], ui: null, children: [],
+      allowed_schema_changes: [], allowed_api_changes: bad ? ['remove GET /orders#200'] : [], skills: [], ui: null, children: [],
       facts: ['src/orders/orders.controller.ts: GET /orders lists one user\'s orders, POST /orders creates one'], decisions: [{ id: 'D1', text: '404 through NotFoundException', source: 'planner' }] }],
     e3: [{ kind: 'plan', round: 2, summary: 'GET /orders takes an optional state query; an unknown value answers 400.',
       acceptance: [{ id: 'A1', text: 'GET /orders?userId=1&state=paid returns only paid orders', type: 'new' }, { id: 'A2', text: 'GET /orders?userId=1&state=bogus answers 400', type: 'new' },
@@ -133,11 +146,11 @@ function fakeResults(bad) {
         blocked_by: [], acceptance: ['A1', 'A2', 'A3'], type: 'new', test_cmd: test,
         steps: [red('unknown state answers 400', 'expect(res.status).toBe(400) fails with 200'), `Run ${test}: red`,
           'Add an optional state (IsIn pending, paid) to ListOrdersQueryDto; OrdersService.list adds it to the where clause', `Run ${test}: green`] }],
-      allowed_schema_changes: [], allowed_api_changes: ['GET /orders: add optional state query'], skills: [], ui: null, children: [],
+      allowed_schema_changes: [], allowed_api_changes: [], skills: [], ui: null, children: [],
       facts: ['src/orders/orders.dto.ts: ListOrdersQueryDto takes userId and the page query'],
       decisions: [E3_SEED.extra.locked_decisions[0], { id: 'D1', text: 'state validated with class-validator IsIn', source: 'planner' }] }],
     'golden-a': [{ kind: 'questions', round: 1, questions: [
-      { id: 'Q1', question: 'What should "better for repeat customers" mean in this ticket?', why: 'Nothing in src/ tracks repeat customers; each meaning is a different feature.', options: ['Returning-customer discount', 'Order history view', 'Reorder endpoint'], recommended: 'Order history view' },
+      { id: 'Q1', question: 'What should "better for repeat customers" mean in this ticket?', why: 'Nothing in src/ tracks repeat customers; each meaning is a different feature.', options: ['Order history view', 'Returning-customer discount', 'Reorder endpoint'], recommended: 'Order history view' },
       { id: 'Q2', question: 'API only, or a schema change?', why: 'prisma/schema.prisma has no customer flag; a flag needs a migration.', options: ['API only, computed from orders', 'New column on User'], recommended: 'API only, computed from orders' },
       { id: 'Q3', question: 'How are discount amounts rounded?', why: 'Order.totalMinor is integer minor units.', options: ['Integer minor units, round down', 'Round half up to whole minor units'], recommended: 'Integer minor units, round down' },
       { id: 'Q4', question: 'Backfill existing customers?', why: 'prisma/seed.ts makes 5 orders per user.', options: ['No backfill', 'Backfill all past orders'], recommended: 'No backfill' }],
@@ -148,7 +161,7 @@ function fakeResults(bad) {
         blocked_by: [], acceptance: ['A1', 'A2'], type: 'new', test_cmd: test,
         steps: [red('returning customer gets the discount', 'expect(order.totalMinor).toBe(900) fails with 1000'), `Run ${test}: red`,
           'In OrdersService.create count the user\'s earlier orders; when > 0 take 10% off totalMinor, rounded down', `Run ${test}: green`] }],
-      allowed_schema_changes: [], allowed_api_changes: ['POST /orders: totalMinor includes the returning-customer discount'], skills: [], ui: null, children: [],
+      allowed_schema_changes: [], allowed_api_changes: [], skills: [], ui: null, children: [],
       facts: ['prisma/schema.prisma: Order.totalMinor is an integer'], decisions: [{ id: 'D1', text: 'discount 10%, rounded down to whole minor units', source: 'planner' }] }],
   };
 }
@@ -322,12 +335,12 @@ const CHECKS = {
     const missing = created.filter((f) => !steps.includes(f) && !steps.includes(path.basename(f)));
     const need = ['src/orders/orders.controller.ts', 'src/orders/orders.service.ts'].filter((f) => !files.includes(f));
     return [
-      chk('rounds/01-plan.json: kind plan, plan_approval, no schema_fail retry', r.file === '01-plan.json' && p.kind === 'plan' && r.ticket.state === 'plan_approval' && !schemaFails(r),
+      chk('rounds/02-plan.json: kind plan, plan_approval, no schema_fail retry', r.file === '02-plan.json' && p.kind === 'plan' && r.ticket.state === 'plan_approval' && !schemaFails(r),
         `state ${r.ticket.state}, file ${r.file ?? 'none'}, kind ${p.kind ?? '-'}, t:run exits: ${exits(r)}`),
       chk('task files include orders.controller.ts + orders.service.ts; each path at base or created by a step', tasks.length && !need.length && !missing.length,
         `${need.length ? `not named: ${need.join(', ')}; ` : ''}${missing.length ? `missing (not at base, no step names it): ${missing.join(', ')}; ` : ''}files: ${files.join(', ') || 'none'}${created.length ? ` (new: ${created.join(', ')})` : ''}`),
       testCmds(r),
-      chk('allowed_schema_changes == []; allowed_api_changes names GET /orders/:id', Array.isArray(p.allowed_schema_changes) && !p.allowed_schema_changes.length && arr(p.allowed_api_changes).some((s) => String(s).includes('GET /orders/:id')),
+      chk('allowed_schema_changes == [] and allowed_api_changes == [] (K10: a new endpoint is not a breaking change)', Array.isArray(p.allowed_schema_changes) && !p.allowed_schema_changes.length && Array.isArray(p.allowed_api_changes) && !p.allowed_api_changes.length,
         `schema ${JSON.stringify(p.allowed_schema_changes ?? null)}; api ${JSON.stringify(p.allowed_api_changes ?? null)}`),
       chk('acceptance has ≥ 1 preserve item', arr(p.acceptance).some((a) => a.type === 'preserve'),
         arr(p.acceptance).map((a) => `${a.id} ${a.type}: ${a.text}`).join('; ') || 'no acceptance'),
@@ -340,7 +353,7 @@ const CHECKS = {
     const merged = new Map(arr(r.decisions).map((d) => [d.id, d]));
     const lost = locked.filter((l) => { const d = merged.get(l.id); return !d || d.text !== l.text || d.source !== l.source; });
     const changed = arr(p.decisions).filter((d) => locked.some((l) => l.id === d.id && l.text !== d.text));
-    const api = arr(p.allowed_api_changes).find((s) => /GET \/orders(?![\w/])/.test(s) && /\bstate\b/.test(s) && /optional/i.test(s));
+    const api = Array.isArray(p.allowed_api_changes) && p.allowed_api_changes.length === 0; // K10: an added optional query is no breaking change, so nothing is listed
     const status = /\?status=|status query/i.exec(JSON.stringify({ acceptance: p.acceptance, tasks: p.tasks }));
     const four = arr(p.tasks).filter((x) => /\b400\b/.test(`${x.title} ${arr(x.steps).join(' ')}`));
     const denied = r.runs.reduce((n, x) => n + x.denials.length, 0);
@@ -349,7 +362,7 @@ const CHECKS = {
         `state ${r.ticket.state}, t:run exits: ${exits(r)}, hook denials ${denied}`),
       chk('decisions.json holds R1Q1 + R1Q2 unchanged; no same-id decision with other text', locked.length === 2 && !lost.length && !changed.length,
         `${lost.length ? `lost/changed in decisions.json: ${lost.map((l) => l.id).join(', ')}; ` : ''}${changed.length ? `result changes: ${changed.map((d) => `${d.id} ${JSON.stringify(d.text)}`).join('; ')}; ` : ''}locked ${locked.map((l) => l.id).join(', ')}`),
-      chk('kind plan; allowed_api_changes names an optional state query on GET /orders; no ?status= / status query', p.kind === 'plan' && api && !status,
+      chk('kind plan; allowed_api_changes == [] (K10: an added optional query is no breaking change); no ?status= / status query', p.kind === 'plan' && api && !status,
         `kind ${p.kind ?? '-'}; api ${JSON.stringify(p.allowed_api_changes ?? null)}${status ? `; found ${JSON.stringify(status[0])}` : ''}`),
       chk('a task\'s test covers the 400 for an unknown value', four.length, four.length ? `tasks ${four.map((x) => x.id).join(', ')}` : 'no task names 400'),
     ];
@@ -479,6 +492,7 @@ async function main() {
   write(path.join(phases, 'code', 'planning', 'prompt.md'), promptText);
   write(path.join(tbHome, 'config.json'), {
     claude_bin: claude, models: { planning: { model: 'fable', effort: 'high' } }, fable_billing: 'plan', // max_turns, wall cap: repo defaults
+    interview: { lavish: false }, // M5.4: the harness answers with tb answer --file; never a real lavish page or browser tab
     ...(o.fake && { memory: { min_free_gb: 0, phase_need_gb: { planning: 0, working: 0, review: 0, qa: 0 }, docker_reserved_gb: 0, start_at_warn_when_idle: true }, disk: { warn_gb: 0, stop_gb: 0 } }),
   });
   write(path.join(tbHome, 'tags.json'), { sandbox: { type: 'git', path: SANDBOX, base: 'main', checks: { typecheck: 'npm run typecheck', unit: 'npm test', e2e: 'npm run test:e2e' }, skills: [] } });
