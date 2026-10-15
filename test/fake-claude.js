@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 // Stand-in for the `claude` binary (spec §9 spawn line, §12 fake suite). Zero deps.
-// Scenario: FAKE_CLAUDE_SCENARIO=<file.json> or FAKE_CLAUDE_SCENARIO_DIR=<dir> (<dir>/<n>.json by invocation).
+// Scenario: FAKE_CLAUDE_SCENARIO=<file.json> or FAKE_CLAUDE_SCENARIO_DIR=<dir> (<dir>/<n>.json by invocation; M5.5: a
+// task with its own <dir>/task-<id>/ gets <dir>/task-<id>/<n>.json by that task's invocation: a prompt's `## Your task:
+// <id>` maps its cwd to the task, a run without one (a resume) takes its cwd's task, so lanes running at once stay apart).
 // Scenario JSON: {"init"?: false, "steps": [ step ... ], "resume_steps"?: [ step ... ] (used instead when run with
 // --resume)}. Step = {"emit": event} | {"sleep_ms": n} | {"crash": code}
 //   | {"hang": true} | {"hang": "ignore_sigint"} (D-0011: SIGINT ignored) | {"hang": "ignore_term"} (INT, TERM, HUP
@@ -61,6 +63,12 @@ let scenarioFile = FAKE_CLAUDE_SCENARIO;
 if (FAKE_CLAUDE_SCENARIO_DIR) {
   n = claim(FAKE_CLAUDE_SCENARIO_DIR, (i) => `.run-${i}`);
   scenarioFile = path.join(FAKE_CLAUDE_SCENARIO_DIR, `${n}.json`);
+  const cwdFile = path.join(FAKE_CLAUDE_SCENARIO_DIR, `.cwd-${crypto.createHash('sha1').update(process.cwd()).digest('hex')}`);
+  const named = /^## Your task: (\S+)/m.exec(prompt)?.[1];
+  if (named) fs.writeFileSync(cwdFile, named);
+  const task = named ?? (fs.existsSync(cwdFile) ? fs.readFileSync(cwdFile, 'utf8') : null);
+  const dir = task && path.join(FAKE_CLAUDE_SCENARIO_DIR, `task-${task}`);
+  if (dir && fs.existsSync(dir)) scenarioFile = path.join(dir, `${claim(dir, (i) => `.run-${i}`)}.json`);
 }
 if (FAKE_CLAUDE_DUMP_DIR) {
   if (!n) n = claim(FAKE_CLAUDE_DUMP_DIR, (i) => `${i}.json`);

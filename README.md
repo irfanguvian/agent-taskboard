@@ -26,3 +26,21 @@ flowchart LR
 Rollback: `tb doctor --pin --version <old>` (old copy still in `~/.taskboard/bin/`).
 
 Default pin for new installs: `DEFAULT_PIN` in `lib/util.js` (now 2.1.295).
+
+## Parallel lanes (code tickets)
+
+Off by default (`max_concurrent: 1`). On: set `"max_concurrent": 2` in `~/.taskboard/config.json` (read at start only), restart tbd `launchctl kickstart -k gui/$(id -u)/local.taskboard`, check `tb doctor`. Note: `max_concurrent` also lets 2 tickets run at once. A plan task with no `blocked_by` and no file shared with the running task may run as a lane: own worktree, own run, then tbd merges it back.
+
+```mermaid
+flowchart LR
+  Q[parent between tasks] -->|free task, no shared file, RAM fits 2 runs| L[lane: own worktree + run]
+  Q -->|else| S[task runs serial, as before]
+  L -->|green| M[parent: cherry-pick + re-gate]
+  L -->|red / question / blocked| S
+  M -->|green| D[task done, lane worktree removed]
+  M -->|conflict / red| S
+```
+
+- RAM: a lane starts only when memory pressure is normal and 2 working runs fit (about 2.5 GB free). Else the task runs serial.
+- See lanes: `tb show <parent>` (lanes table) or the board drawer. A lane is no flow of its own: act on the parent (`409 … act on the parent`).
+- Parent with no task left waits for its lanes (`waiting: lanes`).

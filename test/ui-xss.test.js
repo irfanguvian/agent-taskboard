@@ -232,3 +232,19 @@ test('XSS: a question topic renders as a heading text; questions group by topic 
   assert.deepEqual(w.text.filter((s) => ['one', 'two', 'three'].includes(s)), ['one', 'three', 'two'], 'Q3 joins Q1 under the topic; Q2 (no topic) follows');
   assert.ok(w.text.includes('Open in Lavish'));
 });
+
+test('XSS: M5.5 the parent\'s lanes table (task id, waiting why) renders as text only; lane_setup is not the approve-setup text', () => {
+  const ctx = sandbox();
+  const run = (code) => vm.runInContext(code, ctx);
+  run('state = { reminders: [], flows: [], system: {}, calendar: {} }; ui.open = "t_xss001";');
+  const lanes = [{ id: 't_lan001', task: `T2${P}`, state: 'blocked', waiting: { reason: 'infra', why: `gate ${S}` }, live: false, attempt: 2 }];
+  const w = walk(run(`workView("t_xss001", { work: { task: "T1", tries: 0, tasks: [], gate: null }, lanes: ${JSON.stringify(lanes)} })`));
+  assert.ok(w.tags.every((t) => !['img', 'script', 'iframe', 'svg', 'object'].includes(t)), `no element from a payload: ${w.tags}`);
+  assert.deepEqual(w.attrs.filter((a) => /^(on\w+|src|srcdoc|formaction|href)=/i.test(a)), [], 'no payload in an attribute');
+  // X14: one row, as text: task, lane id, state, waiting (reason: why), live (no: as tb show), attempt
+  const at = w.text.indexOf(`T2${P}`);
+  assert.deepEqual(w.text.slice(at, at + 6), [`T2${P}`, 't_lan001', 'blocked', `infra: gate ${S}`, 'no', '2']);
+  const wait = (r) => walk(run(`notice("t_xss001", { reason: "${r}" })`)).text.join(' ');
+  assert.match(wait('lane_setup'), /Nothing to approve/);
+  assert.doesNotMatch(wait('lane_setup'), /approved plan/);
+});

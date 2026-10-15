@@ -794,7 +794,7 @@ async function readOpen() {
       ui.plan = j.plan ?? null;
       ui.ask = j.ask ?? null;
       ui.fixMax = j.fix_max;
-      drawerBody(flowOf(id), ui.ticket = j.ticket);
+      drawerBody(flowOf(id), ui.ticket = j.lanes ? { ...j.ticket, lanes: j.lanes } : j.ticket); // M5.5: a parent's lanes ride on its ticket
     }
   } catch (e) {
     if (mine === openSeq && ui.open === id && !ui.ticket) drawerBody(flowOf(id), null, e.message); // else the next read tries again
@@ -856,6 +856,10 @@ const WAIT = {
   // M5.2: QA not proven (a BLOCKED or ASSISTED case, or a 4th fix), the DB guard (a database URL not on this Mac)
   qa: 'Blocked: QA did not prove the change (or a 4th fix was needed). Read the QA below, then Resume.',
   db: 'Blocked: the DB guard refused an env file (a database not on this Mac). Fix the tag\'s env file, then Resume.',
+  // M5.5: lanes (parallel tasks, each a ticket of its own; act on the parent)
+  merge: 'Merging a finished lane into the branch. It goes on by itself.',
+  lanes: 'Waiting for its lanes to finish. It goes on by itself.',
+  lane_setup: 'Setting up the lane clones. Nothing to approve; it goes on by itself.',
   // M5.3 C12 C13: squashed, waiting on Irfan
   close: 'Waits for close: the final gate passed and the squash is made. Close it, push it, or send it back below.',
 };
@@ -1103,6 +1107,12 @@ function workView(id, k) {
       el('tbody', null, ...tasks.map(x => el('tr', { class: x.id === w.task ? 'cur' : null, 'aria-current': x.id === w.task ? 'step' : null },
         el('td', null, code(String(x.id))), el('td', null, el('span', { class: `chip st-${vis(x.status)}` }, vis(x.status))),
         el('td', null, String(x.attempt ?? DASH)), el('td', null, mode(x)), el('td', null, x.head ? code(String(x.head).slice(0, 12)) : DASH))))) : none(),
+    Array.isArray(k.lanes) && k.lanes.length > 0 && el('table', { class: 'dtable wtable' }, el('caption', { class: 'sr' }, 'Lanes: task, ticket, state, waiting, live, attempt'),
+      el('thead', null, el('tr', null, ...['Task', 'Lane', 'State', 'Waiting', 'Live', 'Attempt'].map(h => el('th', { scope: 'col' }, h)))),
+      el('tbody', null, ...k.lanes.filter(isObj).map(x => el('tr', null,
+        el('td', null, code(String(x.task))), el('td', null, code(String(x.id))), el('td', null, el('span', { class: `chip st-${vis(x.state)}` }, vis(x.state))),
+        el('td', null, x.waiting ? vis(`${x.waiting.reason}${x.waiting.why ? `: ${x.waiting.why}` : ''}`) : DASH),
+        el('td', null, x.live ? 'yes' : 'no'), el('td', null, String(x.attempt ?? DASH)))))),
     el('dl', { class: 'facts' },
       fact('Gate', g && `${vis(g.kind)} gate ${g.ok === undefined ? 'running' : g.ok ? 'green' : `red${g.class ? ` (${vis(g.class)})` : ''}`}${g.n ? ` · #${g.n}` : ''}`),
       fact('Tries', String(w.tries ?? 0)), fact('Unit', w.unit_ms == null ? null : `${w.unit_ms} ms`),

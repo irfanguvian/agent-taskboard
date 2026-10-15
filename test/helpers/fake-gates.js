@@ -3,7 +3,8 @@
 // lib/gates is never required here (the RAM test reads require.cache through it).
 // 1. lib/working.js gets scripted gates (setGates, first wins): each call takes the next step of
 //    TB_HOME/fake-gates/<ticket>.json {task: [step], working: [step], final: [step], base: [step], openapi: [step]} (missing → green);
-//    the step count per kind is kept in <ticket>.<kind>.n, so a restarted tbd goes on. A step is merged into a whole
+//    the step count per kind is kept in <ticket>.<kind>.n, so a restarted tbd goes on. M5.5: a lane ticket (its id is made
+//    at run time) takes its parent's script under `lane:<task>`. A step is merged into a whole
 //    GateResult (head = the worktree's real HEAD) and saved as tickets/<id>/gates/NN.json, as lib/gates does. Like the real
 //    gate: integrity.ok false → class integrity; step.allow: [paths] → a scope ask unless the call's allow covers them.
 //    step.sleep_ms: waits; an aborted signal → class interrupted (step.ignore_abort: waits the full time and answers
@@ -34,10 +35,11 @@ const HOME = process.env.TB_HOME;
 const log = (o) => fsp.appendFile(path.join(HOME, 'fake-gates.jsonl'), JSON.stringify({ at: Date.now(), ...o, gates_loaded: Object.keys(require.cache).some((k) => k.includes(`${path.sep}lib${path.sep}gates${path.sep}`)) }) + '\n');
 const git = (cwd, ...args) => execFileSync('/usr/bin/git', ['-C', cwd, ...args], { encoding: 'utf8', env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } }).trim();
 
-async function step(id, kind) {
+async function step(id, kind, lane = null) {
   const dir = path.join(HOME, 'fake-gates');
+  if (lane) kind = `lane:${lane.task}`;
   let script = {};
-  try { script = JSON.parse(await fsp.readFile(path.join(dir, `${id}.json`), 'utf8')); } catch { /* none: green */ }
+  try { script = JSON.parse(await fsp.readFile(path.join(dir, `${lane?.id ?? id}.json`), 'utf8')); } catch { /* none: green */ }
   const nFile = path.join(dir, `${id}.${kind}.n`);
   const n = Number(await fsp.readFile(nFile, 'utf8').catch(() => '0'));
   await fsp.mkdir(dir, { recursive: true });
@@ -52,8 +54,8 @@ const wait = (ms, signal) => new Promise((/** @type {(v?: any) => void} */ res) 
 
 async function gate(kind, o) {
   const id = o.t.id;
-  const s = await step(id, kind);
-  await log({ fn: kind, ticket: id, task: o.task?.id ?? null, integrity: o.integrity, allow: o.allow, unitMs: o.unitMs ?? null });
+  const s = await step(id, kind, o.t.lane_of);
+  await log({ fn: kind, ticket: id, task: o.task?.id ?? null, type: o.task?.type ?? null, pre: o.pre ?? null, integrity: o.integrity, allow: o.allow, unitMs: o.unitMs ?? null });
   const head = git(o.wt, 'rev-parse', 'HEAD');
   const stale = (o.tag.env_files ?? []).find((f) => fs.readFileSync(path.join(o.wt, f), 'utf8') !== fs.readFileSync(path.join(o.tag.path, f), 'utf8'));
   if (s.child) {

@@ -21,6 +21,7 @@ require('./lib/qa'); // registers the code/qa handler, seed + next hook (M5 C5)
 require('./lib/final'); // registers the code/final_gate handler, seed + next hook, tells working.js a final gate's result (M5 C10-C13)
 const pass = require('./lib/pass');
 const interview = require('./lib/interview'); // M5.4 C18: Clarify rounds on a lavish page
+const lanes = require('./lib/lanes'); // M5.5 C19: parallel lanes (working's next hook asks it; its watcher + boot here)
 const metrics = require('./lib/metrics');
 
 // P5 Wire: lib/gates loads with the first gate job, never at boot (RAM). First wins: a test preload's fakes stay.
@@ -109,6 +110,8 @@ function boot() {
     await interview.boot({ alert: runner.alert }).catch((e) => console.error(`tbd: lavish boot: ${e.message}`)); // orphan polls, leftover sends (D-0119), open rounds polled again; before runs start (no round opens meanwhile)
     monitor.on('wake', (e) => runner.wake(e)); // §8 sleep: the OS wake carries the slept time; a wall jump alone is a hint
     await working.boot(); // P5: pre-P5 working tickets get a work cursor; a swap left by a killed tbd is restored first
+    lanes.watch({ cancel: runner.cancel }); // M5.5 X12: lane ends + parent moves; before lanes.boot (N#7: its cancels reach it)
+    await lanes.boot().catch((e) => console.error(`tbd: lanes boot: ${e.message}`)); // a killed tbd's lanes ended or cleaned up
     pass.watch({ alert: runner.alert }); // parents waiting on children: one alert per newly blocked child
     await pass.boot().catch((e) => console.error(`tbd: children recount: ${e.message}`)); // a finish lost to a stop
     await require('./lib/push').boot({ alert: runner.alert }); // M5 C14: a push a dead tbd left running → failed

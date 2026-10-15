@@ -441,7 +441,8 @@ test('I13 K4+C2: --replan → planning (seed ## Replan) → keep naming an undon
   ];
   // the env file is not git-ignored here: M1 keeps it out of the dirty check and K4 out of the snapshot (a secret)
   const marker = path.join(ROOT, `i13-setup-${process.pid}`);
-  const w = await approved(t, { tasks: [task('T1', { files: ['lib2/a.js'] }), task('T2')], sessions, ignoreEnv: false, tag: { setup: `echo run >> ${marker}` } });
+  // M5.5 (spec delta 13, C19): T2 after T1 in the plan: free tasks on other files would run as a lane (max_concurrent 4)
+  const w = await approved(t, { tasks: [task('T1', { files: ['lib2/a.js'] }), task('T2', { blocked_by: ['T1'] })], sessions, ignoreEnv: false, tag: { setup: `echo run >> ${marker}` } });
   const { tbd, id, k } = w;
   await until(() => k().state === 'clarify', 30_000, 'clarify');
   const t1 = k().work.tasks[0].head;

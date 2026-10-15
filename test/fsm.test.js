@@ -52,6 +52,11 @@ const SPEC = {
   'review>working:you': '*',
   'qa>working:you': 'qa',
   'final_gate>working:you': '*',
+  // M5.5 X11 (C19): a lane ticket ends by the runner (guard lane; done also lane_merged)
+  'working>done:runner': '*',
+  'working>cancelled:runner': '*',
+  'clarify>cancelled:runner': '*',
+  'blocked>cancelled:runner': '*',
 };
 for (const s of ACTIVE) SPEC[`${s}>blocked:runner`] = '*';
 for (const p of PHASES) SPEC[`blocked>${p}:you`] = p === 'qa' ? 'qa' : '*';
@@ -132,6 +137,22 @@ test('M5 C13 close: waiting close + final.sha + children done; rework at close: 
   assert.match(fsm.check(close(), 'working', 'you', { ...ctx, rework_ok: () => 'rework > 2' }).reason, /rework > 2/);
   // the D9 pass of a non-code final gate is untouched (the close rows are code only)
   assert.equal(fsm.check(ticket('final_gate', 'research', { waiting: { reason: 'close' }, final: { sha: 'a'.repeat(40) } }), 'done', 'you', fsm.GUARDS).reason, 'guard sha_on_main unavailable');
+});
+
+// M5.5 X11 P8: a lane's end is the runner's row: cancelled from working / clarify / blocked, done once the parent's task
+// is done (ctx.ticketOf); never for a ticket that is not a lane
+test('M5.5 X11 P8 lane rows: runner cancels a lane from working, clarify, blocked; done needs its task done in the parent; a non-lane gets neither', () => {
+  const lane = (state) => ticket(state, 'code', { lane_of: { id: 't_par001', task: 'T2' } });
+  const parent = (status) => ({ t_par001: { work: { tasks: [{ id: 'T1', status: 'done' }, { id: 'T2', status }] } } });
+  const ctx = (status) => ({ ...fsm.GUARDS, ticketOf: (id) => parent(status)[id] ?? null });
+  for (const s of ['working', 'clarify', 'blocked']) {
+    assert.deepEqual(fsm.check(lane(s), 'cancelled', 'runner', fsm.GUARDS), { ok: true }, s);
+    assert.equal(fsm.check(ticket(s), 'cancelled', 'runner', fsm.GUARDS).reason, 'not a lane', s);
+  }
+  assert.deepEqual(fsm.check(lane('working'), 'done', 'runner', ctx('done')), { ok: true });
+  assert.match(fsm.check(lane('working'), 'done', 'runner', ctx('pending')).reason, /T2 is not merged into t_par001/);
+  assert.match(fsm.check(lane('working'), 'done', 'runner', { ...fsm.GUARDS, ticketOf: () => null }).reason, /not merged/, 'parent missing: open');
+  assert.equal(fsm.check(ticket('working'), 'done', 'runner', ctx('done')).reason, 'not a lane');
 });
 
 test('AC3 resume goes only to phases up to where the ticket blocked', () => {
