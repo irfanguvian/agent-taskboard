@@ -74,9 +74,17 @@ function repo() {
   return dir;
 }
 
-test('AC3 U1 U2 J6 J7: assign guards (blocker not merged, base ref missing, worktree add fails → backlog); tb assign → detached worktree at base_sha; AC2 U5 U6: planning runs there with the seed, questions → clarify, files kept', async (t) => {
+test('AC3 U1 U2 J6 J7: assign guards (blocker not merged, base ref missing, clone fails doctor at base → backlog, clone + base pin gone); tb assign → own clone detached at base_sha (H2.1); AC2 U5 U6: planning runs there with the seed, questions → clarify, files kept', async (t) => {
   const dir = repo();
   const base = git(dir, 'rev-parse', 'main');
+  // H2.1 F13 (contract change; was: a leftover worktrees/t_wtfl01 made `git worktree add` fail): a leftover is removed and
+  // the clone made; its base (not the tag's checkout, which tagStatic reads) sets apiKeyHelper → refused after the clone
+  const bill = repo();
+  fs.mkdirSync(path.join(bill, '.claude'));
+  fs.writeFileSync(path.join(bill, '.claude', 'settings.json'), '{"apiKeyHelper": "x"}\n');
+  git(bill, 'add', '.claude');
+  git(bill, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'bill');
+  fs.rmSync(path.join(bill, '.claude'), { recursive: true });
   const scn = fs.mkdtempSync(path.join(ROOT, 'scn-')); // by invocation: 1 = t_hang01 (at boot), 2 = t_plan01 (after assign)
   fs.writeFileSync(path.join(scn, '1.json'), JSON.stringify({ steps: [{ hang: true }] }));
   fs.writeFileSync(path.join(scn, '2.json'), JSON.stringify({ steps: [result(QUESTIONS)] }));
@@ -91,17 +99,17 @@ test('AC3 U1 U2 J6 J7: assign guards (blocker not merged, base ref missing, work
     t_neg001: { state: 'backlog', tag: 'acme/api', blocked_by: ['t_dep002'] },
     t_dep002: { state: 'final_gate', pr: { merged_at: null } },
     t_base01: { state: 'backlog', tag: 'acme/nobase' },
-    t_wtfl01: { state: 'backlog', tag: 'acme/api' },
+    t_wtfl01: { state: 'backlog', tag: 'acme/bill' },
     t_noid01: { state: 'backlog', tag: 'acme/push' },
   }, {
     files: { 'tags.json': { acme: {}, 'acme/api': { type: 'git', path: dir, base: 'main' }, 'acme/nobase': { type: 'git', path: dir, base: 'nope' },
-      'acme/push': { type: 'git', path: dir, base: 'main', push: { remote: 'mirror' } } }, 'worktrees/t_wtfl01/taken.txt': 'x' },
+      'acme/push': { type: 'git', path: dir, base: 'main', push: { remote: 'mirror' } }, 'acme/bill': { type: 'git', path: bill, base: 'main' } }, 'worktrees/t_wtfl01/taken.txt': 'x' },
     env: { FAKE_CLAUDE_SCENARIO_DIR: scn, TEST_PRESSURE: 'normal' }, // two live runs at once (D2: none at warn)
   });
   await until(() => read(tbd, 't_hang01').lease?.pid, 15_000, 'other run live');
 
   // U2 negatives over HTTP: 409 with the reason, the ticket stays in backlog, no worktree
-  for (const [id, re] of /** @type {[string, RegExp][]} */ ([['t_neg001', /blocker t_dep002 is not merged yet/], ['t_base01', /tag acme\/nobase fails doctor: base branch nope not found/], ['t_wtfl01', /git worktree add .*t_wtfl01 failed: .*; the ticket stays in backlog/],
+  for (const [id, re] of /** @type {[string, RegExp][]} */ ([['t_neg001', /blocker t_dep002 is not merged yet/], ['t_base01', /tag acme\/nobase fails doctor: base branch nope not found/], ['t_wtfl01', /the worktree at base fails doctor: settings\.json sets apiKeyHelper; the ticket stays in backlog/],
     ['t_noid01', /tag acme\/push fails doctor: ident not set: run tb doctor --tag acme\/push --ident$/]])) { // M5 F3b: a push tag needs Irfan's ident
     const r = await tbd.api('POST', `/api/tickets/${id}/assign`);
     assert.equal(r.status, 409, id);
@@ -109,6 +117,7 @@ test('AC3 U1 U2 J6 J7: assign guards (blocker not merged, base ref missing, work
     assert.deepEqual([read(tbd, id).state, read(tbd, id).base_sha, read(tbd, id).worktree], ['backlog', undefined, undefined], id);
   }
   assert.equal(fs.existsSync(path.join(tbd.tbHome, 'worktrees', 't_neg001')), false);
+  assert.deepEqual([fs.existsSync(path.join(tbd.tbHome, 'worktrees', 't_wtfl01')), git(bill, 'for-each-ref', 'refs/tb')], [false, ''], 'F13: the clone and its base pin went again');
 
   // tb assign: usage exit 2, ok exit 0 (TOON), a second assign exit 1
   assert.equal((await runTb(['assign'], tbd)).code, 2);
@@ -118,11 +127,18 @@ test('AC3 U1 U2 J6 J7: assign guards (blocker not merged, base ref missing, work
   assert.match(ok.stdout, new RegExp(`^assign: ok · t_plan01 · planning · .*\\nworktree: ${wt} · base_sha ${base}\\n`));
   const again = await runTb(['assign', 't_plan01'], tbd);
   assert.deepEqual([again.code, /error: t_plan01: already assigned \(state planning\)/.test(again.stdout)], [1, true], again.stdout); // was: "planning → planning is not allowed for you"
-  // J6 U1: base_sha = local main, worktree detached at it; S1: its git dir + the repo's common dir kept for pinning
-  assert.deepEqual([read(tbd, 't_plan01').base_sha, read(tbd, 't_plan01').worktree], [base, wt]);
-  assert.deepEqual([read(tbd, 't_plan01').git_dir, read(tbd, 't_plan01').common_dir], [path.join(fs.realpathSync(dir), '.git', 'worktrees', 't_plan01'), path.join(fs.realpathSync(dir), '.git')]);
+  // J6 U1: base_sha = local main, worktree detached at it; S1: its git dir + the repo's common dir kept for pinning.
+  // H2.1 (contract change; was git_dir = <common>/worktrees/t_plan01, a linked worktree): its own clone: .git a dir, no
+  // refs, alternates = the tag's objects, the tag repo pins base_sha (refs/tb/<id>/base), tb agent ident, config hash kept
+  const k1 = read(tbd, 't_plan01');
+  assert.deepEqual([k1.base_sha, k1.worktree], [base, wt]);
+  assert.deepEqual([k1.git_dir, k1.common_dir], [path.join(fs.realpathSync(wt), '.git'), path.join(fs.realpathSync(dir), '.git')]);
   assert.equal(git(wt, 'rev-parse', 'HEAD'), base);
   assert.throws(() => git(wt, 'symbolic-ref', '-q', 'HEAD'), 'detached HEAD');
+  assert.deepEqual([git(wt, 'for-each-ref'), git(dir, 'rev-parse', 'refs/tb/t_plan01/base')], ['', base]);
+  assert.equal(fs.readFileSync(path.join(k1.git_dir, 'objects', 'info', 'alternates'), 'utf8'), `${k1.common_dir}/objects\n`);
+  assert.deepEqual([git(wt, 'config', 'user.name'), git(wt, 'config', 'user.email')], ['tb agent', 'tb-agent@localhost']);
+  assert.equal(k1.clone.config, require('node:crypto').createHash('sha256').update(fs.readFileSync(path.join(k1.git_dir, 'config'))).digest('hex'));
 
   // AC2: the planning run's cwd is that worktree; questions → clarify, must_ask cleared; U5 files
   await until(() => read(tbd, 't_plan01').state === 'clarify', 30_000, 'clarify');
@@ -232,7 +248,8 @@ test('item 8 E2E (U8 U9 J3 J12 AC3 AC4 AC8): assign → questions → tb answer 
   const base = git(dir, 'rev-parse', 'main');
   const marker = path.join(ROOT, `setup-ok-${process.pid}`);
   // npm-like: fails until the marker exists; then node_modules with a CLAUDE.md, and the slot lease it ran under
-  const setup = `test -f ${marker} || { echo boom >&2; exit 3; }; mkdir -p node_modules/x && echo "$TBX_LEASE" > node_modules/.lease && echo m > node_modules/x/CLAUDE.md`;
+  // H2.1 F3: setup writes the clone's config as husky does (core.hooksPath): approve hashes it again, pinned git runs on
+  const setup = `test -f ${marker} || { echo boom >&2; exit 3; }; mkdir -p node_modules/x && echo "$TBX_LEASE" > node_modules/.lease && echo m > node_modules/x/CLAUDE.md && git config core.hooksPath .husky`;
   const L1 = { id: 'R1Q1', text: 'Page size? → 50', source: 'answer:R1Q1' };
   const L2 = { id: 'R1Q2', text: 'Cursor or offset? → cursor', source: 'answer:R1Q2' };
   const R2C = { id: 'R2C', text: 'keep GET /users/all working', source: 'reject:R2' };
@@ -313,6 +330,17 @@ test('item 8 E2E (U8 U9 J3 J12 AC3 AC4 AC8): assign → questions → tb answer 
   assert.deepEqual(alerts(tbd).filter((a) => a.title === 'Setup failed').length, 1);
   const hash = crypto.createHash('sha256').update(canon(P2)).digest('hex');
   assert.equal(k().plan_hash, hash);
+  // S-L1 (contract change; was H2.1 rev 3 #9: any config change before an approve that runs setup was hashed again): only
+  // a setup tbd started (its setup_pending marker, cleared with the hash after it) is hashed again; a config changed with
+  // no marker is planted: the approve stops at the pin (PLANTED), nothing blessed, the setup never runs
+  const cfgFile = path.join(k().git_dir, 'config');
+  const cfg0 = fs.readFileSync(cfgFile);
+  assert.equal(Object.hasOwn(k(), 'setup_pending'), false, 'the marker cleared after the failed setup');
+  git(k().worktree, 'config', 'tb.probe', 'planted');
+  assert.match((await runTb(['approve', id], tbd)).stdout, /^approve: accepted · /);
+  await until(() => /config is not the one tbd wrote: git refused in /.test(k().waiting?.error ?? ''), 30_000, 'refused PLANTED');
+  assert.deepEqual([k().state, k().waiting.reason, k().clone.config], ['plan_approval', 'setup_failed', crypto.createHash('sha256').update(cfg0).digest('hex')]);
+  fs.writeFileSync(cfgFile, cfg0); // put back by hand
   // approve again, twice at once: one setup
   fs.writeFileSync(marker, '');
   const both = await Promise.all([post('approve'), post('approve')]);
@@ -327,6 +355,8 @@ test('item 8 E2E (U8 U9 J3 J12 AC3 AC4 AC8): assign → questions → tb answer 
   assert.deepEqual([p.plan_hash, json(tk(tbd, id, 'plan.json')), p.skills], [hash, P2, ['learning']]);
   assert.deepEqual([git(wt, 'symbolic-ref', '--short', 'HEAD'), git(wt, 'rev-parse', 'HEAD'), p.branch], ['tb/t_e2e001-paginate-get-users', base, 'tb/t_e2e001-paginate-get-users']);
   assert.equal(fs.readFileSync(path.join(wt, '.env.test'), 'utf8'), 'SECRET=1\n');
+  const cfg = fs.readFileSync(path.join(p.git_dir, 'config'));
+  assert.deepEqual([git(wt, 'config', 'core.hooksPath'), p.clone.config], ['.husky', crypto.createHash('sha256').update(cfg).digest('hex')], 'F3: the hash after setup');
   const sk = tk(tbd, id, 'skills', '.claude', 'skills', 'learning');
   assert.deepEqual([fs.lstatSync(path.join(sk, 'SKILL.md')).isFile(), fs.readdirSync(sk)], [true, ['SKILL.md']]);
   assert.match(fs.readFileSync(path.join(wt, 'node_modules', '.lease'), 'utf8'), /^\S{8,}\n$/, 'TBX_LEASE: setup ran in the heavy slot');
@@ -525,7 +555,7 @@ test('C15 F6: a child auto-assigns on its parent\'s final commit once the parent
   await new Promise((r) => setTimeout(r, 2500)); // more ticks: nothing retried, nothing assigned early
   assert.deepEqual(['t_kid012', 't_kid013', 't_kid014', child].map((id) => [read(tbd, id).state, read(tbd, id).waiting?.reason ?? null]),
     [['backlog', null], ['backlog', 'blockers_diverge'], ['backlog', 'assign_failed'], ['backlog', null]]);
-  assert.equal(fs.existsSync(wtOf('t_kid014')), false, 'the race\'s worktree is removed');
+  assert.deepEqual([fs.existsSync(wtOf('t_kid014')), git(dir, 'for-each-ref', 'refs/tb/t_kid014')], [false, ''], 'the race\'s clone and its base pin are removed (F13)');
   assert.deepEqual(['Blockers diverge', 'Auto-assign failed'].map((x) => alerts(tbd).filter((a) => a.title === x).length), [1, 1]);
 });
 

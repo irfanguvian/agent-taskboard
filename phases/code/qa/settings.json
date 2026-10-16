@@ -1,18 +1,13 @@
 {
   "permissions": {
-    "allow": ["Read", "Glob", "Grep", "Edit(/${WORKTREE}/docs/verification/**)", "Bash", "Agent"],
-    "deny": [
-      "Edit(/${WORKTREE}/node_modules/[a-zA-Z0-9@_-]*)", "Edit(/${WORKTREE}/node_modules/[a-zA-Z0-9@_-]*/**)",
-      "Edit(/${WORKTREE}/node_modules/.bin)", "Edit(/${WORKTREE}/node_modules/.bin/**)", "Edit(/${WORKTREE}/node_modules/.package-lock.json)"
-    ]
+    "allow": ["Read", "Glob", "Grep", "Edit(/${WORKTREE}/docs/verification/**)", "Bash", "Agent"]
   },
   "attribution": { "commit": "", "pr": "" },
   "sandbox": {
     "filesystem": {
       "allowRead": ["${TB_CODE}", "${NODE_HOME}", "~/.npm", "~/Library/Caches/ms-playwright", "~/bin/postgres-irfan-axi"],
       "allowWrite": ["~/.npm/_logs"],
-      "denyWrite": ["${WORKTREE}/node_modules/[a-zA-Z0-9@_-]*", "${WORKTREE}/node_modules/.bin", "${WORKTREE}/node_modules/.package-lock.json",
-        "${TAG_PATH}/.git"]
+      "denyWrite": ["${WORKTREE}/.git"]
     },
     "network": { "allowLocalBinding": true }
   }

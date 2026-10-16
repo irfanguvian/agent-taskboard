@@ -14,6 +14,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const { startTbd, FAKE_GATES, REPO } = require('./helpers/tbd');
+const { cloneAt, fetchHead } = require('../lib/util');
 const { FAKE, RUN_SPY, ticket, read, lines, until, reap, pidsOf } = require('./helpers/runs');
 
 const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'fin-'));
@@ -67,6 +68,19 @@ function branch(r, id, { files = [['src/users.js', 'module.exports = { byId: (id
     git(wt, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', `--author=${author}`, '-m', `change ${f}`);
   }
   return { wt, branch: `tb/${id}`, head: git(wt, 'rev-parse', 'HEAD') };
+}
+// H2.1: the same on the ticket's own clone (util.cloneAt at base, then `switch -c` as approve does) → + its pin
+async function cloned(r, id, o = {}) {
+  const wt = path.join(fs.realpathSync(fs.mkdtempSync(path.join(ROOT, 'wt-'))), 'w');
+  const common_dir = fs.realpathSync(path.join(r.dir, '.git'));
+  const pin = { common_dir, ...(await cloneAt(common_dir, wt, r.base)) };
+  git(wt, 'switch', '-q', '-c', `tb/${id}`);
+  for (const [f, text] of o.files ?? [['src/users.js', 'module.exports = { byId: (id) => ({ id }) };\n']]) {
+    fs.writeFileSync(path.join(wt, f), text);
+    git(wt, 'add', f);
+    git(wt, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '-m', `change ${f}`);
+  }
+  return { wt, branch: `tb/${id}`, head: git(wt, 'rev-parse', 'HEAD'), pin };
 }
 const tag = (r, over = {}) => ({ type: 'git', path: r.dir, base: 'main', env_files: ['.env.test'], ...over });
 const C = (id, over = {}) => ({ id, type: 'backend', kind: 'positive', source: 'A1', acceptance: ['A1'], pre: '', steps: ['GET /users/1'], expect: '200', result: 'PASS', recs: [], screenshots: [], observed: { note: '' }, ...over });
@@ -357,23 +371,7 @@ test('M5.3 docs.clean: QA edits the tracked docs/verification/tracked.md → aft
 // tracked-change check content-based (SEC-2: a forged index stat cache)
 const docExec = (doc) => ({ exec: ['/bin/sh', '-c', '[ "$TB_PHASE" = final_gate ] || exit 0; mkdir -p docs/verdicts && printf "%s" "$1" > docs/verdicts/v.md && printf "# Final\\n" > docs/verification/f.md', 'sh', doc] });
 const reviewDoc = (doc, retry = doc, o = out()) => ({ steps: [docExec(doc), { result: { structured_output: o } }], resume_steps: [docExec(retry), { result: { structured_output: o } }] });
-// SEC-2 probe: rel's content changed in the worktree, its index entry's stat refreshed (git add) then pointed back at
-// HEAD's blob: `git status` clean, `ls-files -v` H, the file not HEAD's
-function forgeIndex(wt, rel, text) {
-  const old = Buffer.from(git(wt, 'rev-parse', `HEAD:${rel}`), 'hex');
-  const f = path.join(wt, rel);
-  fs.writeFileSync(f, text);
-  const past = new Date(Date.now() - 60_000); // older than the index: never racily clean (git would hash it)
-  fs.utimesSync(f, past, past);
-  git(wt, 'add', rel);
-  const idx = path.resolve(wt, git(wt, 'rev-parse', '--git-path', 'index'));
-  const buf = fs.readFileSync(idx);
-  const at = buf.indexOf(Buffer.from(git(wt, 'rev-parse', `:${rel}`), 'hex'));
-  assert.ok(at > 0, 'the new blob in the index');
-  old.copy(buf, at);
-  crypto.createHash('sha1').update(buf.subarray(0, buf.length - 20)).digest().copy(buf, buf.length - 20);
-  fs.writeFileSync(idx, buf);
-}
+const { index: forgeIndex, blob: forgeBlob } = require('./helpers/forge'); // SEC-2 / C1 probes (H1)
 
 test('M5.3 FA M1 SEC-5 SEC-2: a verdict doc with tbd\'s Evidence heading, a fence left open (an even count of fence lines) or an HTML comment left open, is refused, resumed, refused → Blocked; the fence closed on the retry → taken; an env file value in the summary → refused → Blocked; a forged index stat cache at the gate start → Blocked integrity naming the file, no checks run', async (t) => {
   const r = repo();
@@ -409,6 +407,73 @@ test('M5.3 FA M1 SEC-5 SEC-2: a verdict doc with tbd\'s Evidence heading, a fenc
   assert.equal(k(fenced).final.n, 1);
   assert.deepEqual([k(forge).waiting?.reason, k(forge).waiting?.why], ['integrity', 'final checks integrity: tracked changes at the final gate:  M src/users.js: nobody commits there']);
   assert.equal(calls().some((c) => c.ticket === forge), false, 'no check ran on a tree that is not HEAD');
+});
+
+// H2.5 C1 on clone tickets: the final gate fetches HEAD into the tag repo (refs/tb/<id>/head = tested), the squash reads
+// and writes the tag's objects (trusted, never saved) and sets the tag repo's branch by CAS (F13: tag_tip); a blob the agent
+// rewrote → the fetch refused → Blocked integrity; the tag branch already elsewhere → Blocked config. H3 (D-0153): a
+// summary naming NODE_ENV's value (development) is taken. H6 (C4): <!-- inside a closed fence with no tag-like prose →
+// taken; a prose <div>, or a `- <div>` list item, before a fence holding <!-- → the whole doc checked → refused
+test('H2.5 F13 H3 H6: clone squash → tag refs/tb/<id>/head = tested, tag branch = final.sha = tag_tip, no trusted key, a "development" summary taken; rewritten blob → Blocked integrity; tag branch moved → Blocked config; <!-- in a closed fence taken, after a prose or list-item <div> refused', async (t) => {
+  const r = repo();
+  fs.writeFileSync(path.join(r.dir, '.env.test'), 'SECRET=1\nNODE_ENV=development\n');
+  const ids = ['t_h25001', 't_h25002', 't_h25003', 't_h6c001', 't_h6c002', 't_h6c003'];
+  const [ok, bad, moved, fenced, div, item] = ids;
+  // bad's blob is its own (one the tag repo already holds, e.g. ok's, is never sent: the tag's real copy is read)
+  const cl = Object.fromEntries(await Promise.all([ok, bad, moved].map(async (id) => [id, await cloned(r, id, id === bad ? { files: [['src/users.js', 'module.exports = { bad: 1 };\n']] } : {})])));
+  forgeBlob(cl[bad].wt, 'src/users.js', 'evil content\n'); // the agent rewrote its own commit's blob
+  git(r.dir, 'update-ref', `refs/heads/tb/${moved}`, r.base); // the tag branch made outside tbd
+  const br = { ...cl, ...Object.fromEntries([fenced, div, item].map((id) => [id, branch(r, id)])) };
+  const DEV = { ...SUMMARY, description: 'GET /users/:id returns the user, in development too.' };
+  const { tbd, k } = await boot(t, {
+    tickets: Object.fromEntries(ids.map((id) => [id, flow(id, r, br[id], br[id].pin ?? {})])),
+    tags: Object.fromEntries(ids.map((id) => [`acme/${id}`, tag(r)])),
+    files: Object.fromEntries(ids.flatMap((id) => Object.entries(qaFiles(id)))),
+    scenarios: {
+      [ok]: review(out({ summary: DEV })), [moved]: review(out()),
+      [fenced]: reviewDoc('# Verdict\n\nPASS\n\n```html\n<!-- a sample comment\n```\n'),
+      [div]: reviewDoc('# Verdict\n\n<div>\n\n```\n<!-- in a fence\n```\n'),
+      [item]: reviewDoc('# Verdict\n\n- <div>\n\n  ```\n  <!-- in a fence\n  ```\n'),
+    },
+  });
+  await until(() => [ok, fenced].every((id) => k(id).waiting?.reason === 'close') && [bad, moved, div, item].every((id) => k(id).state === 'blocked') && [div, item].every((id) => k(id).lease?.exit), 60_000, 'squashed, blocked, refused');
+  const p = k(ok);
+  assert.deepEqual([git(r.dir, 'rev-parse', `refs/tb/${ok}/head`), git(r.dir, 'rev-parse', `refs/heads/${br[ok].branch}`), p.tag_tip, git(br[ok].wt, 'rev-parse', 'HEAD')],
+    [br[ok].head, p.final.sha, p.final.sha, p.final.sha], 'tested head fetched; the squash on the tag branch, the clone branch and tag_tip');
+  assert.equal(git(r.dir, 'rev-list', '--parents', '-n', '1', p.final.sha), `${p.final.sha} ${r.base}`, 'one commit on base, in the tag repo\'s objects');
+  assert.equal(git(r.dir, 'log', '-1', '--format=%B', p.final.sha), `${DEV.title}\n\n${DEV.description}`);
+  assert.equal(Object.hasOwn(JSON.parse(fs.readFileSync(tk(tbd, ok, 'ticket.json'), 'utf8')), 'trusted'), false, 'trusted is never saved');
+  assert.deepEqual([k(bad).waiting.reason, /HEAD not fetched into the tag repo: .*did not receive expected object/.test(k(bad).waiting.why)], ['integrity', true], k(bad).waiting.why);
+  assert.deepEqual([k(moved).waiting.reason, k(moved).final.sha, git(r.dir, 'rev-parse', `refs/heads/tb/${moved}`)], ['config', undefined, r.base]);
+  assert.match(k(moved).waiting.why, new RegExp(`^tag branch tb/${moved} moved outside tbd`));
+  for (const id of [div, item]) assert.match(k(id).lease.error, /verdict_doc: an HTML comment <!-- is never closed with -->/, id);
+});
+
+// C-M5 (+) H2.3 F13 + F8: a clone squash a crash left after step 5 (the tag repo's branch set to the squash, tbd dead
+// before the ticket write: no final.sha, no tag_tip) → adopted on boot: the tag CAS from no tag_tip is refused, the branch
+// is already at the squash → done, never Blocked config (the "moved outside tbd" case is H2.5's `moved` above)
+test('C-M5 F8 F13: a clone squash crashed after the tag branch CAS → adopted on boot: the refused CAS finds the branch at the squash → waiting close, final.sha = tag_tip = the squash, one alert', async (t) => {
+  const r = repo();
+  const id = 't_cr3003';
+  const b = await cloned(r, id);
+  const tested = b.head;
+  await fetchHead({ id, worktree: b.wt, ...b.pin }, tested); // the final gate fetched it
+  const sq = execFileSync('/usr/bin/git', ['-C', r.dir, 'commit-tree', `${tested}^{tree}`, '-p', r.base, '-m', SUMMARY.title, '-m', SUMMARY.description],
+    { encoding: 'utf8', env: { ...gitEnv, GIT_AUTHOR_NAME: OWNER.name, GIT_AUTHOR_EMAIL: OWNER.email, GIT_COMMITTER_NAME: OWNER.name, GIT_COMMITTER_EMAIL: OWNER.email } }).trim();
+  git(b.wt, 'update-ref', `refs/tb/${id}/final-pre-1`, tested); // steps 4 in the clone: its refs
+  git(b.wt, 'update-ref', `refs/heads/${b.branch}`, sq, tested);
+  git(r.dir, 'update-ref', `refs/heads/${b.branch}`, sq, ''); // step 5: the tag branch made
+  const lease = { gen: 2, pid: null, lstart: '', pgid: null, phase: 'final_gate', round: 6, session: null, log: null, exit: 'result', started_at: '2026-10-14T00:00:00.000Z', ended_at: '2026-10-14T00:01:00.000Z' };
+  const { k, alerts } = await boot(t, {
+    tickets: { [id]: flow(id, r, b, { ...b.pin, final: { tested_sha: tested, n: 1, verdict: 'pass' }, work: work(r, b, { gen: 1, kind: 'final', ok: true, n: 1 }), lease }) },
+    tags: { [`acme/${id}`]: tag(r, { ident: OWNER }) },
+    files: { ...qaFiles(id), [`tickets/${id}/final/01.json`]: { n: 1, verdict: 'pass', summary: SUMMARY } },
+  });
+  await until(() => k(id).waiting?.reason === 'close' || k(id).state === 'blocked', 60_000, 'squash decided');
+  const p = k(id);
+  assert.deepEqual([p.state, p.waiting.reason, p.final.sha, p.tag_tip, git(r.dir, 'rev-parse', `refs/heads/${b.branch}`), git(b.wt, 'rev-parse', 'HEAD')], ['final_gate', 'close', sq, sq, sq, sq], JSON.stringify(p.waiting));
+  await until(() => alerts().some((x) => x.title === 'Ready to close'), 10_000, 'alert');
+  assert.equal(alerts().filter((x) => x.title === 'Ready to close').length, 1);
 });
 
 test('M5.3 FA M2: a final review edits the tracked docs/verification/tracked.md and ends without a result (max_turns) → Blocked; Resume → the doc back to HEAD at the gate start, the final checks run green (no Blocked integrity)', async (t) => {

@@ -13,6 +13,7 @@ const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const { startTbd, FAKE_GATES, REPO } = require('./helpers/tbd');
 const { FAKE, RUN_SPY, ticket, read, lines, until, reap, pidsOf, alive } = require('./helpers/runs');
+const { cloneAt } = require('../lib/util');
 
 const ROOT = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'lanes-')));
 after(() => fs.rmSync(ROOT, { recursive: true, force: true }));
@@ -77,11 +78,16 @@ const TRIP = { lock: null, bin: sha256('') };
 // fit: before the first sample none does, and the parent's own task is then marked running: no quiet point any more). sessions: {T1: [scenario, ...]} (task-<id>/<n>.json). gates: the parent's
 // fake-gates script. more: extra TB_HOME files (base → {path: value}). before(wt): the worktree before tbd starts.
 async function parent(t, { tasks, sessions = {}, gates = {}, config = {}, tag = {}, env = {}, planOver = {}, ticketOver = {}, extra = {}, pressure = 'normal',
-  seed = null, trip = TRIP, more = (/** @type {string} */ _base) => ({}), before = (/** @type {string} */ _wt) => {} }) {
+  seed = null, trip = TRIP, more = (/** @type {string} */ _base) => ({}), before = (/** @type {string} */ _wt) => {}, legacy = false }) {
   const dir = repo();
   const base = git(dir, 'rev-parse', 'main');
-  const wt = path.join(fs.mkdtempSync(path.join(ROOT, 'wt-')), 'w');
-  git(dir, 'worktree', 'add', '-q', '--detach', wt, base);
+  // H2.1 (contract change; was a linked worktree from `git worktree add --detach`): the parent's own clone, as assign
+  // makes it (util.cloneAt), its pin on the ticket: lane setup, the lanes' gates and the merge run the clone paths.
+  // legacy (C-M5): a parent from before H2, a linked worktree pinned by git_dir + common_dir (no clone)
+  const wt = path.join(fs.realpathSync(fs.mkdtempSync(path.join(ROOT, 'wt-'))), 'w');
+  const common_dir = fs.realpathSync(path.join(dir, '.git'));
+  if (legacy) git(dir, 'worktree', 'add', '-q', '--detach', wt, base);
+  const pin = legacy ? { common_dir, git_dir: fs.realpathSync(git(wt, 'rev-parse', '--absolute-git-dir')) } : { common_dir, ...(await cloneAt(common_dir, wt, base)) };
   before(wt);
   const scn = fs.mkdtempSync(path.join(ROOT, 'scn-'));
   for (const [id, list] of Object.entries(sessions)) {
@@ -100,7 +106,7 @@ async function parent(t, { tasks, sessions = {}, gates = {}, config = {}, tag = 
   const files = {
     'config.json': { ...CONFIG, ...config },
     'tags.json': { acme: {}, 'acme/api': { type: 'git', path: dir, base: 'main', env_files: ['.env.test'], checks: { unit: 'npm test' }, ident: IDENT, ...tag } },
-    [`tickets/${id}/ticket.json`]: ticket(id, { state: 'plan_approval', tag: 'acme/api', title: 'lanes work', base_sha: base, worktree: wt, round: 3,
+    [`tickets/${id}/ticket.json`]: ticket(id, { state: 'plan_approval', tag: 'acme/api', title: 'lanes work', base_sha: base, worktree: wt, ...pin, round: 3,
       answers: [{ id: 'R1Q1', question: 'Page size?', answer: { text: '50' } }], locked_decisions: [{ id: 'R1Q1', text: 'Page size? → 50', source: 'answer:R1Q1' }], ...seeded, ...ticketOver }),
     ...Object.fromEntries(Object.entries(extra).map(([f, v]) => [`tickets/${id}/${f}`, v])),
     [`tickets/${id}/${seed ? `plan-${hash}.json` : 'rounds/01-plan.json'}`]: p,
@@ -186,7 +192,8 @@ test('P1 P8 P9: T1, T2 free, T3 after T1 (max 2) → T2 in a lane; it waits merg
   // P8: the lane ticket: one task (T2), its own worktree pinned (S1), the parent's plan / rules / decisions / answers / base
   assert.deepEqual([lane.lane_of, lane.state, lane.kind, lane.tag, lane.base_sha, lane.plan_hash, lane.plan_file], [{ id, task: 'T2' }, 'working', 'code', 'acme/api', w.base, w.k().plan_hash, w.k().plan_file]);
   assert.deepEqual(lane.answers, w.k().answers);
-  assert.equal(path.dirname(lane.git_dir), path.join(lane.common_dir, 'worktrees'), 'S1: git_dir under common_dir/worktrees');
+  // H2.6 (contract change; was git_dir under common_dir/worktrees): the lane's own clone, pinned with its config hash
+  assert.deepEqual([lane.git_dir, lane.common_dir, typeof lane.clone?.config], [path.join(lane.worktree, '.git'), w.k().common_dir, 'string'], 'S1 H2.2: the lane clone pinned');
   assert.equal(lane.worktree, path.join(w.tbd.tbHome, 'worktrees', lane.id));
   assert.deepEqual(lane.work.tasks.map((x) => [x.id, x.status, x.pre]), [['T2', 'done', w.base]]);
   assert.equal(fs.readFileSync(tk(w.tbd, lane.id, 'rules.md'), 'utf8'), 'Never use offset paging.\n');
@@ -198,7 +205,8 @@ test('P1 P8 P9: T1, T2 free, T3 after T1 (max 2) → T2 in a lane; it waits merg
   assert.equal(git(lane.worktree, 'log', '-1', '--format=%s', laneHead), 'T2');
   // P9 + done-when: T1 still runs; the lane wrote nothing to the parent's branch, no merge starts
   for (let i = 0; i < 20; i++) {
-    assert.deepEqual([w.head(), git(w.dir, 'rev-parse', `refs/heads/${branch}`), w.k().work.merging ?? null, w.k().work.tasks[0].status], [w.base, w.base, null, 'running']);
+    // H2.3 (contract change; was the branch read in the tag repo): the parent's branch lives in its clone
+    assert.deepEqual([w.head(), git(w.wt, 'rev-parse', `refs/heads/${branch}`), w.k().work.merging ?? null, w.k().work.tasks[0].status], [w.base, w.base, null, 'running']);
     await sleep(100);
   }
   go('p1-go');
@@ -218,8 +226,9 @@ test('P1 P8 P9: T1, T2 free, T3 after T1 (max 2) → T2 in a lane; it waits merg
   // the lane: done (runner), its entry gone, its worktree removed (D-0138), its t:ticket line names the parent (D-0139)
   // the t:ticket line follows the lane's save (store event): wait on it too
   const tl = () => lines(path.join(w.tbd.tbHome, 'metrics.jsonl')).find((m) => m.t === 'ticket' && m.ticket === lane.id);
-  // git drops the tree first, its admin dir second: the list check polls too
-  await until(() => w.lane().state === 'done' && !fs.existsSync(lane.worktree) && tl() && !git(w.dir, 'worktree', 'list').includes(lane.id), 10_000, 'lane done, worktree gone (git forgot it), t:ticket line');
+  // H2.3 (contract change; was also: `git worktree list` forgot it): a lane clone is a plain dir, removed with rm
+  await until(() => w.lane().state === 'done' && !fs.existsSync(lane.worktree) && tl(), 10_000, 'lane done, its clone gone, t:ticket line');
+  assert.equal(git(w.dir, 'for-each-ref', `refs/tb/${lane.id}/head`).split(' ')[0], lane.work.tasks[0].head, 'H2.5: the lane\'s gate fetched its head into the tag repo');
   assert.deepEqual([p.work.lanes, p.work.serial, p.work.merging], [{}, [], null]);
   const tline = tl();
   assert.deepEqual([tline.outcome, tline.lane_of], ['done', id]);
@@ -240,8 +249,9 @@ test('P2 (+/−): a conflicting pick → cherry-pick aborted, the parent reset t
   const t1 = w.k().work.tasks[0].head;
   assert.deepEqual(merges(w).map((l) => [l.task, l.lane, l.ok]), [['T2', lane.id, false]]);
   assert.match(merges(w)[0].why, /^cherry-pick [0-9a-f]{12}\.\.[0-9a-f]{12}: /);
-  assert.equal(git(w.dir, 'rev-parse', `refs/tb/${w.id}/lane-T2`), lane.work.tasks[0].head, 'the lane\'s commits kept by ref');
-  assert.equal(fs.existsSync(path.join(w.dir, '.git', 'worktrees', 'w', 'CHERRY_PICK_HEAD')), false, 'the pick aborted');
+  // H2.3 (contract change; was the tag repo's refs and git dir): the lane-fail ref and the pick state live in the parent's clone
+  assert.equal(git(w.wt, 'rev-parse', `refs/tb/${w.id}/lane-T2`), lane.work.tasks[0].head, 'the lane\'s commits kept by ref');
+  assert.equal(fs.existsSync(path.join(w.wt, '.git', 'CHERRY_PICK_HEAD')), false, 'the pick aborted');
   await until(() => w.k().state === 'review', 45_000, 'review');
   const p = w.k();
   assert.deepEqual([p.work.serial, p.work.lanes, p.work.merging], [['T2'], {}, null]);
@@ -264,7 +274,7 @@ test('P2 (−): the re-gate red → the same fallback: reset to merging.pre, lan
   await until(() => w.k().state === 'review', 60_000, 'review');
   assert.deepEqual(merges(w).map((l) => [l.task, l.ok]), [['T2', false]]);
   assert.match(merges(w)[0].why, /re-gate red.*unit: 1 failing after the pick/);
-  assert.equal(git(w.dir, 'rev-parse', `refs/tb/${w.id}/lane-T2`), lane.work.tasks[0].head);
+  assert.equal(git(w.wt, 'rev-parse', `refs/tb/${w.id}/lane-T2`), lane.work.tasks[0].head); // H2.3: in the parent's clone
   assert.deepEqual(subjects(w), ['T1', 'T2 serial']);
   assert.deepEqual([w.k().work.serial, w.lanes().map((x) => x.state)], [['T2'], ['cancelled']]);
 });
@@ -363,7 +373,7 @@ test('P7 (+): seeded work.merging with a real CHERRY_PICK_HEAD → boot aborts t
   });
   await waitsMerge(w);
   const lane = w.lane();
-  const gd = path.join(w.dir, '.git', 'worktrees', 'w');
+  const gd = path.join(w.wt, '.git'); // H2.1 (contract change; was <tag>/.git/worktrees/w): the parent's clone
   await w.restart((h) => { // a kill mid-pick, by hand: a conflicting commit, then the lane picked onto it
     fs.writeFileSync(path.join(h.wt, 'src', 'T2.js'), 'other\n');
     git(h.wt, 'add', 'src/T2.js');
@@ -391,7 +401,10 @@ test('P7 (+): a Restart of the parent during a merge job → halt aborts it, the
   });
   await waitsMerge(w);
   go('p7c-go');
-  await until(() => w.k().work.merging && w.k().work.gate && w.head() !== w.k().work.merging.pre, 45_000, 'merge re-gate running');
+  // the re-gate's own call (H2.5: its pre-check now fetches HEAD and compares content first; a Restart before the call
+  // would hand the scripted 60 s sleep to T3's gate)
+  await until(() => w.k().work.merging && w.k().work.gate && w.head() !== w.k().work.merging.pre
+    && lines(path.join(w.tbd.tbHome, 'fake-gates.jsonl')).some((c) => c.ticket === w.id && c.task === 'T2'), 45_000, 'merge re-gate running');
   const pre = w.k().work.merging.pre;
   assert.equal((await w.tbd.api('POST', `/api/tickets/${w.id}/restart`, {})).status, 202);
   await until(() => fs.existsSync(marker('p7c-status')), 30_000, 'T3 started');
@@ -549,19 +562,24 @@ test('D-0135 (+) [C#7g]: a parent Blocked keeps its lane running; the lane reach
   assert.deepEqual([w.k().state, w.k().work.merging ?? null, w.k().work.tasks[1].status], ['blocked', null, 'pending']);
 });
 
-test('sec A08 (−): a lane\'s agent moves the parent\'s branch while the parent waits for its lanes → no merge: the parent Blocked integrity naming both heads + an alert, nothing picked, every pre unchanged; a Restart of a parent waiting for its lanes → 409', async (t) => {
+// H2.6 (contract change; was: the lane's agent moved the parent's branch through the shared .git): a lane's agent now
+// writes only its own clone (its ref write below stays there); the guard is kept for anything else that moves the
+// parent's branch outside tbd (the test does, in the parent's clone)
+test('sec A08 (−): the parent\'s branch moved outside tbd while the parent waits for its lanes (a lane\'s own ref write stays in its clone) → no merge: the parent Blocked integrity naming both heads + an alert, nothing picked, every pre unchanged; a Restart of a parent waiting for its lanes → 409', async (t) => {
   const w = await parent(t, {
     tasks: [task('T1'), task('T2')],
     sessions: {
       T1: [done('src/T1.js', 'T1')],
-      // the lane rewinds the parent's branch (shared .git, H2) to the base: a done task gone
-      T2: [done('src/T2.js', 'T2', [hold(marker('a08-go')), { exec: ['/usr/bin/git', 'update-ref', 'refs/heads/tb/t_lane01-lanes-work', 'main'] }])],
+      // C-L10: the lane's agent moves "the parent's branch" to its own new head (a value no rewind below can mask): with
+      // its own clone (H2.6) that ref is its clone's, the parent's branch never moves
+      T2: [{ steps: [hold(marker('a08-go')), commit('src/T2.js', 'T2'), { exec: ['/usr/bin/git', 'update-ref', 'refs/heads/tb/t_lane01-lanes-work', 'HEAD'] }, result({ status: 'done', commit: SHA })] }],
     },
   });
   await until(() => w.k().work.tasks[0].status === 'done' && w.k().waiting?.reason === 'lanes', 30_000, 'T1 done, the parent waits lanes');
   const t1 = w.k().work.tasks[0].head;
   const r = await w.tbd.api('POST', `/api/tickets/${w.id}/restart`, {});
   assert.deepEqual([r.status, r.json, w.k().state], [409, { error: `${w.id}: waits for its lanes` }, 'working'], 'no session with no task of its own');
+  git(w.wt, 'update-ref', `refs/heads/${w.k().branch}`, w.base); // rewound to the base outside tbd: a done task gone
   go('a08-go');
   // the alert follows the Blocked save: wait on both
   await until(() => w.k().state === 'blocked' && alerts(w).some((a) => a.title === 'Blocked: integrity'), 45_000, 'parent blocked, alerted');
@@ -569,9 +587,49 @@ test('sec A08 (−): a lane\'s agent moves the parent\'s branch while the parent
   assert.deepEqual([p.waiting.reason, p.work.merging ?? null, p.work.tasks.map((x) => [x.id, x.status, x.pre])], ['integrity', null, [['T1', 'done', w.base], ['T2', 'pending', null]]]);
   assert.match(p.waiting.why, new RegExp(`^HEAD ${w.base} is not ${t1}`));
   assert.deepEqual([merges(w), w.head(), w.lane().waiting?.reason], [[], w.base, 'merge'], 'nothing picked; the lane waits on');
+  const lh = w.lane().work.tasks[0].head;
+  assert.deepEqual([git(w.lane().worktree, 'rev-parse', 'refs/heads/tb/t_lane01-lanes-work'), git(w.wt, 'rev-parse', `refs/heads/${p.branch}`) !== lh], [lh, true], 'C-L10: the lane\'s ref write stayed in its clone');
   const integ = alerts(w).filter((a) => a.title === 'Blocked: integrity');
   assert.equal(integ.length, 1);
   assert.match(integ[0].message, new RegExp(`^${w.id}: HEAD ${w.base} is not ${t1}`));
+});
+
+// C-M5 (+) no breaking change: a parent from before H2 (a linked worktree, no clone) and its lane (always a clone, H2.6):
+// the lane cloned at cur.pre straight from the tag repo (no parent clone to fetch from), its gate fetches its head into
+// the tag repo, the merge picks it with no fetch (the parent reads the tag's objects) and re-gates it → review
+test('C-M5 (+): a legacy parent (linked worktree, no clone) + a clone lane: T2 in its own clone from the tag repo, picked onto the parent\'s branch with no fetch, re-gated → review; the lane done, its clone gone', async (t) => {
+  const w = await parent(t, {
+    legacy: true,
+    tasks: [task('T1'), task('T2')],
+    sessions: { T1: [done('src/T1.js', 'T1', [hold(marker('cm5-go'))])], T2: [done('src/T2.js', 'T2')] },
+  });
+  await waitsMerge(w);
+  const lane = w.lane();
+  assert.deepEqual([w.k().clone, typeof lane.clone?.config, lane.git_dir, lane.common_dir], [undefined, 'string', path.join(lane.worktree, '.git'), w.k().common_dir]);
+  go('cm5-go');
+  await until(() => w.k().state === 'review', 60_000, 'review');
+  assert.deepEqual(subjects(w), ['T1', 'T2']);
+  assert.deepEqual(merges(w).map((l) => [l.task, l.lane, l.ok]), [['T2', lane.id, true]]);
+  await until(() => w.lane().state === 'done' && !fs.existsSync(lane.worktree), 10_000, 'lane done, its clone gone');
+});
+
+// C-M4 (−) D-0140: the parent's clone config changed (agent-planted) → the lane setup's fetch from the parent is refused
+// PLANTED inside planning.worktree, which keeps the code: a security end (the parent alerted "Lane refused", lane_end
+// keep), never an ordinary lane failure; T2 serial
+test('C-M4 (−): the parent\'s clone config planted → lane setup refused PLANTED through planning.worktree → "Lane refused: agent-planted config" alert naming the lane, lane cancelled (keep), T2 serial', async (t) => {
+  const w = await parent(t, {
+    tasks: [task('T1'), task('T2')], sessions: { T1: [{ steps: [{ hang: true }] }] },
+    seed: (base) => cursor([wtask('T1', { attempt: 1, pre: base }), wtask('T2')]),
+    before: (wt) => fs.appendFileSync(path.join(wt, '.git', 'config'), '[tb]\n\tplanted = 1\n'),
+  });
+  await until(() => laneLines(w).length === 1 && w.lane()?.state === 'cancelled', 30_000, 'lane refused');
+  const lane = w.lane();
+  assert.match(laneLines(w)[0].why, /config is not the one tbd wrote/);
+  assert.deepEqual([laneLines(w)[0].task, lane.lane_end?.keep, w.k().work.serial], ['T2', true, ['T2']]);
+  await until(() => alerts(w).some((a) => a.message.startsWith(`${w.id} lane `)), 10_000, 'the parent alerted');
+  const mine = alerts(w).filter((a) => a.message.startsWith(`${w.id} lane `));
+  assert.deepEqual(mine.map((a) => a.title), ['Lane refused: agent-planted config']);
+  assert.match(mine[0].message, new RegExp(`^${w.id} lane ${lane.id}: .*config is not the one tbd wrote`));
 });
 
 test('K4 + lanes: T3 accepted before lane T2 merges (branch T1 T3 T2, plan T1 T2 T3) → a replan may keep T1 only (keep_ok): a reset to the last kept head never drops the merged T2', async (t) => {

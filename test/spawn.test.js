@@ -212,6 +212,77 @@ test('S1 git dirs pinned: commondir rewritten to a copy whose config has a clean
   await assert.rejects(spawn.dirtyPaths(t), (/** @type {any} */ e) => /commondir leads to /.test(e.message) && e.code === 'PLANTED');
 });
 
+// ---- H2.2 clone pin (replaces D-0046 for clones) --------------------------------------------------------------------
+// A tag repo with one commit and the ticket's own clone of it, as assign makes it (util.cloneAt): {root, wt, t, git}.
+async function tagClone() {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(ROOT, 'clone-')));
+  const repo = path.join(root, 'repo');
+  const wt = path.join(root, 'wt');
+  const git = (cwd, ...a) => execFileSync('/usr/bin/git', ['-C', cwd, ...a], { env: GENV, encoding: 'utf8' }).trim();
+  fs.mkdirSync(repo);
+  git(repo, 'init', '-q', '-b', 'main');
+  fs.writeFileSync(path.join(repo, 'a.txt'), 'a\n');
+  git(repo, 'add', '.');
+  git(repo, '-c', 'user.name=t', '-c', 'user.email=t@example.invalid', 'commit', '-qm', 'base');
+  const base_sha = git(repo, 'rev-parse', 'HEAD');
+  const common_dir = path.join(repo, '.git');
+  const t = { worktree: wt, base_sha, common_dir, ...(await require('../lib/util').cloneAt(common_dir, wt, base_sha)) };
+  return { root, wt, t, git };
+}
+
+test('H2.2 clone pin: a cloneAt clone (own .git dir, no refs, HEAD at base, alternates = the tag objects, tb agent ident, config hash) runs git pinned; a planted commondir, an edited config (its filter never runs), a changed alternates file or .git swapped for a link to an exact copy → PLANTED, git refused', async () => {
+  const { wt, t, git } = await tagClone();
+  assert.ok(fs.lstatSync(path.join(wt, '.git')).isDirectory());
+  assert.deepEqual([git(wt, 'for-each-ref'), git(wt, 'rev-parse', 'HEAD')], ['', t.base_sha], 'no branch, remote-tracking ref or tag; HEAD at base');
+  assert.equal(fs.readFileSync(path.join(t.git_dir, 'objects/info/alternates'), 'utf8'), `${t.common_dir}/objects\n`);
+  assert.deepEqual([git(wt, 'config', 'user.name'), git(wt, 'config', 'user.email')], ['tb agent', 'tb-agent@localhost']);
+  assert.equal(git(wt, 'remote'), '', 'C-L3: no remote (an agent fetches nothing from the tag repo)');
+  assert.equal(t.clone.config, require('node:crypto').createHash('sha256').update(fs.readFileSync(path.join(t.git_dir, 'config'))).digest('hex'));
+  fs.writeFileSync(path.join(wt, 'b.txt'), 'b\n');
+  assert.deepEqual(await spawn.dirtyPaths(t), ['?? b.txt']);
+  /** @type {[RegExp, (c: any) => void][]} */
+  const rows = [
+    [/commondir exists/, (c) => fs.writeFileSync(path.join(c.t.git_dir, 'commondir'), `${c.t.common_dir}\n`)],
+    [/config is not the one tbd wrote/, (c) => {
+      fs.appendFileSync(path.join(c.t.git_dir, 'config'), `[filter "x"]\n\tclean = touch ${c.root}/filter-ran && cat\n`);
+      fs.writeFileSync(path.join(c.wt, '.gitattributes'), '* filter=x\n');
+      fs.utimesSync(path.join(c.wt, 'a.txt'), new Date(), new Date(Date.now() + 3_600_000)); // git must hash it again
+    }],
+    [/alternates does not name only/, (c) => fs.appendFileSync(path.join(c.t.git_dir, 'objects/info/alternates'), `${c.root}/evil/objects\n`)],
+    [/is not a directory/, (c) => {
+      fs.cpSync(c.t.git_dir, path.join(c.wt, '.g'), { recursive: true });
+      fs.rmSync(c.t.git_dir, { recursive: true });
+      fs.symlinkSync(path.join(c.wt, '.g'), c.t.git_dir);
+    }],
+    // S-H1: a state file git parses as text (its errors quote a line) linked to a file of Irfan's: never read by tbd's git
+    [/packed-refs is a link or not a plain file/, (c) => {
+      fs.rmSync(path.join(c.t.git_dir, 'packed-refs'), { force: true });
+      fs.symlinkSync(path.join(c.root, 'secret'), path.join(c.t.git_dir, 'packed-refs'));
+    }],
+    [/packed-refs is a link or not a plain file/, (c) => { // a hard link: a plain file, 2 links
+      fs.rmSync(path.join(c.t.git_dir, 'packed-refs'), { force: true });
+      fs.linkSync(path.join(c.root, 'secret'), path.join(c.t.git_dir, 'packed-refs'));
+    }],
+    [/sequencer holds a link or not a plain file/, (c) => {
+      fs.mkdirSync(path.join(c.t.git_dir, 'sequencer'));
+      fs.symlinkSync(path.join(c.root, 'secret'), path.join(c.t.git_dir, 'sequencer', 'todo'));
+    }],
+  ];
+  for (const [why, plant] of rows) {
+    const c = await tagClone();
+    fs.writeFileSync(path.join(c.root, 'secret'), 'tok_S3CR3T_LINE\n');
+    plant(c);
+    await assert.rejects(spawn.dirtyPaths(c.t), (/** @type {any} */ e) => e.code === 'PLANTED' && why.test(e.message) && !e.message.includes('S3CR3T'), String(why));
+    assert.equal(fs.existsSync(path.join(c.root, 'filter-ran')), false, 'nothing ran');
+  }
+  // S-H1 (A09): a pinned clone git that fails never hands its stderr on (it may quote a file of Irfan's): exit code + a fixed word
+  const c = await tagClone();
+  const r = await require('../lib/util').git(c.wt, ['ls-tree', 'tok_S3CR3T_ARG'], { dirs: c.t });
+  assert.deepEqual([r.stderr, r.err.message, r.err.code], ['git exit 128: pin/ref error', 'git exit 128: pin/ref error', 128]);
+  const u = await require('../lib/util').git(c.wt, ['ls-tree', 'tok_S3CR3T_ARG'], {}); // unpinned (tbd's own repo): as before
+  assert.match(u.stderr, /tok_S3CR3T_ARG/);
+});
+
 test('S4 a .gitmodules path that leads out of the worktree through a link (the leaf or a folder on the way) → refused by name, the outside never walked', async () => {
   const { root, wt, t } = tagRepo();
   const outside = path.join(root, 'outside');
@@ -256,6 +327,9 @@ test('M5 C5 env files: working and qa runs deny Edit + sandbox write of the tag 
     const s = JSON.parse(fs.readFileSync(path.join(ticketDir, 'runs/2.settings.json'), 'utf8'));
     const denied = [s.permissions.deny.includes(`Edit(/${wt}/.env.test)`), s.sandbox.filesystem.denyWrite.includes(`${wt}/.env.test`)];
     assert.deepEqual(denied, phase === 'review' ? [false, false] : [true, true], phase);
+    // C-H1: a worktree with no clone (from before H2) is rendered CLONE false: working keeps the tag .git's commit paths
+    const tg = path.join(path.dirname(path.dirname(ticketDir)), 'no-tag', '.git');
+    assert.deepEqual([tg, `${tg}/config`].map((p) => s.sandbox.filesystem.denyWrite.includes(p)), [phase !== 'working', phase === 'working'], `${phase}: legacy tag .git`);
   }
 });
 

@@ -315,6 +315,8 @@ test('list: a flow\'s waiting column is its reason (children done/total), empty 
     ticket('t_wait01', { state: 'final_gate', pr: { sha: 'a'.repeat(40), merged_at: since }, waiting: { reason: 'children', done: 1, total: 2, blocked: 0, since } }),
     ticket('t_wait02', { state: 'clarify', waiting: { reason: 'manual', since } }),
     ticket('t_wait03', { state: 'clarify' }),
+    // H review C-M2: a Blocked ticket's show keeps the why (its fix steps), as text, not raw JSON
+    ticket('t_wait04', { state: 'blocked', waiting: { reason: 'config', why: 'tag branch tb/x moved outside tbd: delete it or move it back', since } }),
   ].map(k => [`tickets/${k.id}/ticket.json`, k]));
   const t = await startTbd({ files });
   try {
@@ -325,6 +327,9 @@ test('list: a flow\'s waiting column is its reason (children done/total), empty 
       }
       assert.doesNotMatch(out, /object Object/);
     }
+    const shown = (await runTb(['show', 't_wait04'], t)).stdout;
+    assert.match(shown, /^ {2}waiting: "config · why: tag branch tb\/x moved outside tbd: delete it or move it back · since: /m); // TOON quotes a value holding ':'
+    assert.doesNotMatch(shown, /\{"reason"/);
   } finally {
     await t.stop();
   }

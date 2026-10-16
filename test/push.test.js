@@ -54,7 +54,7 @@ const T = (id, w, sha, over = {}) => ticket(id, {
 });
 
 // ---- fixtures, seeded before store.init (it loads tickets once) ----
-const W = Object.fromEntries(['ok', 'leak', 'nodeny', 'kids', 'refuse', 'dead', 'boot', 'lease', 'probe', 'deadls', 'env'].map((n) => [n, world(n)]));
+const W = Object.fromEntries(['ok', 'leak', 'nodeny', 'kids', 'refuse', 'dead', 'boot', 'lease', 'probe', 'deadls', 'env', 'ev1', 'ev2', 'ev3', 'ev4'].map((n) => [n, world(n)]));
 const S = {
   ok: squash(W.ok, 'feat: one'),
   leak: squash(W.leak, `feat: ${WORD} support`),
@@ -86,6 +86,19 @@ fs.writeFileSync(path.join(W.env.repo, '.env'), `PORT=3000\nDB_PASSWORD=${PW}\n`
 fs.writeFileSync(path.join(W.env.repo, 'db.js'), `module.exports = { db: '${PW}' }; // no key word: gitleaks alone misses it\n`);
 git(W.env.repo, ['add', 'db.js']);
 S.env = git(W.env.repo, ['commit-tree', git(W.env.repo, ['write-tree']), '-p', 'main', '-m', 'feat: db']);
+// H3 (D-0151): env files that must / must not block a push; each squash commits `lit` as a literal
+const EV = {
+  ev1: ['AUTH_TRUST_HOST=true', 'true'], // boolean value under a SECRET-named key: no block
+  ev2: ['NODE_ENV=development', 'development'], // not SECRET-named: no block
+  ev3: ['API_TOKEN=s3cr3tvalue1', 's3cr3tvalue1'], // SECRET-named value: block
+  ev4: ['DATABASE_URL=postgres://u:p%40ss@localhost/db', 'p@ss'], // URL password, decoded form: block
+};
+for (const [n, [line, lit]] of Object.entries(EV)) {
+  fs.writeFileSync(path.join(W[n].repo, '.env'), `${line}\n`);
+  fs.writeFileSync(path.join(W[n].repo, 'cfg.js'), `module.exports = { v: '${lit}' };\n`);
+  git(W[n].repo, ['add', 'cfg.js']);
+  S[n] = git(W[n].repo, ['commit-tree', git(W[n].repo, ['write-tree']), '-p', 'main', '-m', 'feat: cfg']);
+}
 git(W.refuse.repo, ['remote', 'add', 'evil', `ext::sh -c touch% ${path.join(ROOT, 'ext-ran')}`]);
 git(W.refuse.repo, ['remote', 'add', 'multi', 'https://example.invalid/a.git']);
 git(W.refuse.repo, ['remote', 'set-url', '--add', '--push', 'multi', 'https://example.invalid/a.git']);
@@ -100,6 +113,7 @@ const TAGS = {
   'acme/ext': tagDef(W.refuse, { push: { remote: 'evil' } }),
   'acme/multi': tagDef(W.refuse, { push: { remote: 'multi' } }),
   'acme/env': tagDef(W.env, { env_files: ['.env'] }),
+  ...Object.fromEntries(Object.keys(EV).map((n) => [`acme/${n}`, tagDef(W[n], { env_files: ['.env'] })])),
 };
 const TICKETS = [
   T('t_ok0001', W.ok, S.ok),
@@ -119,6 +133,7 @@ const TICKETS = [
   T('t_prob01', W.probe, S.pchild, { state: 'done', waiting: null }),
   T('t_dels01', W.deadls, S.deadls),
   T('t_env001', W.env, S.env),
+  ...Object.keys(EV).map((n, i) => T(`t_ev${i + 1}000`, W[n], S[n])),
 ];
 fs.writeFileSync(path.join(TB_HOME, 'tags.json'), JSON.stringify(TAGS));
 for (const t of TICKETS) {
@@ -199,6 +214,16 @@ test('D-0108 SEC-5 a tag env secret value committed as a literal → failed leak
   assert.deepEqual([t.push.state, t.push.why, remoteAt(W.env, 't_env001')], ['failed', 'leak', null]);
   assert.ok(!alertsOf('t_env001').some((a) => a.message.includes(PW)), 'the value is never in an alert');
   assert.deepEqual(fs.readdirSync(TB_HOME).filter((f) => f.startsWith('push-')), [], 'the temp denylist dir is gone');
+});
+
+test('H3 envBlock: a boolean under a SECRET-named key and a plain NODE_ENV do not block (push ok); a SECRET-named value and a decoded URL password still refuse leak', async () => {
+  await ready;
+  for (const [i, n] of Object.keys(EV).entries()) {
+    const id = `t_ev${i + 1}000`;
+    await push.start(id, 'cli');
+    const t = await settled(id);
+    assert.deepEqual([t.push.state, t.push.state === 'failed' ? t.push.why : null, remoteAt(W[n], id) !== null], i < 2 ? ['ok', null, true] : ['failed', 'leak', false], n);
+  }
 });
 
 test('push clean(): a URL\'s userinfo masked whole, a / or @ in the password too', () => {

@@ -17,7 +17,7 @@ const H = '/u/.taskboard';
 const CTX = {
   WORKTREE: `${H}/worktrees/t_abc123`, TICKET_DIR: `${H}/tickets/t_abc123`, OUT_DIR: `${H}/tickets/t_abc123/out`,
   TB_HOME: H, TAG_PATH: '/u/code/repo', SKILLS_DIR: `${H}/tickets/t_abc123/skills`, TB_CODE: REPO, TB_NODE: '/u/.nvm/v24/bin/node', TB_PORT: 7777,
-  HEAVY: ['npm test', 'npm run build'],
+  HEAVY: ['npm test', 'npm run build'], TAG_GIT: '/u/code/main/.git', // H2.7: the ticket's common_dir (here: the tag is a linked worktree of main)
 };
 const RO = ['Read', 'Glob', 'Grep'];
 const GIT = [...RO, 'Bash(git log *)', 'Bash(git show *)', 'Bash(git diff *)']; // §5 planning; review "read-only git"
@@ -81,7 +81,8 @@ test('phase-settings: §3b deny paths + D35c reads + S1 Claude config on every p
   const must = [
     ...['config.json', 'tags.json', 'tasks.json', 'token', 'session', 'metrics.jsonl', 'leak-denylist.txt', 'slots.json', 'doctor.json',
       'events.jsonl', 'tbd.log', 'tbd.pid', 'deploy.log', 'backup/**', 'rec-key*'].flatMap((f) => [`Read(/${H}/${f})`, `Edit(/${H}/${f})`]), // rec-key: M5 C6
-    `Edit(/${H}/tbd.sock)`, `Edit(/${H}/bin/**)`, W(CTX.SKILLS_DIR), 'Edit(~/taskboard-live/**)', `Edit(/${CTX.WORKTREE}/.git)`,
+    // H2.7 SPIKE S2 FIX (contract change; was Edit(/<worktree>/.git)): the tag's git dir, the clone's git files one by one (H2.7 test below)
+    `Edit(/${H}/tbd.sock)`, `Edit(/${H}/bin/**)`, W(CTX.SKILLS_DIR), 'Edit(~/taskboard-live/**)', W(CTX.TAG_GIT),
     `Edit(/${CTX.TICKET_DIR}/*.json)`, `Edit(/${CTX.TICKET_DIR}/rounds/**)`, 'Bash(git push *)',
     ...PLANTED.map((p) => `Edit(/${p}${p.endsWith('.claude') ? '/**' : ''})`),
   ];
@@ -123,10 +124,12 @@ test('phase-settings: hooks wired by absolute path; sandbox kept on, localhost o
     const bashPhase = k === 'code/working' || k === 'code/qa';
     // tbx, node, npm; M5 S4 (contract change; was none): code/qa reads the one DB CLI file, not ~/bin
     const reopen = bashPhase ? [REPO, '/u/.nvm/v24', '~/.npm', '~/Library/Caches/ms-playwright', ...(k === 'code/qa' ? ['~/bin/postgres-irfan-axi'] : [])] : [];
-    assert.deepEqual(sb.filesystem.allowRead, [CTX.WORKTREE, CTX.TICKET_DIR, `${H}/tbd.sock`, ...reopen], k);
-    for (const p of [REPO, '/u/.nvm/v24/bin', '~/.claude*', '~/.zshrc', `${CTX.TAG_PATH}/.git/config`, `${CTX.TAG_PATH}/.git/hooks`,
-      `${CTX.TAG_PATH}/.git/info`, `${CTX.TAG_PATH}/.git/modules`, `${CTX.TAG_PATH}/.git/worktrees/*/config.worktree`, `${CTX.WORKTREE}/.git`, `${CTX.TICKET_DIR}/runs`, ...PLANTED,
-      `${CTX.TAG_PATH}/.git/worktrees/*/commondir`, `${CTX.TAG_PATH}/.git/worktrees/*/gitdir`, `${CTX.TAG_PATH}/.git/refs/replace`, `${CTX.TICKET_DIR}/rounds`, `${CTX.TICKET_DIR}/*.json`]) { // P4 S1, L7, replace refs
+    // H2.7 (contract change; was without the tag objects): the clone reads the tag repo's objects through its alternates
+    assert.deepEqual(sb.filesystem.allowRead, [CTX.WORKTREE, CTX.TICKET_DIR, `${H}/tbd.sock`, `${CTX.TAG_GIT}/objects`, ...reopen], k);
+    // H2.7 (contract change; was the tag's .git/{config,hooks,info,modules,refs/replace,worktrees/*/{config.worktree,commondir,gitdir}}
+    // + the worktree's .git file): the tag's whole git dir (both names); the clone's own git files in the H2.7 test below
+    for (const p of [REPO, '/u/.nvm/v24/bin', '~/.claude*', '~/.zshrc', CTX.TAG_GIT, `${CTX.TAG_PATH}/.git`, `${CTX.TICKET_DIR}/runs`, ...PLANTED,
+      `${CTX.TICKET_DIR}/rounds`, `${CTX.TICKET_DIR}/*.json`]) { // P4 S1, L7
       assert.ok(sb.filesystem.denyWrite.includes(p), `${k}: denyWrite ${p}`);
     }
     assert.ok(!sb.filesystem.denyWrite.some((p) => CTX.WORKTREE.startsWith(`${p}/`) || p === CTX.WORKTREE), `${k}: worktree write-denied`);
@@ -140,12 +143,16 @@ test('phase-settings: hooks wired by absolute path; sandbox kept on, localhost o
 // P5 M1 (contract change; code/working had no node_modules rules): the spike's char-class rules (p5-spike.md, run 2): an
 // Edit deny becomes a sandbox write deny too, so node_modules/** would block .cache/.prisma; only non-dot entries, .bin
 // and .package-lock.json are denied; env files (ctx.ENV_FILES) are denied in both layers
+// H2.7 D-0151 (contract change; was without .pnpm, .modules.yaml, .yarn-state.yml, in the working/qa/final_gate templates):
+// one node_modules list in BASE: pnpm's store + state and yarn's state are agent-proof too
 test('phase-settings: code/working M1 node_modules + env-file denies, .cache / .prisma left writable; D34 trailer off', () => {
   const s = render('code', 'working', { ...CTX, ENV_FILES: ['.env.test'] });
   const nm = `${CTX.WORKTREE}/node_modules`;
-  const edit = [`${nm}/[a-zA-Z0-9@_-]*`, `${nm}/[a-zA-Z0-9@_-]*/**`, `${nm}/.bin`, `${nm}/.bin/**`, `${nm}/.package-lock.json`, `${CTX.WORKTREE}/.env.test`].map((p) => `Edit(/${p})`);
+  const edit = [`${nm}/[a-zA-Z0-9@_-]*`, `${nm}/[a-zA-Z0-9@_-]*/**`, `${nm}/.bin`, `${nm}/.bin/**`, `${nm}/.package-lock.json`, `${nm}/.pnpm`, `${nm}/.pnpm/**`,
+    `${nm}/.modules.yaml`, `${nm}/.yarn-state.yml`, `${CTX.WORKTREE}/.env.test`].map((p) => `Edit(/${p})`);
   assert.deepEqual(s.permissions.deny.filter((r) => r.includes('node_modules') || r.includes('.env.test')), edit);
-  assert.deepEqual(s.sandbox.filesystem.denyWrite.filter((p) => p.includes('node_modules') || p.includes('.env.test')), [`${nm}/[a-zA-Z0-9@_-]*`, `${nm}/.bin`, `${nm}/.package-lock.json`, `${CTX.WORKTREE}/.env.test`]);
+  assert.deepEqual(s.sandbox.filesystem.denyWrite.filter((p) => p.includes('node_modules') || p.includes('.env.test')),
+    [`${nm}/[a-zA-Z0-9@_-]*`, `${nm}/.bin`, `${nm}/.package-lock.json`, `${nm}/.pnpm`, `${nm}/.modules.yaml`, `${nm}/.yarn-state.yml`, `${CTX.WORKTREE}/.env.test`]);
   assert.ok(![...s.permissions.deny, ...s.sandbox.filesystem.denyWrite].some((r) => /node_modules\/\*\*|node_modules\)$|\.cache|\.prisma/.test(r)), 'no rule covers node_modules/.cache or .prisma');
   assert.deepEqual(s.attribution, { commit: '', pr: '' });
 });
@@ -159,10 +166,11 @@ test('phase-settings: code/qa M5 C5: Edit docs/verification/** only (real path-g
   const working = render('code', 'working', ctx);
   const nm = (r) => r.includes('node_modules') || r.includes('.env.test');
   assert.deepEqual(qa.permissions.deny.filter(nm), working.permissions.deny.filter(nm));
-  assert.equal(qa.permissions.deny.filter(nm).length, 6, '5 node_modules rules + the env file (the list: the M1 test above)');
+  assert.equal(qa.permissions.deny.filter(nm).length, 10, '9 node_modules rules + the env file (the list: the M1 test above; H2.7 contract change: was 5 + 1)');
   assert.deepEqual(qa.sandbox.filesystem.denyWrite.filter(nm), working.sandbox.filesystem.denyWrite.filter(nm));
-  // M5.2 sec F2: QA never commits, so no index write either (update-index --skip-worktree would blind the tree pin)
-  assert.deepEqual([qa, working].map((s) => s.sandbox.filesystem.denyWrite.includes(`${CTX.TAG_PATH}/.git`)), [true, false]);
+  // M5.2 sec F2: QA never commits, so no index write either (update-index --skip-worktree would blind the tree pin).
+  // H2.7 (contract change; was the tag's .git: QA's [true], working's [false]): the clone's whole .git; the tag's in both
+  assert.deepEqual([qa, working].map((s) => s.sandbox.filesystem.denyWrite.includes(`${CTX.WORKTREE}/.git`)), [true, false]);
   assert.deepEqual(qa.attribution, { commit: '', pr: '' });
   assert.deepEqual(qa.sandbox.network, { allowUnixSockets: [`${H}/tbd.sock`], allowLocalBinding: true });
   assert.equal(check({ tool_input: { file_path: `${CTX.WORKTREE}/docs/verification/screenshots/a.png` } }, qa.env), null);
@@ -181,7 +189,7 @@ test('phase-settings: code/final_gate M5 C11: Edit docs/verdicts/** + docs/verif
   const nm = (r) => r.includes('node_modules') || r.includes('.env.test');
   assert.deepEqual(fin.permissions.deny.filter(nm), working.permissions.deny.filter(nm));
   assert.deepEqual(fin.sandbox.filesystem.denyWrite.filter(nm), working.sandbox.filesystem.denyWrite.filter(nm));
-  assert.ok(fin.sandbox.filesystem.denyWrite.includes(`${CTX.TAG_PATH}/.git`));
+  assert.ok(fin.sandbox.filesystem.denyWrite.includes(`${CTX.TAG_PATH}/.git`) && fin.sandbox.filesystem.denyWrite.includes(`${CTX.WORKTREE}/.git`), 'H2.7: tag + own clone .git');
   assert.deepEqual(fin.attribution, { commit: '', pr: '' });
   assert.deepEqual(tools(fin), ['Read', 'Glob', 'Grep', 'Bash', 'Edit', 'Write']);
   for (const f of ['docs/verdicts/2026-10-14-t_abc123.md', 'docs/verification/2026-10-14-t_abc123-final.md']) {
@@ -189,6 +197,55 @@ test('phase-settings: code/final_gate M5 C11: Edit docs/verdicts/** + docs/verif
   }
   for (const f of ['src/a.ts', 'docs/notes.md', '.env.test', 'node_modules/x/index.js']) {
     assert.equal(check({ tool_input: { file_path: `${CTX.WORKTREE}/${f}` } }, fin.env)?.permissionDecision, 'deny', f);
+  }
+});
+
+// H2.7 (D-0146) + SPIKE S2 FIX: every phase write-denies the tag repo's whole .git (TAG_GIT = the ticket's common dir, and
+// <TAG_PATH>/.git) and reads only its objects (the clone's alternates); the clone's git files that steer tbd's git are
+// denied one by one (an Edit deny of .git/** write-denies index.lock: no commit); the read-only phases deny the whole clone
+// .git, working does not (its agent commits); pnpm / yarn node_modules state denied everywhere (D-0151)
+test('phase-settings H2.7: tag .git denied, its objects the only tag read; clone git files denied one by one, whole clone .git only in read-only phases; working\'s commit paths free; TAG_GIT derived when absent', () => {
+  const RO_PH = ['code/planning', 'code/review', 'code/context', 'code/qa', 'code/final_gate'];
+  const files = ['config', 'config.worktree', 'commondir', 'shallow'].map((f) => `${CTX.WORKTREE}/.git/${f}`);
+  const dirs = ['hooks', 'info', 'modules', 'objects/info', 'refs/replace'].map((f) => `${CTX.WORKTREE}/.git/${f}`);
+  const nm = ['.pnpm', '.modules.yaml', '.yarn-state.yml'].map((f) => `${CTX.WORKTREE}/node_modules/${f}`);
+  for (const [k, s] of all()) {
+    const f = s.sandbox.filesystem;
+    for (const p of [CTX.TAG_GIT, `${CTX.TAG_PATH}/.git`, ...files, ...dirs, ...nm]) assert.ok(f.denyWrite.includes(p), `${k}: denyWrite ${p}`);
+    for (const p of [...files, ...dirs.map((d) => `${d}/**`), `${CTX.TAG_GIT}/**`]) assert.ok(s.permissions.deny.includes(`Edit(/${p})`), `${k}: Edit deny ${p}`);
+    assert.deepEqual(f.allowRead.filter((p) => p.startsWith('/u/code/')), [`${CTX.TAG_GIT}/objects`], `${k}: the only tag read`);
+    assert.equal(f.denyWrite.includes(`${CTX.WORKTREE}/.git`), RO_PH.includes(k), `${k}: whole clone .git write-denied`);
+  }
+  const w = render('code', 'working', CTX);
+  const edits = w.permissions.deny.map((r) => /^Edit\(\/(\/.*?)(\/\*\*)?\)$/.exec(r)?.[1]).filter(Boolean);
+  for (const p of ['index', 'index.lock', 'HEAD', 'refs/heads/tb/x', 'objects/ab/cdef', 'objects/pack/p.pack', 'logs/HEAD', 'packed-refs'].map((x) => `${CTX.WORKTREE}/.git/${x}`)) {
+    const hit = (/** @type {string} */ r) => p === r || p.startsWith(`${r}/`);
+    assert.ok(!w.sandbox.filesystem.denyWrite.some(hit) && !edits.some(hit), `working: ${p} must stay writable (the agent commits)`);
+  }
+  const old = render('code', 'working', { ...CTX, TAG_GIT: undefined }).sandbox.filesystem; // a caller without TAG_GIT
+  assert.deepEqual([old.denyWrite.filter((p) => p === `${CTX.TAG_PATH}/.git`).length, old.allowRead.includes(`${CTX.TAG_PATH}/.git/objects`)], [1, true]);
+});
+
+// C-H1 (no breaking change): a ticket from before H2 (spawn's CLONE false: a linked worktree) commits in working through
+// the tag repo's shared .git: there the pre-H2 per-file denies (both names of the tag .git) + the worktree's .git file,
+// never the whole tag .git; its read-only phases, and every clone (CLONE absent or true), keep the whole deny
+test('phase-settings C-H1: legacy working (CLONE false) → <common>/worktrees/<id>, index, objects, refs writable, the pre-H2 git files denied; clone working (CLONE absent / true) and legacy qa → the whole tag .git denied', () => {
+  // a sandbox glob (`*` one part, `**` any depth) covers p: p itself or below it
+  const covers = (r, p) => new RegExp(`^${r.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*\*/g, '\0').replace(/\*/g, '[^/]*').replace(/\0/g, '.*')}(/.*)?$`).test(p);
+  const denied = (s, p) => s.sandbox.filesystem.denyWrite.some((r) => covers(r, p))
+    || s.permissions.deny.some((r) => { const m = /^Edit\(\/(\/.*)\)$/.exec(r); return !!m && covers(m[1], p); });
+  const gits = [CTX.TAG_GIT, `${CTX.TAG_PATH}/.git`];
+  const commit = gits.flatMap((g) => ['worktrees/t_abc123/index', 'worktrees/t_abc123/index.lock', 'worktrees/t_abc123/HEAD', 'objects/ab/cdef', 'objects/pack/p.pack',
+    'refs/heads/tb/t_abc123-x', 'logs/HEAD', 'packed-refs'].map((x) => `${g}/${x}`));
+  const steer = [...gits.flatMap((g) => ['config', 'hooks/pre-commit', 'info/exclude', 'modules/m/config', 'worktrees/t_abc123/config.worktree', 'worktrees/t_abc123/commondir',
+    'worktrees/t_abc123/gitdir', 'refs/replace/ab'].map((x) => `${g}/${x}`)), `${CTX.WORKTREE}/.git`];
+  const legacy = render('code', 'working', { ...CTX, CLONE: false });
+  for (const p of commit) assert.equal(denied(legacy, p), false, `legacy working: ${p} must stay writable (its agent commits)`);
+  for (const p of steer) assert.equal(denied(legacy, p), true, `legacy working: ${p} denied`);
+  assert.deepEqual([legacy.permissions.deny.includes(`Edit(/${CTX.WORKTREE}/.git)`), legacy.permissions.deny.includes(W(CTX.TAG_GIT))], [true, false]);
+  for (const [k, s] of [['clone working (no CLONE)', render('code', 'working', CTX)], ['clone working', render('code', 'working', { ...CTX, CLONE: true })], ['legacy qa', render('code', 'qa', { ...CTX, CLONE: false })]]) {
+    for (const g of gits) assert.ok(s.sandbox.filesystem.denyWrite.includes(g), `${k}: ${g} whole`);
+    for (const p of commit) assert.equal(denied(s, p), true, `${k}: ${p} denied`);
   }
 });
 
@@ -215,6 +272,7 @@ test('phase-settings: bad ctx or phase name is refused, nothing rendered', () =>
   const bad = [
     { WORKTREE: 'worktrees/t1' }, { TAG_PATH: '/u/code/"repo' }, { TAG_PATH: '/u/code/repo/../x' }, { SKILLS_DIR: '/u/s/' },
     { TB_CODE: '/u/$(id)' }, { OUT_DIR: '/u/o/*' }, { TB_NODE: 'node' }, { TICKET_DIR: undefined }, { TB_PORT: '77; rm' }, { HEAVY: 'npm test' }, { HEAVY: [''] },
+    { TAG_GIT: 'repo/.git' }, { TAG_GIT: '/u/code/main/.git/' }, // H2.7
   ];
   for (const b of bad) assert.throws(() => render('code', 'working', { ...CTX, ...b }), /phase-settings:/, JSON.stringify(b));
   for (const [kind, phase] of [['..', 'working'], ['code', '../planning'], ['code', 'nope'], ['Code', 'working']]) {

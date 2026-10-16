@@ -18,7 +18,7 @@
 //    adds them to package.json + writes package-lock.json (uncommitted, as npm install does).
 //    restoreSwap: reset --hard <head> + clean -fdq (the marker's head), as the real one; script.restore_ms makes the first one slow,
 //    script.restore_fail makes it throw (as a red checks.generate), the tree left swapped. Every call is logged to
-//    TB_HOME/fake-gates.jsonl {fn, ticket, gates_loaded: a lib/gates module is in require.cache}.
+//    TB_HOME/fake-gates.jsonl {fn, ticket, trusted (H2.5: o.t.trusted), gates_loaded: a lib/gates module is in require.cache}.
 // 2. The runner's monitor pressure: TB_HOME/test-pressure when that file exists (the memory drill). (working.boot() before
 //    the runner starts is tbd.js's own since the P5 Wire.)
 // 3. A file RPC for the working verbs (no route before P5c; + `merged`: pr.merged_at as a D9 pass sets it): TB_HOME/test-rpc/<n>.json {fn, args} → <n>.out.json
@@ -55,7 +55,7 @@ const wait = (ms, signal) => new Promise((/** @type {(v?: any) => void} */ res) 
 async function gate(kind, o) {
   const id = o.t.id;
   const s = await step(id, kind, o.t.lane_of);
-  await log({ fn: kind, ticket: id, task: o.task?.id ?? null, type: o.task?.type ?? null, pre: o.pre ?? null, integrity: o.integrity, allow: o.allow, unitMs: o.unitMs ?? null });
+  await log({ fn: kind, ticket: id, task: o.task?.id ?? null, type: o.task?.type ?? null, pre: o.pre ?? null, integrity: o.integrity, allow: o.allow, unitMs: o.unitMs ?? null, trusted: o.t.trusted === true }); // H2.5: the gate's t reads the tag's objects only
   const head = git(o.wt, 'rev-parse', 'HEAD');
   const stale = (o.tag.env_files ?? []).find((f) => fs.readFileSync(path.join(o.wt, f), 'utf8') !== fs.readFileSync(path.join(o.tag.path, f), 'utf8'));
   if (s.child) {

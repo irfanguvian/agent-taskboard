@@ -1,17 +1,12 @@
 {
   "permissions": {
-    "allow": ["Read", "Glob", "Grep", "Edit(/${WORKTREE}/**)", "Bash"],
-    "deny": [
-      "Edit(/${WORKTREE}/node_modules/[a-zA-Z0-9@_-]*)", "Edit(/${WORKTREE}/node_modules/[a-zA-Z0-9@_-]*/**)",
-      "Edit(/${WORKTREE}/node_modules/.bin)", "Edit(/${WORKTREE}/node_modules/.bin/**)", "Edit(/${WORKTREE}/node_modules/.package-lock.json)"
-    ]
+    "allow": ["Read", "Glob", "Grep", "Edit(/${WORKTREE}/**)", "Bash"]
   },
   "attribution": { "commit": "", "pr": "" },
   "sandbox": {
     "filesystem": {
       "allowRead": ["${TB_CODE}", "${NODE_HOME}", "~/.npm", "~/Library/Caches/ms-playwright"],
-      "allowWrite": ["~/.npm/_logs"],
-      "denyWrite": ["${WORKTREE}/node_modules/[a-zA-Z0-9@_-]*", "${WORKTREE}/node_modules/.bin", "${WORKTREE}/node_modules/.package-lock.json"]
+      "allowWrite": ["~/.npm/_logs"]
     },
     "network": { "allowLocalBinding": true, "allowedDomains": ["registry.npmjs.org"] }
   }

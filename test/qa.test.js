@@ -33,6 +33,8 @@ const CONFIG = {
 };
 const gitEnv = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_OPTIONAL_LOCKS: '0' };
 const git = (cwd, ...args) => execFileSync('/usr/bin/git', ['-C', cwd, ...args], { encoding: 'utf8', env: gitEnv, stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+const { cloneAt } = require('../lib/util');
+const { index: forgeIndex, blob: forgeBlob } = require('./helpers/forge');
 const json = (f) => JSON.parse(fs.readFileSync(f, 'utf8'));
 const tk = (tbd, id, ...f) => path.join(tbd.tbHome, 'tickets', id, ...f);
 const has = (f) => fs.existsSync(f) && fs.readdirSync(f).length > 0;
@@ -254,6 +256,46 @@ test('Q10 a tracked file edited under skip-worktree (git status blind to it) →
   assert.match(p.lease.error, /tracked files changed during QA: S {2}src\/users\.js/);
 });
 
+// H1 + H2.5 (rev 3 #8): the judge fetches HEAD into the tag repo again (a clone ticket; the working gate fetched it already:
+// nothing moves) and compares the tree from the tag's objects, content too: an index stat cache forged during working
+// (git status clean) is a tracked change
+test('H1 H2.5 a clone ticket whose index was forged during working (git status clean) → the QA judge refuses it as a tracked change, resumed, refused again → Blocked', async (t) => {
+  const r = repo();
+  const id = 't_qaf001';
+  const wt = path.join(fs.realpathSync(fs.mkdtempSync(path.join(ROOT, 'wt-'))), 'w');
+  const common_dir = fs.realpathSync(path.join(r.dir, '.git'));
+  const pin = { worktree: wt, common_dir, ...(await cloneAt(common_dir, wt, r.head)) };
+  forgeIndex(wt, 'src/users.js', 'module.exports = { byId: () => ({ id: "evil" }) };\n');
+  assert.equal(git(wt, 'status', '--porcelain'), '', 'git status alone sees nothing');
+  const cases = [C('TC-1', { type: 'frontend', acceptance: ['A1'] }), C('TC-2', { type: 'frontend', kind: 'negative', source: 'A1' })];
+  const { k } = await boot(t, { tickets: { [id]: flow(id, r, pin) }, tags: { 'acme/api': tag(r) }, sessions: [{ steps: [result(cases)] }, { steps: [result(cases)] }] });
+  await until(() => k(id).state === 'blocked' && k(id).lease?.exit, 60_000, 'blocked');
+  const p = k(id);
+  assert.deepEqual([p.blocked_from, p.lease.exit], ['qa', 'schema_fail']);
+  assert.match(p.lease.error, /tracked files changed during QA: {2}M src\/users\.js/);
+});
+
+// C-M5 (−): the judge's fetch refused (HEAD only in the clone, its blob rewritten by the agent: index-pack) → Blocked
+// integrity at once, in tbd's words (S-H1: never git's raw stderr), nothing landed in the tag repo
+test('C-M5 a clone ticket whose own HEAD blob the agent rewrote → the QA judge\'s fetch refused → Blocked integrity, no refs/tb/<id>/head', async (t) => {
+  const r = repo();
+  const id = 't_qaf002';
+  const wt = path.join(fs.realpathSync(fs.mkdtempSync(path.join(ROOT, 'wt-'))), 'w');
+  const common_dir = fs.realpathSync(path.join(r.dir, '.git'));
+  const pin = { worktree: wt, common_dir, ...(await cloneAt(common_dir, wt, r.head)) };
+  fs.writeFileSync(path.join(wt, 'src', 'users.js'), 'module.exports = { own: 1 };\n');
+  git(wt, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qam', 'own');
+  const h = git(wt, 'rev-parse', 'HEAD');
+  forgeBlob(wt, 'src/users.js', 'evil content\n');
+  const cases = [C('TC-1', { type: 'frontend', acceptance: ['A1'] }), C('TC-2', { type: 'frontend', kind: 'negative', source: 'A1' })];
+  const { k } = await boot(t, { tickets: { [id]: flow(id, r, { ...pin, review: { n: 1, head: h, open: [] }, work: work({ ...r, head: h }) }) }, tags: { 'acme/api': tag(r) }, sessions: [{ steps: [result(cases)] }] });
+  await until(() => k(id).state === 'blocked', 60_000, 'blocked');
+  const p = k(id);
+  assert.deepEqual([p.waiting.reason, p.blocked_from, p.qa?.head], ['integrity', 'qa', h]);
+  assert.match(p.waiting.why, new RegExp(`^HEAD not fetched into the tag repo: fetch ${h} from .*: git exit \\d+: index-pack/fsck refused the objects \\(did not receive expected object`));
+  assert.throws(() => git(r.dir, 'rev-parse', '--verify', '-q', `refs/tb/${id}/head`), 'nothing in the tag repo');
+});
+
 test('Q11 a FAIL without cause → refused, resumed; only ASSISTED among the unproven → Blocked waiting qa, the result kept, no fix', async (t) => {
   const P = await free();
   const r = repo();
@@ -335,7 +377,14 @@ test('M5 C5 a qa ticket waiting on memory: no next hook per tick (no start recor
   const { tbd, k } = await boot(t, { tickets: { [id]: flow(id, r) }, tags: { 'acme/api': tag(r) }, scenario: { steps: [{ hang: true }] }, extra: { 'config.json': config } });
   await until(() => k(id).waiting?.reason === 'memory', 30_000, 'waiting memory');
   const events = () => lines(tk(tbd, id, 'events.jsonl')).length;
-  const n = events();
+  // store.save writes ticket.json before its events line: let the memory-wait save's line land before counting
+  let n = events();
+  for (let i = 0; i < 20; i++) {
+    await new Promise((res) => setTimeout(res, 250));
+    const m = events();
+    if (m === n) break;
+    n = m;
+  }
   await new Promise((res) => setTimeout(res, 2500)); // a few runner ticks
   const p = k(id);
   assert.deepEqual([p.state, p.waiting?.reason, p.qa, p.lease ?? null], ['qa', 'memory', undefined, null], 'the hook never ran: no start record');

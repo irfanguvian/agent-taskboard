@@ -46,7 +46,10 @@ const LAUNCHCTL = new Set(['kickstart', 'bootout', 'bootstrap', 'unload', 'load'
 const READ_BAD = ['output', 'ext-diff', 'open-files-in-pager'];
 const PLAN_BAD = [...READ_BAD, 'no-index', 'textconv', 'config-env', 'exec-path'];
 const PLAN_GIT_TOP = /^(-c|-p$|--paginate$)/;
-const PLAN_REDIRECT = 'planning only reads: no redirect into a file (only > /dev/null, 2>&1); read the output directly';
+// H1: the read-only phases (J16 git rules, no export / GIT_*=, no file redirect); WHO names the phase in the message.
+const WHO = { planning: 'planning', final_gate: 'the final gate', review: 'review', context: 'context' };
+const RO = Object.keys(WHO);
+const PLAN_REDIRECT = (who) => `${who} only reads: no redirect into a file (only > /dev/null, 2>&1); read the output directly`;
 const FETCH_RUN = 'npx, npm exec, pnpm dlx and yarn dlx fetch and run packages outside the lockfile; run ./node_modules/.bin/<tool> or an npm script, or return NEEDS_SCOPE with the package';
 // the command words fetch a package and run it: npx, pnpx, bunx; <pm> [-flags] exec | x | dlx | init | create (npm init <x>
 // and create fetch too; plain `npm init` is harmless, denied anyway: fail closed)
@@ -210,7 +213,7 @@ function reads(w) {
 // shell builds ($, {, a backtick: SEP cut it, `next` is that separator) → DYNAMIC. Planning (S2 belt): no redirect into
 // any file but /dev/null; fd copies (`2>&1`, `>&2`: `next` is `&`, the part after it a number) pass.
 // t: tokens(all[k]); all: the split command; k: this segment's index. → why, or null.
-function redirectWhy(t, all, k, planning) {
+function redirectWhy(t, all, k, planning) { // planning: the phase name of a read-only phase, else ''
   const raw = all[k];
   const next = all[k + 1];
   for (let i = 0; i < t.length; i++) {
@@ -218,7 +221,7 @@ function redirectWhy(t, all, k, planning) {
     if (!bare.includes('>')) continue;
     const target = t[i].text.slice(t[i].text.lastIndexOf('>') + 1) || t[i + 1]?.text || '';
     if (MD.test(target)) return CONFIG;
-    if (planning && target !== '/dev/null' && !(!target && next === '&' && /^\s*(\d+|-)(\s|$)/.test(all[k + 2] ?? ''))) return PLAN_REDIRECT;
+    if (planning && target !== '/dev/null' && !(!target && next === '&' && /^\s*(\d+|-)(\s|$)/.test(all[k + 2] ?? ''))) return PLAN_REDIRECT(WHO[planning] ?? planning);
     if (/[{$`]/.test(target) || (!target && next === '`')) return DYNAMIC;
     if (!/[*?[]/.test(target)) continue;
     if (target.length > 200 || target.includes('[')) return CONFIG; // a glob we don't read: refused
@@ -265,7 +268,7 @@ function denyWhy(w, env = false) {
 // in front), else null. ro: the phase.
 function planGitWhy(w, env, ro) {
   if (base(w[0] ?? '') !== 'git') return null;
-  const who = ro === 'final_gate' ? 'the final gate' : 'planning';
+  const who = WHO[ro];
   if (env) return `${who} runs git with no VAR=value in front (GIT_PAGER, GIT_EXTERNAL_DIFF, GIT_CONFIG_* run programs)`;
   let i = 1;
   while (w[i]?.startsWith('-')) i += GIT_ARG.has(w[i]) ? 2 : 1;
@@ -323,12 +326,13 @@ function heavyList(env) {
 function guard(command, env = process.env) {
   for (const [re, why] of rules(env)) if (re.test(command)) return { deny: `bash-guard: ${why}` };
   if (DB_PHASES.includes(env.TB_PHASE ?? '') && dbBad(command)) return { deny: `bash-guard: ${DB_WHY}` };
-  // planning (J16): an env var set by `export GIT_PAGER=…; git log` sits outside git's own words
-  if (env.TB_PHASE === 'planning' && /(^|[\s;&|(`])(export|declare|typeset|readonly)\b|\bGIT_\w*=/.test(command)) {
-    return { deny: 'bash-guard: planning only reads: no export/declare or GIT_* variables (they make git run programs)' };
+  // read-only phases (J16, H1): an env var set by `export GIT_PAGER=…; git log` sits outside git's own words
+  const ro = RO.includes(env.TB_PHASE ?? '') ? env.TB_PHASE : '';
+  if (ro && /(^|[\s;&|(`])(export|declare|typeset|readonly)\b|\bGIT_\w*=/.test(command)) {
+    return { deny: `bash-guard: ${WHO[ro]} only reads: no export/declare or GIT_* variables (they make git run programs)` };
   }
-  const r = scan(command, heavyList(env), 0, ['planning', 'final_gate'].includes(env.TB_PHASE ?? '') ? env.TB_PHASE : '', env.TB_PHASE === 'working');
-  const why = r.deny ?? redirects(command, env.TB_PHASE === 'planning');
+  const r = scan(command, heavyList(env), 0, ro, env.TB_PHASE === 'working');
+  const why = r.deny ?? redirects(command, ro);
   if (why) return { deny: `bash-guard: ${why}` };
   // $TB_CODE is expanded by the agent's shell (the runner sets it), so a PATH-shadowed tbx cannot take the slot's place
   const out = r.heavy ? `${env.TB_CODE ? '"$TB_CODE/bin/tbx"' : 'tbx'} heavy -- sh -c '${r.out.replaceAll("'", "'\\''")}'` : r.out;

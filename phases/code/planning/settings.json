@@ -1,4 +1,5 @@
 {
   "permissions": { "allow": ["Read", "Glob", "Grep", "Bash(git log *)", "Bash(git show *)", "Bash(git diff *)"], "deny": ["Edit(/${TAG_PATH}/**)"] },
+  "sandbox": { "filesystem": { "denyWrite": ["${WORKTREE}/.git"] } },
   "hooks": { "PreToolUse": [{ "matcher": "StructuredOutput", "hooks": [{ "type": "command", "command": "\"${TB_NODE}\" \"${TB_CODE}/hooks/plan-check.js\"" }] }] }
 }

@@ -31,6 +31,8 @@ const planning = require('../lib/planning');
 const gates = require('../lib/gates');
 const R = require('../lib/gates/run');
 const { GATE_FIELDS } = require('../lib/metrics');
+const { cloneAt, fetchHead } = require('../lib/util');
+const { pack: forgePack } = require('./helpers/forge');
 
 const TB = process.env.TB_HOME;
 const GIT_ENV = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
@@ -75,7 +77,8 @@ const FLIP = "const fs = require('node:fs'); const f = require('node:path').join
 
 let seq = 0;
 // A repo (main = base) + a ticket worktree on tb/<id>-x under TB_HOME/worktrees. task: plan task T1.
-function world({ files = {}, tag = {}, task = {}, plan: planExtra = {} } = {}) {
+// clone: no linked worktree; cloneWorld makes the ticket's own clone there (H2.1)
+function world({ files = {}, tag = {}, task = {}, plan: planExtra = {}, clone = false } = {}) {
   const id = `t_${String(++seq).padStart(6, '0')}`;
   const repo = path.join(ROOT, `repo-${seq}`);
   put(repo, { 'package.json': JSON.stringify(PKG), 'lib/sum.js': SUM, 'fake.js': FAKE, 'out.txt': 'Tests:       1 passed, 1 total\n', 'code.txt': '0', '.gitignore': 'openapi.json\nignored.txt\nprobe/\nnode_modules/\n', ...files });
@@ -83,8 +86,8 @@ function world({ files = {}, tag = {}, task = {}, plan: planExtra = {} } = {}) {
   commit(repo, 'base');
   const wt = path.join(TB, 'worktrees', id);
   fs.mkdirSync(path.dirname(wt), { recursive: true });
-  git(repo, 'worktree', 'add', '-q', '-b', `tb/${id}-x`, wt, 'main');
-  const base = git(wt, 'rev-parse', 'HEAD');
+  if (!clone) git(repo, 'worktree', 'add', '-q', '-b', `tb/${id}-x`, wt, 'main');
+  const base = git(repo, 'rev-parse', 'main');
   const T1 = { id: 'T1', title: 't', type: 'preserve', files: ['lib/sum.js', 'test/sum.test.js', 'out.txt', 'code.txt'], modules: [], test_cmd: 'npm test', acceptance: [], steps: [], ...task };
   const plan = { summary: 's', acceptance: [], tasks: [T1], allowed_schema_changes: [], allowed_api_changes: [], skills: [], ui: false, children: [], ...planExtra };
   const t = { id, tag: `acme/w${seq}`, worktree: wt, base_sha: base, branch: `tb/${id}-x`, plan_hash: sha(plan),
@@ -159,6 +162,7 @@ test('K5 sandbox: a check reading a fake secret (HOME/.ssh, the tbd token) or wr
   const probe = [
     `cat "${process.env.HOME}/.ssh/id_test" || echo SSH-DENIED`, `cat "${TB}/token" || echo TOKEN-DENIED`,
     `touch "${ROOT}/outside.txt" || echo OUTSIDE-DENIED`, 'echo in > ignored.txt && cat ignored.txt', connect(denied), connect(open),
+    'cat .git > /dev/null || echo GITDIR-DENIED', // H2.7 C3: checks never read the ticket's .git
     "mkdir -p probe && printf '#!/bin/sh\\necho SHEBANG-RAN\\n' > probe/x.sh && chmod +x probe/x.sh; probe/x.sh; echo \"shebang rc=$?\"",
   ].join('; ');
   try {
@@ -169,6 +173,7 @@ test('K5 sandbox: a check reading a fake secret (HOME/.ssh, the tbd token) or wr
     assert.match(out, /SSH-DENIED/);
     assert.match(out, /TOKEN-DENIED/);
     assert.match(out, /OUTSIDE-DENIED/);
+    assert.match(out, /GITDIR-DENIED/);
     assert.doesNotMatch(out, /FAKE-SSH-KEY|FAKE-TBD-TOKEN/);
     assert.equal(fs.existsSync(path.join(ROOT, 'outside.txt')), false);
     assert.match(out, /^in$/m);
@@ -189,6 +194,7 @@ test('M5 C7 profile: the localhost:5432 deny is dropped only for the checks (tes
       const text = fs.readFileSync(await R.profile(ctx, mode), 'utf8');
       assert.equal(text.includes('(deny network-outbound (remote ip "localhost:5432"))'), kept, `db ${db} ${mode}`);
       assert.ok(text.includes(`(deny network-outbound (remote ip "localhost:${store.config.http.port}"))`), `db ${db} ${mode}: tbd port still denied`);
+      assert.equal(text.includes(`(deny file-read* (subpath "${ctx.wtReal}/.git"))`), mode === 'test', `${mode}: H2.7 C3 .git read deny in test mode only`);
     } finally {
       await R.close(ctx);
     }
@@ -458,6 +464,37 @@ test('R2 config files (owner 2026-10-10): a NEW .npmrc or jest.config.js → pro
   const w3 = world({ task: { files: ['lib/sum.js', 'test/helpers/util.js'] } });
   w3.commit({ 'lib/sum.js': SUM_OK, 'test/helpers/util.js': 'module.exports = 1;\n' });
   assert.equal((await w3.task()).ok, true, 'a new helper file is no change to an existing one');
+});
+
+// ---- C1 (D-0152): the gate reads the tag repo's objects only ------------------------------------------------------------
+// world() on the ticket's own clone (util.cloneAt at base + `switch -c`, as assign + approve make it), its pin on t
+async function cloneWorld(o = {}) {
+  const w = world({ ...o, clone: true });
+  const common_dir = fs.realpathSync(path.join(w.repo, '.git'));
+  Object.assign(w.t, { common_dir, ...(await cloneAt(common_dir, w.wt, w.base)) });
+  git(w.wt, 'switch', '-q', '-c', w.t.branch);
+  return w;
+}
+// C1 TEST METHOD: the agent drops a test and plants, in its own clone, a pack that lies about the BASE blob of that test
+// file (the weakened text under the base oid). An untrusted gate's weakening scan reads the forgery (no count drop);
+// the trusted t (lib/working.js gives every gate one after fetching HEAD into the tag repo) reads the tag's real blob
+test('C1 (D-0152): a planted pack lying about a base test blob hides a dropped test from an untrusted gate (green); the trusted gate reads the tag repo\'s objects → count drop → red work TEST_DISPUTES_SPEC', async () => {
+  const two = "const test = require('node:test');\nconst assert = require('node:assert');\ntest('a', () => assert.ok(1));\ntest('b', () => assert.ok(1));\n";
+  const one = "const test = require('node:test');\nconst assert = require('node:assert');\ntest('a', () => assert.ok(1));\n";
+  const w = await cloneWorld({ files: { 'test/a.test.js': two }, task: { files: ['lib/sum.js', 'test/a.test.js'] } });
+  const oid = git(w.wt, 'rev-parse', `${w.base}:test/a.test.js`);
+  w.commit({ 'test/a.test.js': one, 'lib/sum.js': SUM_OK });
+  // HEAD into the tag repo first, as lib/working.js does before every gate (H2.5). With the pack planted before, this
+  // fetch itself may fail (a thin-pack delta against the lying base: "failed to apply delta" → Blocked integrity)
+  await fetchHead(w.t, w.head());
+  forgePack(w.wt, [{ oid, type: 'blob', body: Buffer.from(one) }]);
+  assert.equal(git(w.wt, 'cat-file', '-p', oid), one.trimEnd(), 'git in the clone reads the forgery');
+  const fooled = await w.task();
+  assert.deepEqual([fooled.ok, fooled.tests.count_drops], [true, []], 'untrusted: the drop is hidden');
+  const real = await w.task({ t: { ...w.t, trusted: true } });
+  assert.deepEqual([real.ok, real.class, real.tests.count_drops.length], [false, 'work', 1]);
+  assert.match(real.tests.count_drops[0], /^test\/a\.test\.js: 2 /);
+  assert.match(real.why, /TEST_DISPUTES_SPEC/);
 });
 
 // ---- test weakening (M5+N7) ----------------------------------------------------------------------------------------------

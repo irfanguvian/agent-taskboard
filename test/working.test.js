@@ -19,6 +19,8 @@ const { FAKE, RUN_SPY, ticket, read, lines, until, reap, pidsOf, alive } = requi
 // plan_approval can run ahead of approve's check (409 under load: I13 + F2 RO2 flakes).
 const inPlanApproval = (tbd, id) => until(async () => (await tbd.api('GET', `/api/tickets/${id}`)).json?.ticket?.state === 'plan_approval', 30_000, 'plan_approval');
 const { GATE_PROMPT } = require('../lib/recovery');
+const { cloneAt } = require('../lib/util');
+const FORGE = path.join(__dirname, 'helpers', 'forge.js'); // H1 / C1 agent forgeries, as a fake-claude exec step
 
 const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'working-'));
 after(() => fs.rmSync(ROOT, { recursive: true, force: true }));
@@ -39,6 +41,7 @@ const SHA = 'c'.repeat(40); // a result's commit: the fake gates read the real H
 const gitEnv = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_OPTIONAL_LOCKS: '0' };
 const git = (cwd, ...args) => execFileSync('/usr/bin/git', ['-C', cwd, ...args], { encoding: 'utf8', env: gitEnv, stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 const json = (f) => JSON.parse(fs.readFileSync(f, 'utf8'));
+const has = (cwd, ref) => { try { git(cwd, 'rev-parse', '--verify', '-q', ref); return true; } catch { return false; } };
 const tk = (tbd, id, ...f) => path.join(tbd.tbHome, 'tickets', id, ...f);
 const journal = (tbd, id) => lines(tk(tbd, id, 'work.jsonl'));
 const alerts = (tbd) => lines(path.join(tbd.tbHome, 'test-alerts.jsonl'));
@@ -76,12 +79,15 @@ const done = (file, msg) => ({ steps: [commit(file, msg), result({ status: 'done
 // One ticket per tbd, approved for real (POST approve → setup → working). gates: the fake-gates script; sessions: the
 // fake-claude scenarios by invocation. → tbd + its ticket id, worktree, base and helpers.
 /** @param {any} t @param {any} o */
-async function approved(t, { tasks, planOver = {}, gates = {}, sessions = [], tag = {}, env = {}, id = 't_work01', state = 'working', ignoreEnv = true, ticketOver = {}, extra = {}, baseFiles = {} }) {
+// clone: the ticket's own clone as assign makes it (util.cloneAt, H2.1), its pin on the ticket; else a linked worktree.
+async function approved(t, { tasks, planOver = {}, gates = {}, sessions = [], tag = {}, env = {}, id = 't_work01', state = 'working', ignoreEnv = true, ticketOver = {}, extra = {}, baseFiles = {}, clone = false }) {
   const dir = repo({ ignoreEnv, base: baseFiles });
   const base = git(dir, 'rev-parse', 'main');
   if (typeof sessions === 'function') sessions = sessions(base);
-  const wt = path.join(fs.mkdtempSync(path.join(ROOT, 'wt-')), 'w');
-  git(dir, 'worktree', 'add', '-q', '--detach', wt, base);
+  const wt = path.join(clone ? fs.realpathSync(fs.mkdtempSync(path.join(ROOT, 'wt-'))) : fs.mkdtempSync(path.join(ROOT, 'wt-')), 'w');
+  const common_dir = clone ? fs.realpathSync(path.join(dir, '.git')) : null;
+  const pin = clone ? { common_dir, ...(await cloneAt(common_dir, wt, base)) } : {};
+  if (!clone) git(dir, 'worktree', 'add', '-q', '--detach', wt, base);
   const scn = fs.mkdtempSync(path.join(ROOT, 'scn-'));
   sessions.forEach((s, i) => fs.writeFileSync(path.join(scn, `${i + 1}.json`), JSON.stringify(s)));
   const dumps = fs.mkdtempSync(path.join(ROOT, 'dump-'));
@@ -92,7 +98,7 @@ async function approved(t, { tasks, planOver = {}, gates = {}, sessions = [], ta
   const files = {
     'config.json': CONFIG,
     'tags.json': { acme: {}, 'acme/api': { type: 'git', path: dir, base: 'main', env_files: ['.env.test'], checks: { unit: 'npm test' }, ...tag } },
-    [`tickets/${id}/ticket.json`]: ticket(id, { state: 'plan_approval', tag: 'acme/api', title: 'users work', base_sha: base, worktree: wt, round: 3,
+    [`tickets/${id}/ticket.json`]: ticket(id, { state: 'plan_approval', tag: 'acme/api', title: 'users work', base_sha: base, worktree: wt, ...pin, round: 3,
       locked_decisions: [{ id: 'R1Q1', text: 'Page size? → 50', source: 'answer:R1Q1' }], ...ticketOver }), // D-0116: past round 1, so a replan may plan at once,
     ...Object.fromEntries(Object.entries(extra).map(([f, v]) => [`tickets/${id}/${f}`, v])),
     [`tickets/${id}/rounds/01-plan.json`]: p,
@@ -248,6 +254,31 @@ test('I4 M1: a dirty tree after done → resumed once ("commit them or revert th
   const m = await approved(t, { id: 't_trip01', tasks: [task('T1')], sessions: [plant] });
   await until(() => m.k().state === 'blocked', 30_000, 'blocked');
   assert.deepEqual([m.k().waiting.reason, m.k().waiting.why], ['integrity', 'integrity: node_modules/.bin links changed since setup']);
+});
+
+// H1 (D-0105 + D-0107 at every gate): the task gate's tree check compares content too, so a forged index stat cache hides
+// nothing. H2.5 C1 (D-0152) on a clone ticket: every gate first fetches HEAD into the tag repo (refs/tb/<id>/head) and
+// gets the trusted t (the tag's objects only; never saved); a commit whose blob the agent rewrote is never fetched
+test('H1 H2.5 C1: a forged index after done → resumed "uncommitted changes:  M src/users.js", the gate never asked; a clone ticket\'s task + working gates fetch HEAD into the tag repo and get the trusted t; an agent-rewritten blob → the fetch refused → Blocked integrity, no gate', async (t) => {
+  const forged = { steps: [commit('src/users.js', 'one'), { exec: [process.execPath, FORGE, 'index', 'src/users.js', 'evil\n'] }, result({ status: 'done', commit: SHA })] };
+  const w = await approved(t, { tasks: [task('T1')], sessions: [forged, forged] });
+  await until(() => w.k().state === 'blocked', 30_000, 'blocked');
+  assert.match(w.dumps()[1].prompt, /\n\nuncommitted changes:  M src\/users\.js: commit them or revert them/);
+  assert.equal(gateFiles(w.tbd, w.id), 0, 'the clean check comes before any gate');
+
+  const c = await approved(t, { id: 't_cln001', clone: true, tasks: [task('T1')], sessions: [done('src/users.js', 'one')] });
+  const gated = (x) => x.ticket === c.id && ['task', 'working'].includes(x.fn);
+  await until(() => calls(c.tbd).filter(gated).length === 2, 30_000, 'task + working gate');
+  assert.deepEqual(calls(c.tbd).filter(gated).map((x) => [x.fn, x.trusted]), [['task', true], ['working', true]]);
+  assert.equal(git(c.dir, 'rev-parse', `refs/tb/${c.id}/head`), git(c.wt, 'rev-parse', 'HEAD'), 'the gated head is in the tag repo');
+  assert.equal(Object.hasOwn(c.k(), 'trusted'), false, 'trusted is never saved');
+
+  const bad = { steps: [commit('src/users.js', 'one'), { exec: [process.execPath, FORGE, 'blob', 'src/users.js', 'evil content\n'] }, result({ status: 'done', commit: SHA })] };
+  const b = await approved(t, { id: 't_cln002', clone: true, tasks: [task('T1')], sessions: [bad] });
+  await until(() => b.k().state === 'blocked', 30_000, 'blocked');
+  assert.equal(b.k().waiting.reason, 'integrity');
+  assert.match(b.k().waiting.why, /HEAD not fetched into the tag repo: .*did not receive expected object/);
+  assert.deepEqual([calls(b.tbd).filter((x) => x.ticket === b.id && x.fn === 'task').length, has(b.dir, `refs/tb/${b.id}/head`)], [0, false], 'no task gate ran, nothing in the tag repo');
 });
 
 // M5.2 C8 Q7 (D-0088, D-0097). D-0101 (contract change; was: an md / png left uncommitted in the docs dirs was skipped):

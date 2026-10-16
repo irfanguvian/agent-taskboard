@@ -44,7 +44,7 @@ const path = require('node:path');
 const { execFileSync, spawn } = require('node:child_process');
 const { startTbd, runTb, REPO, TBD } = require('../test/helpers/tbd');
 const { FAKE, RUN_SPY } = require('../test/helpers/runs');
-const { DEFAULT_PIN } = require('../lib/util');
+const { DEFAULT_PIN, cloneAt, cloneConfig } = require('../lib/util');
 const { SANDBOX, arr, sleep, readJson, write, git, events, runNs, runInfo, metricLines, ticketOf, reapRuns, chk, fence, details, usd, costOf, cell } = require('./eval-planner');
 const { codeCopy, freshPath, guardHome, contamination } = require('./golden-working');
 const { configBaseline } = require('../lib/spawn');
@@ -242,19 +242,23 @@ async function seed(env, c) {
   const wt = path.join(env.tbHome, 'worktrees', id);
   const branch = env.phase === 'final_gate' ? `tb/${id}-eval` : null; // the squash CAS'es the ticket's branch
   fs.mkdirSync(path.dirname(wt), { recursive: true, mode: 0o700 });
-  git(SANDBOX, 'worktree', 'add', ...(branch ? ['-b', branch] : ['--detach']), wt, env.base);
   let heads;
   let gitDir;
+  let clone;
   let baseline = null;
   try {
+    ({ git_dir: gitDir, clone } = await cloneAt(env.commonDir, wt, env.base)); // H2.11: the ticket's own clone, as tbd makes it
+    if (branch) gitc(wt, 'switch', '-q', '-c', branch); // as approve does: the squash moves this branch from the tested head
     heads = c.commits.map((p, i) => {
       gitc(wt, 'apply', '--index', '--whitespace=nowarn', p);
       gitc(wt, 'commit', '-q', '--no-verify', '-m', i === 0 ? `T1: ${c.plan.tasks[0].title}` : `@rv${i}: fix the review ${i} findings`);
       return git(wt, 'rev-parse', 'HEAD').trim();
     });
-    gitDir = fs.realpathSync(git(wt, 'rev-parse', '--absolute-git-dir').trim());
-    if (env.phase === 'qa' && !env.fake) execFileSync('npm', SETUP, { cwd: wt, stdio: ['ignore', 'ignore', 'pipe'], timeout: 15 * 60_000 }); // approve's setup (D-0072: 15 min)
-    if ((env.phase === 'qa' && !env.fake) || env.phase === 'final_gate') baseline = await configBaseline({ base_sha: env.base, git_dir: gitDir, common_dir: env.commonDir }, wt); // final gate: the integrity check's tripwire (no node_modules)
+    if (env.phase === 'qa' && !env.fake) {
+      execFileSync('npm', SETUP, { cwd: wt, stdio: ['ignore', 'ignore', 'pipe'], timeout: 15 * 60_000 }); // approve's setup (D-0072: 15 min)
+      clone = await cloneConfig(gitDir); // F3, as approve: a setup (husky) may write the clone's config
+    }
+    if ((env.phase === 'qa' && !env.fake) || env.phase === 'final_gate') baseline = await configBaseline({ base_sha: env.base, git_dir: gitDir, common_dir: env.commonDir, clone }, wt); // final gate: the integrity check's tripwire (no node_modules)
   } catch (e) {
     cleanup(wt, branch, id);
     throw e;
@@ -265,7 +269,7 @@ async function seed(env, c) {
   write(path.join(dir, 'ticket.json'), {
     id, type: 'flow', kind: 'code', tag: 'sandbox', title: c.ticket.slice(0, 100), text: c.ticket, state: env.phase, round: 1, created_at: now, updated_at: now,
     parent: null, blocked_by: [], fix_of: null, must_ask: false, rework: 0, failures: {}, waiting: null, lease: null,
-    base_sha: env.base, worktree: wt, git_dir: gitDir, common_dir: env.commonDir,
+    base_sha: env.base, worktree: wt, git_dir: gitDir, common_dir: env.commonDir, clone,
     work: { task: null, tries: 0, unit_ms: null, scope: {}, denied: {}, gate: null,
       tasks: [{ id: 'T1', status: 'done', attempt: 1, pre: env.base, head: heads[0] }, ...(p ? [{ id: '@rv1', status: 'done', attempt: 1, pre: priorHead, head: heads.at(-1) }] : [])] },
     fixes: p?.fixes ?? 0,
@@ -461,10 +465,11 @@ async function runCase(o, env, c) {
       const gates = fs.existsSync(path.join(dir, 'gates')) ? fs.readdirSync(path.join(dir, 'gates')).filter((f) => /^\d+\.json$/.test(f)).sort() : [];
       r.gate = gates.map((f) => readJson(path.join(dir, 'gates', f))).findLast((g) => g?.gate === 'final') ?? null;
       Object.assign(r, { base: env.base, tested: heads.at(-1) });
-      const g = (...a) => { try { return git(wt, ...a).trim(); } catch { return ''; } };
+      const at = (cwd) => (...a) => { try { return git(cwd, ...a).trim(); } catch { return ''; } };
+      const g = at(wt);
       const sha = t.final?.sha;
       if (sha) {
-        r.git = { sha, head: g('rev-parse', 'HEAD'), branch: g('rev-parse', `refs/heads/${branch}`), parents: g('rev-list', '--parents', '-n', '1', sha).split(' ').slice(1),
+        r.git = { sha, head: g('rev-parse', 'HEAD'), branch: at(SANDBOX)('rev-parse', `refs/heads/${branch}`) /* H2: the TAG branch appears at the squash; final-pre lives in the clone */, parents: g('rev-list', '--parents', '-n', '1', sha).split(' ').slice(1),
           tree: g('rev-parse', `${sha}^{tree}`), testedTree: g('rev-parse', `${r.tested}^{tree}`), pre: g('rev-parse', `refs/tb/${id}/final-pre-${t.final.n}`), subject: g('log', '-1', '--format=%s', sha) };
       }
       r.checks = scoreFinal(c, r);
@@ -477,7 +482,7 @@ async function runCase(o, env, c) {
     r.checks ??= [chk('scripted checks ran', false, e.message)];
   }
   if (!o.keep) cleanup(wt, branch, id);
-  else r.notes.push(`kept; later: git -C ${SANDBOX} worktree remove --force ${wt} && git -C ${SANDBOX} worktree prune${branch ? ` && git -C ${SANDBOX} branch -D ${branch} && git -C ${SANDBOX} update-ref -d refs/tb/${id}/final-pre-1` : ''}`);
+  else r.notes.push(`kept; later: rm -rf ${wt}${branch ? ` && git -C ${SANDBOX} branch -D ${branch}` : ''}`);
   console.log(`eval: ${c.key}: ${r.ticket?.state ?? '?'} · ${r.checks.filter((x) => x.ok).length}/${r.checks.length} checks${arr(r.contaminated).length ? ' · CONTAMINATED' : ''} · ${usd(arr(r.runs).reduce((s, x) => s + costOf(x), 0))} · ${r.min} min`);
   return r;
 }
@@ -486,10 +491,9 @@ async function runCase(o, env, c) {
 // squash's final-pre-<n>); never main, never another ticket's
 function cleanup(wt, branch = null, id = null) {
   const say = (what, e) => console.log(`eval: ${what}: ${String(e.stderr || e.message).trim().slice(0, 200)}`);
-  try { git(SANDBOX, 'worktree', 'remove', '--force', wt); } catch (e) { say(`worktree remove ${wt}`, e); }
-  git(SANDBOX, 'worktree', 'prune');
+  try { fs.rmSync(wt, { recursive: true, force: true }); } catch (e) { say(`remove ${wt}`, e); } // a clone (H2), not a linked worktree
   if (!branch) return;
-  try { git(SANDBOX, 'branch', '-D', branch); } catch (e) { say(`branch -D ${branch}`, e); }
+  if (git(SANDBOX, 'branch', '--list', branch).trim()) try { git(SANDBOX, 'branch', '-D', branch); } catch (e) { say(`branch -D ${branch}`, e); }
   for (const ref of git(SANDBOX, 'for-each-ref', '--format=%(refname)', `refs/tb/${id}/`).split('\n').filter(Boolean)) {
     try { git(SANDBOX, 'update-ref', '-d', ref); } catch (e) { say(`update-ref -d ${ref}`, e); }
   }

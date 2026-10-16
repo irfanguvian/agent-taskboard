@@ -115,7 +115,7 @@ test('AC3 tb pass rows: refused while the phase is built, allowed while unbuilt 
   // final pass also needs --sha on main (P5 injects sha_on_main): missing guard denies
   assert.equal(fsm.check(ticket('final_gate', 'research'), 'done', 'you', g).reason, 'guard sha_on_main unavailable');
   assert.deepEqual(fsm.check(ticket('final_gate', 'research'), 'done', 'you', { ...g, sha_on_main: () => true }), { ok: true });
-  assert.match(fsm.check(ticket('final_gate', 'code'), 'done', 'you', { ...g, sha_on_main: () => true }).reason, /code\/final_gate is built/);
+  assert.match(fsm.check(ticket('final_gate', 'code'), 'done', 'you', { ...g, sha_on_main: () => true }).reason, /^not ready to close/);
 });
 
 // M5 C13: tb close (close_ok + children_done) and rework at close (close_rework G7 + rework_ok); code/final_gate is built

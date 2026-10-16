@@ -93,8 +93,10 @@ ${DENY_READ}
 (allow file-read* file-write* (subpath "${WT}") (subpath "${GTMP}"))
 ; other tickets: belt (TB_HOME deny covers them). Rendered list, never the own WT.
 (deny file-read* file-write* (subpath "${TB_HOME}/tickets") ${OTHER_WORKTREES})
-; .git (linked-worktree pointer file, or dir) never written by gates
+; .git (the ticket's clone's, or a legacy linked-worktree pointer file) never written by gates; C3 (F9): checks never
+; read it either (parity: a linked worktree's objects sat outside the read allowlist, so gate tests saw no repo)
 (deny file-write* (subpath "${WT}/.git"))
+(deny file-read* (subpath "${WT}/.git")) ; @test
 ; denyWrite: phase-settings denyPaths write (the agent's write denies + env files + the tag's git dir)
 ${DENY_WRITE}
 

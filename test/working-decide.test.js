@@ -97,7 +97,10 @@ test('K5 F4 denyPaths (the gate profile\'s one deny source): TB_HOME, the live b
   for (const p of [H, path.join(os.homedir(), '.ssh'), path.join(os.homedir(), '.config', 'gh'), path.join(os.homedir(), 'Library', 'Keychains')]) assert.ok(d.read.includes(p), p);
   for (const p of ['/u/code/repo/.git', `${ctx.WORKTREE}/.git`, `${ctx.WORKTREE}/.env.test`, `${ctx.WORKTREE}/node_modules/.bin`, path.join(os.homedir(), '.npmrc')]) assert.ok(d.write.includes(p), p);
   assert.ok(d.read.concat(d.write).every((p) => path.isAbsolute(p)), 'absolute only');
-  assert.equal(render('code', 'working', ctx).sandbox.filesystem.denyWrite.includes('/u/code/repo/.git'), false, 'the agent still commits');
+  // H2.7 (contract change; was: the tag's .git not write-denied for working, 'the agent still commits'): the agent commits in its
+  // own clone, so the tag's .git is denied and the clone's .git is not (only its config-like files, phase-settings test)
+  const wd = render('code', 'working', ctx).sandbox.filesystem.denyWrite;
+  assert.deepEqual([wd.includes('/u/code/repo/.git'), wd.includes(`${ctx.WORKTREE}/.git`)], [true, false], 'the agent still commits, in its own clone');
   assert.throws(() => denyPaths({ ...ctx, ENV_FILES: ['../x'] }), /ENV_FILES/);
 });
 

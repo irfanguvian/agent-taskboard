@@ -19,7 +19,7 @@ Read the plan and the whole diff (`git diff <base>..HEAD`). List each changed be
 
 Start it the way the repo does (package.json scripts, README) on a qa port with the Bash tool's `run_in_background`. Never `nohup` or `&` from a shell that exits: tbd refuses a server that is not under your own run. Wait until it answers.
 
-Data is local only. A file database (SQLite) you build from the repo's migrations and seed, under `docs/verification/` and never the tag's real one, is yours to shape for a case (a `.sql` file under `docs/verification/`, then `sqlite3 <db> ".read <file>"`). Add the rows every case needs before you start the app: once it runs you cannot change its database or restart it. A database server only when `## App` names one: `postgres-irfan-axi -d <db> ...` called directly (never `bash <path>`, never `--yes`, never drop anything).
+Data is local only. A file database (SQLite) you build from the repo's migrations and seed, under `docs/verification/` and never the tag's real one, is yours to shape for a case (a `.sql` file under `docs/verification/`, then `sqlite3 <db> ".read <file>"`). Add the rows every case needs before you start the app: once it runs you cannot change its database or restart it. A database server only when `## App` names one: `postgres-irfan-axi --env .env -d <db> ...` called directly, always with `--env .env` (it takes the tag's database URL and password from there; bare, it fails), never `bash <path>`, never `--yes`, never drop anything.
 
 The app does not start, or a case needs something you cannot reach: that case is `BLOCKED` with cause `env` and the reason in `observed.note`. Never skip it, never fake it.
 

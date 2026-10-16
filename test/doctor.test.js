@@ -114,7 +114,7 @@ function world(auth = AUTH.ok) {
     versions: path.join(home, '.local', 'share', 'claude', 'versions'),
     setAuth: (a) => fs.writeFileSync(authFile, JSON.stringify(a)),
     store: fakeStore(bin),
-    make: (extra = {}) => createDoctor({ store: w.store, env: { PATH: process.env.PATH }, home, tbHome, codesign: codesign.path, lavishDir, ...extra }),
+    make: (extra = {}) => createDoctor({ store: w.store, env: { PATH: process.env.PATH }, home, tbHome, codesign: codesign.path, lavishDir, pgPort: 1, ...extra }), // pgPort 1: nothing listens (hermetic; the real 5432 is not probed)
     check: (res, name) => res.checks.find((c) => c.name === name),
   };
   return w;
@@ -530,7 +530,7 @@ describe('tag checks', () => {
     fs.writeFileSync(rec, `#!/bin/sh\n{ echo "ARGV $*"; /usr/bin/env | sed 's/^/ENV /'; } >> "${log}"\nexec /usr/bin/git "$@"\n`, { mode: 0o755 });
     const res = await w.doctor({ git: rec, env: { PATH: process.env.PATH, HOME: w.home, GITHUB_TOKEN: 'gh-secret' } }).run({ tag: 'acme/api' });
     assert.equal(w.check(res, 'tag:acme/api').ok, true);
-    const calls = fs.readFileSync(log, 'utf8').split('ARGV ').slice(1);
+    const calls = fs.readFileSync(log, 'utf8').split('ARGV ').slice(1).filter((c) => !c.startsWith('--version')); // the git version check (H2.12) is not a repo call
     assert.equal(calls.length, 2, 'rev-parse --git-dir, rev-parse --verify <base>');
     for (const c of calls) {
       const [argv, ...env] = c.split('\n').filter(Boolean);
@@ -625,6 +625,72 @@ describe('tag checks', () => {
   });
 });
 
+describe('H4 / H2.12 / H8 (lane C)', () => {
+  const net = require('node:net');
+  // fake postgres: answers any startup with R, length 8, auth code `code` (bytes of the answer are never in the output)
+  const fakePg = (code) => new Promise((resolve) => {
+    const srv = net.createServer((c) => { c.once('data', () => { const b = Buffer.alloc(9); b.write('R'); b.writeInt32BE(8, 1); b.writeInt32BE(code, 5); c.end(b); }); });
+    srv.listen(0, '127.0.0.1', () => resolve(srv));
+  });
+  const wall = async (code) => {
+    const srv = await fakePg(code);
+    try { return (await world().make({ pgPort: srv.address().port }).run({})).checks.find((c) => c.name === 'pg_wall'); } finally { srv.close(); }
+  };
+
+  test('F15 pg_wall: R code 10 (scram) passes; R code 0 (trust) warns with the H4 text and no server bytes; nothing listening = not checked', async () => {
+    assert.deepEqual([(await wall(10)).ok, (await wall(10)).warn], [true, undefined]);
+    const trust = await wall(0);
+    assert.equal(trust.ok, true);
+    assert.equal(trust.warn, true);
+    assert.match(trust.detail, /lets in without a password \(trust\): working \+ QA agents can reach it \(H4\)/);
+    assert.equal(trust.detail.includes(String.fromCharCode(0)), false, 'no server bytes');
+    const down = world().make({ pgPort: 1 });
+    assert.match((await down.run({})).checks.find((c) => c.name === 'pg_wall').detail, /wall NOT checked/);
+  });
+
+  test('F14 tagStatic: env file with a postgres password fails a tag without db: local; passes with db: local; no password passes; password masked', async () => {
+    const w = world();
+    const dir = path.join(w.root, 'envtag');
+    fs.mkdirSync(dir);
+    fs.writeFileSync(path.join(dir, '.env'), 'DATABASE_URL=postgres://u:pw12@localhost/db\n');
+    w.store.tags = { 'acme/api': { type: 'folder', path: dir, env_files: ['.env'] } };
+    const bad = (await w.make().tagStatic('acme/api'))[0];
+    assert.equal(bad.ok, false);
+    assert.match(bad.detail, /env files hold a postgres password but db is not local/);
+    assert.doesNotMatch(JSON.stringify(bad), /pw12/);
+    w.store.tags['acme/api'].db = 'local';
+    assert.equal((await w.make().tagStatic('acme/api'))[0].ok, true);
+    delete w.store.tags['acme/api'].db;
+    fs.writeFileSync(path.join(dir, '.env'), 'DATABASE_URL=postgres://u@localhost/db\n');
+    assert.equal((await w.make().tagStatic('acme/api'))[0].ok, true);
+    // split creds (sec review MED): a password key next to DB_HOST hands over the same creds
+    fs.writeFileSync(path.join(dir, '.env'), 'DB_HOST=localhost\nPGPASSWORD=pw34\n');
+    const split = (await w.make().tagStatic('acme/api'))[0];
+    assert.equal(split.ok, false);
+    assert.match(split.detail, /env files set PGPASSWORD but db is not local/);
+    assert.doesNotMatch(JSON.stringify(split), /pw34/);
+    w.store.tags['acme/api'].db = 'local';
+    assert.equal((await w.make().tagStatic('acme/api'))[0].ok, true);
+  });
+
+  test('H2.12 git check: 2.50 passes; a git printing 2.48.0 fails with the update fix', async () => {
+    const w = world();
+    const old = path.join(w.root, 'git-old');
+    fs.writeFileSync(old, '#!/bin/sh\necho "git version 2.48.0"\n', { mode: 0o755 });
+    const c = (await w.make({ git: old }).run({})).checks.find((x) => x.name === 'git');
+    assert.equal(c.ok, false);
+    assert.match(c.fix, /xcode-select --install/);
+    assert.equal((await w.make().run({})).checks.find((x) => x.name === 'git').ok, true);
+  });
+
+  test('H8 auth failure outside launchd adds the keychain hint; under launchd it does not', async () => {
+    const w = world();
+    w.setAuth(AUTH.out);
+    assert.match(w.check(await w.make({ underLaunchd: () => false }).run({}), 'auth').fix, /not under launchd/);
+    assert.doesNotMatch(w.check(await w.make({ underLaunchd: () => true }).run({}), 'auth').fix, /launchd/);
+  });
+});
+
 describe('run: doctor.json', () => {
   test('result is saved to TB_HOME/doctor.json with mode 0600 and returned; ok is false when any check fails', async () => {
     const w = world();
@@ -632,7 +698,7 @@ describe('run: doctor.json', () => {
     const d = w.make({ now: () => new Date('2026-10-08T00:00:00Z') });
     const res = await d.run({});
     assert.equal(res.ok, true);
-    assert.deepEqual(res.checks.map((c) => c.name), ['auth', 'claude_bin', 'fable_billing', 'node', 'lavish', 'config']);
+    assert.deepEqual(res.checks.map((c) => c.name), ['auth', 'claude_bin', 'fable_billing', 'node', 'lavish', 'git', 'pg_wall', 'config']);
     const file = path.join(w.tbHome, 'doctor.json');
     assert.equal(fs.statSync(file).mode & 0o777, 0o600);
     assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), { at: '2026-10-08T00:00:00.000Z', ok: true, checks: res.checks });
@@ -742,7 +808,7 @@ describe('e2e: POST /api/doctor and tb doctor on a real tbd', () => {
     assert.equal((await t.api('POST', '/api/doctor', { version: '2.1.295' })).status, 400);
     const r = await t.api('POST', '/api/doctor', {});
     assert.equal(r.status, 200);
-    assert.deepEqual(r.json.checks.map((c) => [c.name, c.ok]), [['auth', true], ['claude_bin', true], ['fable_billing', true], ['node', true], ['lavish', true], ['config', true]]);
+    assert.deepEqual(r.json.checks.map((c) => [c.name, c.ok]), [['auth', true], ['claude_bin', true], ['fable_billing', true], ['node', true], ['lavish', true], ['git', true], ['pg_wall', true], ['config', true]]);
     assert.equal(r.json.checks.at(-1).warn, undefined, 'D-0080: a fresh config.json changes no default');
     assert.equal(r.json.ok, true);
     assert.equal(fs.statSync(path.join(t.tbHome, 'doctor.json')).mode & 0o777, 0o600);
@@ -787,13 +853,13 @@ describe('e2e: POST /api/doctor and tb doctor on a real tbd', () => {
     fs.writeFileSync(authFile, JSON.stringify(AUTH.apiKey));
     const bad = await tb('doctor');
     assert.equal(bad.code, 1, bad.stdout);
-    assert.match(bad.stdout, /^doctor: FAIL \(1 of 6 checks\)$/m);
+    assert.match(bad.stdout, /^doctor: FAIL \(1 of 8 checks\)$/m);
     assert.match(bad.stdout, /^ {2}auth,fail,"authMethod apiKey: runs must use the claude\.ai subscription",/m);
     fs.writeFileSync(authFile, JSON.stringify(AUTH.ok));
     const good = await tb('doctor');
     assert.equal(good.code, 0, good.stdout);
     assert.match(good.stdout, /^doctor: ok$/m);
-    assert.match(good.stdout, /^checks\[6\]\{name,status,detail,fix\}:$/m);
+    assert.match(good.stdout, /^checks\[8\]\{name,status,detail,fix\}:$/m);
     assert.match(good.stdout, /^ {2}fable_billing,ok,plan,""$/m);
   });
 

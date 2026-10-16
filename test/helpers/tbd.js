@@ -17,7 +17,8 @@ process.on('exit', () => children.forEach((c) => c.kill('SIGKILL')));
 // Inherited env minus every TB_* / TBX_* var, plus the isolated paths and the tbd's test run key (SLOT_ROOT).
 function isolatedEnv({ home, tbHome, port, runKey = undefined }, extra = {}) {
   const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^TB[DX]?_/.test(k))); // TB_, TBX_, TBD_SOCK: never a parent tbd's
-  return { ...env, HOME: home, TB_HOME: tbHome, TB_PORT: String(port), TB_NOTIFY: '0', TB_LAVISH_DIR: lavishDir(), ...(runKey && { TBX_RUN: runKey }), ...extra };
+  // TB_DOCTOR_PG_PORT 1: nothing listens there, so a test tbd's doctor never probes the real postgres (hermetic)
+  return { ...env, HOME: home, TB_HOME: tbHome, TB_PORT: String(port), TB_NOTIFY: '0', TB_LAVISH_DIR: lavishDir(), TB_DOCTOR_PG_PORT: '1', ...(runKey && { TBX_RUN: runKey }), ...extra };
 }
 
 // Raw HTTP so tests control every header (fetch refuses to set Host). agent: false = a fresh socket each time: tbd
