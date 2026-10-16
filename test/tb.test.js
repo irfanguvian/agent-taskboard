@@ -251,6 +251,14 @@ test('M5 D-0104 tag add / doctor --tag with --ident --push-remote: merged into t
   // doctor --tag merges too (its checks fail here: no claude in this board; the merge comes first)
   await as(cfg, 'doctor', '--tag', 'acme/api', '--push-remote', 'origin');
   assert.deepEqual((await tags())['acme/api'], { type: 'folder', path: path.resolve(t.tbHome), push: { remote: 'origin' }, ident });
+  // H live E2E gap: QA needs qa_ports, onboarding needs db: both merge like --ident; --db none drops the key
+  const qa = await tb('tag', 'add', 'acme/api', '--qa-ports', '3000,3001', '--db', 'local');
+  assert.equal(qa.code, 0, qa.stdout);
+  assert.deepEqual((await tags())['acme/api'], { type: 'folder', path: path.resolve(t.tbHome), push: { remote: 'origin' }, ident, qa_ports: [3000, 3001], db: 'local' });
+  await as(cfg, 'doctor', '--tag', 'acme/api', '--db', 'none');
+  assert.deepEqual((await tags())['acme/api'], { type: 'folder', path: path.resolve(t.tbHome), push: { remote: 'origin' }, ident, qa_ports: [3000, 3001] });
+  assert.equal((await tb('tag', 'add', 'acme/api', '--qa-ports', '70000')).code, 2, 'port out of range → usage');
+  assert.equal((await tb('tag', 'add', 'acme/api', '--db', 'remote')).code, 2, 'db must be local or none');
 
   const before = await tags();
   const none = await as('/dev/null', 'tag', 'add', 'acme/api', '--ident');
