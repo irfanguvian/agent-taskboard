@@ -95,6 +95,7 @@ test('AC4 + D35 GET / serves ui/index.html as is (no token meta) to a session; 5
   fs.mkdirSync(path.join(root, 'with-ui', 'ui'));
   fs.writeFileSync(path.join(root, 'with-ui', 'ui', 'index.html'), '<!doctype html><html><head><title>t</title></head><body></body></html>');
   fs.writeFileSync(path.join(root, 'with-ui', 'ui', 'app.js'), 'console.log(1)');
+  fs.writeFileSync(path.join(root, 'with-ui', 'ui', 'foundation.css'), ':root{--bg:#fff}');
 
   const a = await startTbd({ tbd: path.join(root, 'with-ui', 'tbd.js') });
   t.after(() => a.stop());
@@ -107,6 +108,10 @@ test('AC4 + D35 GET / serves ui/index.html as is (no token meta) to a session; 5
   assert.equal(js.text, 'console.log(1)');
   assert.match(js.headers['content-type'], /^text\/javascript/);
   assert.equal((await a.api('GET', '/style.css')).status, 404);
+  const css = await a.api('GET', '/foundation.css'); // the design foundation is public like style.css (the locked page needs it)
+  assert.equal(css.text, ':root{--bg:#fff}');
+  assert.match(css.headers['content-type'], /^text\/css/);
+  assert.equal((await a.api('GET', '/flows.css')).status, 404);
   for (const p of ['/', '/api/state', '/api/tags', '/app.js']) assert.ok(!(await a.api('GET', p)).text.includes(a.token), `${p} leaks token`);
 
   const b = await startTbd({ tbd: path.join(root, 'no-ui', 'tbd.js') });

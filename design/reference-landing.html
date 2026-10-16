@@ -1,0 +1,318 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Till Terminal</title>
+<meta name="description" content="Till is the payment terminal for small shops in Indonesia.">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource-variable/inter@5/opsz.css">
+<link rel="stylesheet" href="foundation.css">
+<style>
+/* Page layout only. Tokens, type and components come from foundation.css. */
+.center { text-align: center; }
+.center .t-intro { text-wrap: balance; }
+section[id] { scroll-margin-top: 52px; }
+
+/* Nav: 52px, sticky, translucent */
+.nav {
+  position: sticky; top: 0; z-index: 10;
+  background: var(--nav-bg); border-bottom: 1px solid var(--nav-border);
+  -webkit-backdrop-filter: saturate(180%) blur(20px); backdrop-filter: saturate(180%) blur(20px);
+}
+.nav .container { display: flex; align-items: center; gap: 24px; height: 52px; }
+.nav-name { margin-right: auto; color: var(--text); font-family: var(--font-display); font-size: 21px; line-height: 1; font-weight: 600; letter-spacing: 0; }
+.nav-name:hover { text-decoration: none; }
+.nav-links { display: flex; gap: 24px; font-size: 12px; line-height: 1.33337; letter-spacing: -0.01em; }
+.nav-links a { color: var(--text); transition: color var(--dur-fast) linear; }
+.nav-links a:hover { color: var(--link); text-decoration: none; }
+
+/* Hero: the page's one orchestrated moment */
+.hero { padding: 80px 0 0; overflow: hidden; }
+.hero .t-display { margin-top: 8px; }
+.hero .t-intro { margin-top: 16px; }
+.pills { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 16px; margin-top: 32px; }
+@keyframes rise { from { opacity: 0; transform: translateY(16px); } }
+@media (prefers-reduced-motion: no-preference) { .rise { animation: rise 900ms cubic-bezier(0.25, 0.1, 0.25, 1) both; } }
+
+/* A product screenshot drawn in HTML because Till isn't real. A real page uses a flat 2x image
+   with this same edge and top radius, cropped by the band's bottom edge. */
+.shot {
+  margin: 64px auto 0; overflow: hidden;
+  background: var(--bg-elevated); color: var(--text);
+  border: 1px solid var(--shot-edge, rgba(0, 0, 0, 0.08)); border-bottom: 0;
+  border-radius: var(--radius-tile) var(--radius-tile) 0 0;
+  font-size: 14px; line-height: 1.42859; letter-spacing: -0.016em; text-align: left;
+}
+.shot button { pointer-events: none; }
+.theme-dark .shot { --shot-edge: rgba(255, 255, 255, 0.14); }
+.muted { color: var(--text-2); }
+.tnum { font-variant-numeric: tabular-nums; }
+
+.checkout { display: grid; grid-template-columns: 3fr 2fr; width: min(1100px, 87.5%); height: 460px; }
+.order { padding: 40px 48px; }
+.order-head { display: flex; justify-content: space-between; align-items: baseline; padding-bottom: 16px; border-bottom: 1px solid var(--separator); }
+.order-head b { font-family: var(--font-display); font-size: 21px; letter-spacing: 0; }
+.lines li, .order-total { display: flex; gap: 16px; padding: 16px 0; border-bottom: 1px solid var(--separator-soft); font-size: 17px; letter-spacing: -0.022em; }
+.lines li span:first-child { width: 24px; color: var(--text-2); }
+.lines li span:nth-child(2) { flex: 1; }
+.order-total { justify-content: space-between; border: 0; font-weight: 600; }
+.pay { display: flex; flex-direction: column; align-items: center; padding: 40px 48px; background: var(--bg-alt); text-align: center; }
+.pay-amt { margin: 4px 0 24px; font-family: var(--font-display); font-size: 48px; line-height: 1.08349; font-weight: 600; letter-spacing: -0.003em; }
+.qr { width: 176px; height: 176px; margin: 32px 0 16px; border-radius: var(--radius-md); background: #fff; fill: #000; }
+
+/* Highlights: white tiles on gray, visual runs off each tile's bottom edge */
+.tiles { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-top: 48px; }
+.tiles .tile { display: flex; flex-direction: column; gap: 40px; }
+.tiles .tile-bleed { margin-top: auto; height: 240px; }
+.receipt { padding: 24px 24px 0; background: var(--bg-alt); border-radius: var(--radius-tile) var(--radius-tile) 0 0; font-size: 14px; line-height: 1.42859; letter-spacing: -0.016em; }
+.receipt .shop { font-size: 17px; font-weight: 600; letter-spacing: -0.022em; }
+.receipt ul { margin: 12px 0 0; padding-top: 4px; border-top: 1px solid var(--separator); }
+.receipt li, .receipt .sum { display: flex; justify-content: space-between; padding: 4px 0; }
+.receipt .sum { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--separator); font-weight: 600; }
+.hours { display: flex; align-items: flex-end; justify-content: space-between; padding: 0 8px; }
+.hours i { position: relative; width: 24px; border-radius: 4px 4px 0 0; background: var(--accent); }
+.hours i.open { background: color-mix(in srgb, var(--accent), var(--bg) 45%); }
+.hours i > span {
+  position: absolute; bottom: 100%; left: 50%; margin-bottom: 8px; padding: 0 4px; transform: translateX(-50%);
+  background: var(--bg); font-size: 12px; line-height: 1.33337; font-style: normal; white-space: nowrap;
+}
+
+/* Big number */
+.fees .t-intro { max-width: 640px; margin-top: 16px; }
+.big { margin-top: 64px; font-family: var(--font-display); font-size: 96px; line-height: 1; font-weight: 600; letter-spacing: -0.015em; }
+.big-cap { margin-top: 8px; color: var(--text-2); }
+
+/* Dark band */
+.payouts-band { padding-bottom: 0; overflow: hidden; }
+.payouts-band .t-intro { margin-top: 16px; }
+.payouts { width: min(692px, 87.5%); height: 320px; }
+.payouts header, .payouts li { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; padding: 12px 32px; }
+.payouts header { padding-top: 24px; }
+.payouts header b { font-size: 17px; letter-spacing: -0.022em; }
+.payouts li { border-top: 1px solid var(--separator-soft); }
+.payouts li p:last-child { text-align: right; }
+.payouts li span { display: block; color: var(--text-2); font-size: 12px; }
+
+/* Compare: columns share rows through subgrid so every row lines up */
+.cmp-wrap { margin-top: 64px; }
+.cmp { display: grid; grid-template-columns: repeat(3, 1fr); column-gap: 32px; text-align: center; }
+.cmp .col { display: grid; grid-row: span 10; grid-template-rows: subgrid; }
+.cmp .t-title { margin-top: 32px; }
+.tag { margin-top: 8px; text-wrap: balance; }
+.price { margin-top: 16px; color: var(--text-2); }
+.buy { display: flex; flex-direction: column; align-items: center; gap: 12px; margin: 24px 0 40px; }
+.spec { padding: 16px 0; border-top: 1px solid var(--separator); font-size: 14px; letter-spacing: -0.016em; }
+.spec span { display: block; margin-bottom: 4px; color: var(--text-2); font-size: 12px; letter-spacing: -0.01em; }
+.dev { display: flex; flex-direction: column; justify-content: flex-end; align-items: center; height: 160px; }
+.dev i { position: relative; display: block; background: var(--bg-elevated); border: 1px solid rgba(0, 0, 0, 0.08); }
+.dev i::after { content: ""; position: absolute; background: var(--text); }
+.dev-go i { width: 96px; height: 96px; border-radius: 24px; }
+.dev-go i::after { inset: 12px 12px 40px; border-radius: 12px; }
+.dev-term i { width: 84px; height: 152px; border-radius: 16px; }
+.dev-term i::after { inset: 8px 8px 56px; border-radius: 8px; }
+.dev-counter i:first-child { width: 160px; height: 104px; border-radius: 12px; }
+.dev-counter i:first-child::after { inset: 8px; border-radius: 4px; }
+.dev-counter i + i { width: 40px; height: 48px; border-top: 0; border-radius: 0 0 4px 4px; }
+.dev-counter i + i::after { display: none; }
+
+/* CTA and footer */
+.cta .pills { margin-top: 32px; }
+.foot { padding: 32px 0 40px; background: var(--bg-alt); color: var(--text-2); font-size: 12px; line-height: 1.33337; letter-spacing: -0.01em; }
+.notes { display: grid; gap: 8px; padding: 0 0 20px 16px; list-style: decimal; border-bottom: 1px solid var(--separator); }
+.foot-links { display: flex; flex-wrap: wrap; gap: 8px 24px; padding: 20px 0 8px; }
+.foot-links a { color: var(--text); }
+sup { font-size: 0.6em; line-height: 0; }
+.t-headline sup { font-size: 0.4em; }
+sup a { color: inherit; }
+
+@media (max-width: 1068px) {
+  .big { font-size: 80px; }
+  .order, .pay { padding: 32px; }
+}
+@media (max-width: 734px) {
+  .nav-links { display: none; }
+  .hero { padding-top: 64px; }
+  .checkout { grid-template-columns: 1fr; height: 400px; }
+  .order { display: none; } /* phones get their own crop: just the pay screen */
+  .qr { width: 160px; height: 160px; }
+  .tiles { grid-template-columns: 1fr; gap: 16px; }
+  .payouts header, .payouts li { padding-inline: 20px; }
+  .cmp-wrap { overflow-x: auto; scroll-snap-type: x mandatory; scrollbar-width: none; }
+  .cmp { width: max-content; margin: 0; padding-inline: 6.25%; grid-template-columns: repeat(3, min(72vw, 320px)); column-gap: 16px; }
+  .cmp .col { scroll-snap-align: center; }
+}
+</style>
+</head>
+<body>
+
+<nav class="nav" aria-label="Till Terminal">
+  <div class="container">
+    <a class="nav-name" href="#top">Till</a>
+    <ul class="nav-links">
+      <li><a href="#top">Overview</a></li>
+      <li><a href="#fees">Fees</a></li>
+      <li><a href="#payouts">Payouts</a></li>
+      <li><a href="#compare">Compare</a></li>
+    </ul>
+    <a class="btn btn-xs" href="/order">Order</a>
+  </div>
+</nav>
+
+<main>
+  <section class="band hero center" id="top" aria-labelledby="hero-title">
+    <div class="container rise">
+      <p class="t-eyebrow">Till Terminal</p>
+      <h1 class="t-display" id="hero-title">Get paid. Go home.</h1>
+      <p class="t-intro">The payment terminal for small shops.</p>
+      <p class="pills"><a class="btn" href="/order">Order</a><a class="btn btn-outline" href="#compare">Compare</a></p>
+    </div>
+    <div class="shot checkout rise" role="img" aria-label="Till Terminal checkout screen. Order 41 for table 4: two es kopi susu, one roti bakar cokelat and one air mineral, total Rp 67.000, waiting for the customer to scan the QRIS code.">
+      <div class="order">
+        <p class="order-head"><b>Order 41</b><span class="muted">Table 4 · 14:18</span></p>
+        <ul class="lines tnum">
+          <li><span>2</span><span>Es kopi susu</span><span>Rp 36.000</span></li>
+          <li><span>1</span><span>Roti bakar cokelat</span><span>Rp 25.000</span></li>
+          <li><span>1</span><span>Air mineral</span><span>Rp 6.000</span></li>
+        </ul>
+        <p class="order-total tnum"><span>Total</span><span>Rp 67.000</span></p>
+      </div>
+      <div class="pay">
+        <p class="t-caption muted">Total</p>
+        <p class="pay-amt">Rp 67.000</p>
+        <div class="seg"><button tabindex="-1" aria-pressed="false">Card</button><button tabindex="-1" aria-pressed="true">QRIS</button><button tabindex="-1" aria-pressed="false">Transfer</button></div>
+        <svg class="qr" viewBox="-2 -2 25 25"><path d="M0 0h7v1h-7zM11 0h2v1h-2zM14 0h7v1h-7zM0 1h1v1h-1zM6 1h1v1h-1zM9 1h2v1h-2zM12 1h1v1h-1zM14 1h1v1h-1zM20 1h1v1h-1zM0 2h1v1h-1zM2 2h3v1h-3zM6 2h1v1h-1zM8 2h2v1h-2zM11 2h1v1h-1zM14 2h1v1h-1zM16 2h3v1h-3zM20 2h1v1h-1zM0 3h1v1h-1zM2 3h3v1h-3zM6 3h1v1h-1zM10 3h3v1h-3zM14 3h1v1h-1zM16 3h3v1h-3zM20 3h1v1h-1zM0 4h1v1h-1zM2 4h3v1h-3zM6 4h1v1h-1zM8 4h1v1h-1zM10 4h3v1h-3zM14 4h1v1h-1zM16 4h3v1h-3zM20 4h1v1h-1zM0 5h1v1h-1zM6 5h1v1h-1zM8 5h1v1h-1zM10 5h1v1h-1zM14 5h1v1h-1zM20 5h1v1h-1zM0 6h7v1h-7zM8 6h1v1h-1zM10 6h1v1h-1zM12 6h1v1h-1zM14 6h7v1h-7zM8 7h1v1h-1zM10 7h3v1h-3zM0 8h1v1h-1zM2 8h2v1h-2zM5 8h3v1h-3zM12 8h1v1h-1zM14 8h1v1h-1zM16 8h2v1h-2zM0 9h1v1h-1zM2 9h1v1h-1zM7 9h1v1h-1zM9 9h2v1h-2zM12 9h4v1h-4zM17 9h2v1h-2zM20 9h1v1h-1zM1 10h1v1h-1zM4 10h3v1h-3zM8 10h1v1h-1zM13 10h2v1h-2zM16 10h1v1h-1zM18 10h1v1h-1zM1 11h2v1h-2zM4 11h2v1h-2zM9 11h3v1h-3zM13 11h1v1h-1zM17 11h4v1h-4zM1 12h2v1h-2zM6 12h2v1h-2zM9 12h1v1h-1zM13 12h3v1h-3zM18 12h1v1h-1zM8 13h1v1h-1zM10 13h4v1h-4zM15 13h2v1h-2zM18 13h2v1h-2zM0 14h7v1h-7zM9 14h3v1h-3zM14 14h6v1h-6zM0 15h1v1h-1zM6 15h1v1h-1zM8 15h1v1h-1zM10 15h2v1h-2zM13 15h1v1h-1zM16 15h3v1h-3zM0 16h1v1h-1zM2 16h3v1h-3zM6 16h1v1h-1zM9 16h2v1h-2zM13 16h2v1h-2zM16 16h2v1h-2zM20 16h1v1h-1zM0 17h1v1h-1zM2 17h3v1h-3zM6 17h1v1h-1zM8 17h1v1h-1zM12 17h1v1h-1zM14 17h1v1h-1zM19 17h1v1h-1zM0 18h1v1h-1zM2 18h3v1h-3zM6 18h1v1h-1zM10 18h2v1h-2zM15 18h1v1h-1zM17 18h1v1h-1zM20 18h1v1h-1zM0 19h1v1h-1zM6 19h1v1h-1zM8 19h2v1h-2zM12 19h1v1h-1zM14 19h1v1h-1zM18 19h2v1h-2zM0 20h7v1h-7zM14 20h2v1h-2zM19 20h2v1h-2z"/></svg>
+        <p class="muted">Scan with any banking app or e-wallet</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="band band-alt" aria-labelledby="h-rush">
+    <div class="container">
+      <h2 class="t-headline" id="h-rush">Made for the lunch rush.</h2>
+      <div class="tiles">
+        <article class="tile">
+          <p class="t-lead"><strong>Receipts on WhatsApp.</strong> No paper roll to run out. Customers get each receipt as a message with your shop’s name on top.</p>
+          <div class="tile-bleed receipt" role="img" aria-label="A Kopi Rejeki receipt for Rp 67.000, paid with QRIS at 14:18.">
+            <p class="shop">Kopi Rejeki</p>
+            <p class="t-caption muted">Jl. Kaliurang Km 5, Yogyakarta</p>
+            <ul class="tnum">
+              <li><span>Es kopi susu ×2</span><span>Rp 36.000</span></li>
+              <li><span>Roti bakar cokelat</span><span>Rp 25.000</span></li>
+              <li><span>Air mineral</span><span>Rp 6.000</span></li>
+            </ul>
+            <p class="sum tnum"><span>Total</span><span>Rp 67.000</span></p>
+            <p class="t-caption muted">Paid with QRIS · 16 Oct, 14:18</p>
+          </div>
+        </article>
+        <article class="tile">
+          <p class="t-lead"><strong>Know your busiest hour.</strong> See takings by the hour and plan staff around 12:00, not the quiet 10:00.</p>
+          <div class="tile-bleed hours" role="img" aria-label="Today’s takings by hour from 07:00 to 14:00. The busiest hour is 12:00 with Rp 912.000.">
+            <i style="height: 60px"></i><i style="height: 132px"></i><i style="height: 115px"></i><i style="height: 81px"></i>
+            <i style="height: 126px"></i><i style="height: 176px"><span><b>912 rb</b> <span class="muted">12:00</span></span></i>
+            <i style="height: 156px"></i><i class="open" style="height: 83px"></i>
+          </div>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <section class="band fees" id="fees" aria-labelledby="h-fees">
+    <div class="container">
+      <h2 class="t-headline" id="h-fees">Keep more of each sale.</h2>
+      <p class="t-intro">No monthly fee and no contract. You pay only when a customer pays you.</p>
+      <p class="big">0,7%</p>
+      <p class="big-cap">per QRIS payment<sup><a href="#fn-1" aria-label="Footnote 1">1</a></sup></p>
+    </div>
+  </section>
+
+  <section class="band theme-dark payouts-band center" id="payouts" aria-labelledby="h-payouts">
+    <div class="container">
+      <h2 class="t-headline" id="h-payouts">Paid out by 09:00.</h2>
+      <p class="t-intro">Yesterday’s takings reach your bank before you open, seven days a week.<sup><a href="#fn-2" aria-label="Footnote 2">2</a></sup></p>
+    </div>
+    <div class="shot payouts" role="img" aria-label="Till payouts to BCA account ending 4821. Each payout from Monday to Friday arrived between 08:37 and 08:51.">
+      <header><b>Payouts</b><span class="muted">BCA ••• 4821</span></header>
+      <ul class="tnum">
+        <li><p>Fri 16 Oct<span>For Thursday</span></p><p>Rp 6.059.300<span>Arrived 08:42</span></p></li>
+        <li><p>Thu 15 Oct<span>For Wednesday</span></p><p>Rp 5.361.400<span>Arrived 08:37</span></p></li>
+        <li><p>Wed 14 Oct<span>For Tuesday</span></p><p>Rp 4.951.200<span>Arrived 08:51</span></p></li>
+        <li><p>Tue 13 Oct<span>For Monday</span></p><p>Rp 5.176.900<span>Arrived 08:40</span></p></li>
+        <li><p>Mon 12 Oct<span>For Sunday</span></p><p>Rp 5.986.100<span>Arrived 08:46</span></p></li>
+      </ul>
+    </div>
+  </section>
+
+  <section class="band band-alt" id="compare" aria-labelledby="h-compare">
+    <div class="container center"><h2 class="t-headline" id="h-compare">Pick your Till.</h2></div>
+    <div class="cmp-wrap">
+      <div class="container cmp">
+        <div class="col">
+          <div class="dev dev-go" aria-hidden="true"><i></i></div>
+          <h3 class="t-title">Till Go</h3>
+          <p class="tag">A card reader that pairs with your phone.</p>
+          <p class="price">Rp 499.000</p>
+          <p class="buy"><a class="btn" href="/order/go">Order</a><a class="more" href="/go">Learn more</a></p>
+          <p class="spec"><span>Screen</span>Uses your phone</p>
+          <p class="spec"><span>Payments</span>Cards and QRIS</p>
+          <p class="spec"><span>Receipts</span>WhatsApp</p>
+          <p class="spec"><span>Battery</span>Up to 500 payments<sup><a href="#fn-3" aria-label="Footnote 3">3</a></sup></p>
+          <p class="spec"><span>Connection</span>Bluetooth to your phone</p>
+        </div>
+        <div class="col">
+          <div class="dev dev-term" aria-hidden="true"><i></i></div>
+          <h3 class="t-title">Till Terminal</h3>
+          <p class="tag">Takes every payment and prints the receipt.</p>
+          <p class="price">Rp 1.899.000</p>
+          <p class="buy"><a class="btn" href="/order/terminal">Order</a><a class="more" href="/terminal">Learn more</a></p>
+          <p class="spec"><span>Screen</span>5,5-inch touch screen</p>
+          <p class="spec"><span>Payments</span>Cards, QRIS and bank transfer</p>
+          <p class="spec"><span>Receipts</span>WhatsApp or built-in printer</p>
+          <p class="spec"><span>Battery</span>Up to 12 hours<sup><a href="#fn-3" aria-label="Footnote 3">3</a></sup></p>
+          <p class="spec"><span>Connection</span>4G and Wi-Fi</p>
+        </div>
+        <div class="col">
+          <div class="dev dev-counter" aria-hidden="true"><i></i><i></i></div>
+          <h3 class="t-title">Till Counter</h3>
+          <p class="tag">A register with a screen your customer can see.</p>
+          <p class="price">Rp 4.299.000</p>
+          <p class="buy"><a class="btn" href="/order/counter">Order</a><a class="more" href="/counter">Learn more</a></p>
+          <p class="spec"><span>Screen</span>10,1-inch screen and a customer display</p>
+          <p class="spec"><span>Payments</span>Cards, QRIS and bank transfer</p>
+          <p class="spec"><span>Receipts</span>WhatsApp or built-in printer</p>
+          <p class="spec"><span>Battery</span>Runs on mains power</p>
+          <p class="spec"><span>Connection</span>Wi-Fi and Ethernet</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="band cta center" aria-labelledby="h-cta">
+    <div class="container">
+      <h2 class="t-headline" id="h-cta">Order today. Sell tomorrow.<sup><a href="#fn-4" aria-label="Footnote 4">4</a></sup></h2>
+      <p class="pills"><a class="btn" href="/order">Order</a><a class="more" href="/resellers">Find a reseller</a></p>
+    </div>
+  </section>
+</main>
+
+<footer class="foot">
+  <div class="container">
+    <ol class="notes">
+      <li id="fn-1">QRIS payments cost 0,7% each. Card payments cost 1,8% and bank transfers Rp 2.500 each. All fees include VAT.</li>
+      <li id="fn-2">Payments taken by 23:59 WIB are paid out by 09:00 WIB the next morning, including Sundays and public holidays, to accounts at BCA, BNI, BRI and Mandiri. Other banks receive payouts by 15:00 WIB.</li>
+      <li id="fn-3">Tested by Till in September 2026 with production units, one payment every 2 minutes and the screen at 50% brightness. Battery life depends on use and settings.</li>
+      <li id="fn-4">Orders placed by 15:00 WIB arrive the next day in Jakarta, Bandung, Surabaya and Yogyakarta. Other cities take 2 to 4 days.</li>
+    </ol>
+    <nav aria-label="Footer">
+      <ul class="foot-links">
+        <li><a href="/support">Support</a></li>
+        <li><a href="/resellers">Resellers</a></li>
+        <li><a href="/privacy">Privacy</a></li>
+        <li><a href="/terms">Terms</a></li>
+      </ul>
+    </nav>
+    <p>Copyright © 2026 PT Till Teknologi Indonesia. All rights reserved.</p>
+  </div>
+</footer>
+
+</body>
+</html>

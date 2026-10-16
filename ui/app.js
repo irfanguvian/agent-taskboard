@@ -35,8 +35,6 @@ const day = v => { const d = new Date(v); return `${d.getFullYear()}-${pad(d.get
 const today = () => day(Date.now());
 const hhmm = v => { const d = new Date(v); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; };
 const when = v => (v ? `${day(v)} ${hhmm(v)}` : null); // one time format everywhere: local, 24 h
-// teal..magenta only: orange, red and green are reserved for meaning
-const hue = s => 170 + [...s].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 140, 7);
 const byId = id => state.reminders.find(r => r.id === id);
 const colOf = status => state.reminders.filter(r => r.status === status);
 
@@ -60,29 +58,49 @@ const debounce = (fn, ms) => { let t; return () => { clearTimeout(t); t = setTim
 const isObj = v => v !== null && typeof v === 'object' && !Array.isArray(v);
 const safe = fn => { try { return fn(); } catch { return undefined; /* storage blocked */ } };
 
-// ---------- theme ----------
+// a segmented control (.seg of buttons): the one whose value matches is pressed
+const press = (group, value) => { for (const b of group.querySelectorAll('button')) b.setAttribute('aria-pressed', String(b.value === value)); };
+
+// ---------- theme: Auto follows the system (foundation.css), Light / Dark pin it ----------
 const root = document.documentElement;
-const savedTheme = safe(() => localStorage.getItem('tb-theme'));
-if (savedTheme === 'light' || savedTheme === 'dark') root.dataset.theme = savedTheme;
-const isDark = () => (root.dataset.theme ? root.dataset.theme === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches);
-function syncThemeBtn() {
-  const b = $('#theme');
-  b.textContent = isDark() ? 'Light' : 'Dark';
-  b.setAttribute('aria-label', isDark() ? 'Switch to light theme' : 'Switch to dark theme');
+const THEMES = ['auto', 'light', 'dark'];
+function setTheme(t) {
+  root.dataset.theme = t;
+  press($('#theme'), t);
 }
-$('#theme').addEventListener('click', () => {
-  const next = isDark() ? 'light' : 'dark';
-  root.dataset.theme = next;
-  safe(() => localStorage.setItem('tb-theme', next));
-  syncThemeBtn();
+const savedTheme = safe(() => localStorage.getItem('tb-theme'));
+setTheme(THEMES.includes(savedTheme) ? savedTheme : 'auto');
+$('#theme').addEventListener('click', e => {
+  const t = e.target.closest('button')?.value;
+  if (!THEMES.includes(t)) return;
+  setTheme(t);
+  safe(() => localStorage.setItem('tb-theme', t));
 });
-matchMedia('(prefers-color-scheme: dark)').addEventListener('change', syncThemeBtn);
+
+// ---------- views: one per hash (#today #reminders #flows, #system on phones), so back / forward work ----------
+const VIEWS = { today: 'Today', reminders: 'Reminders', flows: 'Flows', system: 'System' };
+const PHONE = matchMedia('(max-width: 734px)');
+const phone = () => PHONE.matches;
+PHONE.addEventListener('change', e => { if (!e.matches && root.dataset.view === 'system') location.replace('#today'); }); // System is a phone view: widening leaves it
+function route() {
+  if (ui.locked) return; // lockOut replaced the body: no views left to show
+  const h = location.hash.slice(1);
+  const v = Object.hasOwn(VIEWS, h) && (h !== 'system' || phone()) ? h : root.dataset.view || 'today'; // own keys only (#constructor is no view); any other hash (#main: skip link) keeps the view
+  if (v === root.dataset.view) return;
+  root.dataset.view = v;
+  $('#viewTitle').textContent = VIEWS[v];
+  document.title = `${VIEWS[v]} · Taskboard`;
+  for (const s of document.querySelectorAll('main > .view')) s.hidden = s.dataset.view !== v;
+  for (const a of document.querySelectorAll('a[data-view]')) a.setAttribute('aria-current', a.dataset.view === v ? 'page' : 'false');
+  root.scrollTop = 0;
+}
 
 // ---------- api + toasts ----------
 // 401 = no valid session cookie: swap the board for the same hint the server's locked page shows. Nothing runs after.
 function lockOut(title = 'This browser is locked.', hint = ['Run ', el('code', null, 'tb open'), ' in Terminal.']) {
   ui.locked = true;
   es?.close();
+  document.title = 'Taskboard locked';
   document.body.replaceChildren(el('main', { class: 'locked' }, el('h1', null, title), el('p', null, ...hint)));
 }
 
@@ -90,7 +108,7 @@ function toast(msg, { kind = 'error', title } = {}) {
   const box = $('#toasts');
   const t = el('div', { class: `toast ${kind}` },
     el('p', null, title && el('strong', null, title), msg),
-    el('button', { type: 'button', class: 'ghost', 'aria-label': 'Dismiss', onclick: () => t.remove() }, '×'));
+    el('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Dismiss', onclick: () => t.remove() }, '×'));
   box.append(t);
   while (box.children.length > 4) box.firstChild.remove();
   setTimeout(() => t.remove(), kind === 'error' ? 10000 : 7000);
@@ -250,41 +268,48 @@ function dueInfo(due) {
   return { cls: '', text: `Due ${new Date(y, m - 1, d).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' })}` };
 }
 
+// due first, then project and tag: plain gray text, joined by a dot in CSS
 function chips(t) {
   const out = [];
-  if (t.project) out.push(el('span', { class: 'chip proj', style: `--h:${hue(t.project)}` }, t.project));
-  if (t.tag) out.push(el('span', { class: 'chip tag', style: `--h:${hue(t.tag)}` }, t.tag));
   if (t.due && t.status !== 'done') {
     const d = dueInfo(t.due);
     out.push(el('span', { class: `chip due ${d.cls}`, title: t.due }, d.text));
   }
+  if (t.project) out.push(el('span', { class: 'chip proj' }, t.project));
+  if (t.tag) out.push(el('span', { class: 'chip tag' }, t.tag));
   return out;
 }
 
 function renderFocus() {
   const top = colOf('now')[0];
-  $('#focusTitle').textContent = top ? top.title : 'Nothing in Now. Pull one up from Next.';
-  $('#focusMeta').replaceChildren(...(top ? [...chips(top), top.note && el('span', { class: 'focus-note' }, top.note)] : []).filter(Boolean));
+  $('#focusTitle').textContent = top ? top.title : 'Nothing in Now.';
+  $('#focusMeta').replaceChildren(...(top ? chips(top) : [el('span', null, 'Pull one up from Next.')]));
+  const note = $('#focusNote');
+  note.textContent = top?.note || '';
+  note.hidden = !top?.note;
   const b = $('#focusDone');
   b.hidden = !top;
   b.onclick = top ? () => move(top.id, 'done', 0) : null;
+  $('#focusEmpty').hidden = !!top;
   renderSched();
 }
 
 function renderSched() {
   const s = $('#sched'), c = state?.calendar || {};
+  const line = text => s.append(el('p', { class: 'hint' }, text));
   const hint = 'Ask Claude to "sync calendar".';
-  s.replaceChildren();
-  if (!c.updated) return s.append(el('p', null, `Calendar not synced yet. ${hint}`));
+  s.replaceChildren(el('h3', null, 'Calendar'));
+  if (!c.updated) return line(`Not synced yet. ${hint}`);
   const upd = new Date(c.updated), now = new Date();
-  if (upd.toDateString() !== now.toDateString()) return s.append(el('p', null, `Calendar last synced ${upd.toDateString()}. ${hint}`));
+  if (upd.toDateString() !== now.toDateString()) return line(`Last synced ${upd.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' })}. ${hint}`);
   const left = (c.events || []).filter(e => !e.allDay && new Date(e.end) > now && new Date(e.start).toDateString() === now.toDateString());
-  if (!left.length) return s.append(el('p', null, `No more meetings today. Synced ${hhmm(c.updated)}.`));
-  s.append(el('h3', null, 'Today'), el('ul', null, ...left.map((e, i) => {
+  if (!left.length) return line(`No more meetings today. Synced ${hhmm(c.updated)}.`);
+  s.append(el('ul', null, ...left.map((e, i) => {
     const mins = Math.round((new Date(e.start) - now) / 60000);
-    const when = i === 0 && mins > 0 && mins <= 120 ? `in ${mins} min` : i === 0 && mins <= 0 ? 'now' : '';
-    return el('li', null, el('time', null, hhmm(e.start)), el('b', null, e.title), when && el('span', null, when));
-  })), el('p', { class: 'synced' }, `Synced ${hhmm(c.updated)}`));
+    const soon = i === 0 && mins > 0 && mins <= 120 ? `in ${mins} min` : i === 0 && mins <= 0 ? 'now' : '';
+    return el('li', null, el('time', null, hhmm(e.start)), el('span', { class: 'ev' }, e.title), soon && el('span', { class: 'soon' }, soon));
+  })));
+  line(`Synced ${hhmm(c.updated)}`);
 }
 
 // ---------- reminders board ----------
@@ -324,11 +349,7 @@ function strip(t, i, total, isTop) {
   const done = t.status === 'done';
   const editing = ui.editing === t.id;
   const open = ui.tray === t.id;
-  const key = t.project || t.tag;
-  const s = el('li', {
-    class: `strip${done ? ' done' : ''}${isTop ? ' top' : ''}${key ? '' : ' nohue'}`, draggable: !editing, 'data-id': t.id,
-    style: `--h:${key ? hue(key) : 0};--i:${Math.min(i, 8)}`,
-  });
+  const s = el('li', { class: `strip${done ? ' done' : ''}${isTop ? ' top' : ''}`, draggable: !editing, 'data-id': t.id });
   s.addEventListener('dragstart', e => {
     ui.drag = t.id;
     s.classList.add('dragging');
@@ -350,23 +371,26 @@ function strip(t, i, total, isTop) {
     }),
     el('div', { class: 'body' }, isTop && el('span', { class: 'chip now' }, 'Do this now'), title, meta.length ? el('div', { class: 'meta' }, meta) : null, note),
     el('button', {
-      type: 'button', class: 'ghost menu', 'data-role': 'menu', 'aria-expanded': String(open), 'aria-label': `Actions for ${t.title}`,
+      type: 'button', class: 'icon-btn menu', 'data-role': 'menu', 'aria-expanded': String(open), 'aria-label': `Actions for ${t.title}`,
       onclick: () => { ui.tray = open ? null : t.id; renderReminders(); },
     }, '⋯'),
     ...(open ? [tray(t, i, total)] : []));
   return s;
 }
 
+const closeTray = () => { ui.tray = ui.promote = null; renderReminders(); };
+
+// the ⋯ menu: floats under its button; Escape or a click outside closes it (boot)
 function tray(t, i, total) {
-  const btn = (label, fn, extra) => el('button', { type: 'button', class: 'ghost', onclick: fn, ...extra }, label);
+  const btn = (label, fn, extra) => el('button', { type: 'button', class: 'item', onclick: fn, ...extra }, label);
   const del = btn('Delete', () => {
     if (!del.classList.contains('armed')) {
       del.classList.add('armed');
       del.textContent = 'Confirm delete?';
       setTimeout(() => { del.classList.remove('armed'); del.textContent = 'Delete'; }, 4000);
     } else remove(t.id);
-  }, { 'data-role': 'del' });
-  return el('div', { class: 'tray' },
+  }, { 'data-role': 'del', class: 'item del' });
+  return el('div', { class: 'tray', role: 'group', 'aria-label': `Actions for ${t.title}`, onkeydown: e => { if (e.key === 'Escape') closeTray(); } },
     btn('Edit', () => startEdit(t.id)),
     btn('Move up', () => move(t.id, t.status, i - 1), { disabled: i === 0 }),
     btn('Move down', () => move(t.id, t.status, i + 1), { disabled: i >= total - 1 }),
@@ -389,8 +413,8 @@ function promoteForm(t) {
   return el('form', { class: 'promote', 'aria-label': 'Promote to flow', onsubmit: ev => { ev.preventDefault(); promote(t); } },
     pick('Kind', KINDS.map(k => el('option', { value: k, selected: k === ui.pick.kind }, k))),
     pick('Tag', tagOptions(ui.pick.tag)),
-    el('button', { type: 'submit', class: 'primary' }, 'Promote to flow'),
-    el('button', { type: 'button', class: 'ghost', onclick: () => { ui.promote = null; renderReminders(); } }, 'Cancel'));
+    el('button', { type: 'submit', class: 'btn btn-sm' }, 'Promote to flow'),
+    el('button', { type: 'button', class: 'btn btn-sm btn-gray', onclick: () => { ui.promote = null; renderReminders(); } }, 'Cancel'));
 }
 
 async function promote(t) {
@@ -528,26 +552,30 @@ const span = v => {
 };
 const ago = v => `${span(v)} ago`;
 
-// Spec §8 liveness: an icon and a word. Dots are CSS; the others are text glyphs (\uFE0E: never emoji).
+// Spec §8 liveness: a status dot and a word (green: working, orange: held or quiet, red: stuck or gone).
 const LIVE = {
-  thinking: ['', 'Thinking'], tool: ['\u2699\uFE0E', 'Tool'], waiting: ['\u29D7', 'Waiting'], quiet: ['', 'Quiet'],
-  stalled: ['', 'Stalled'], offline: ['\u21AF', 'Offline'], paused: ['\u2016', 'Paused'], interrupted: ['\u2715', 'Interrupted'],
+  thinking: ['ok', 'Thinking'], tool: ['ok', 'Tool'], waiting: ['wait', 'Waiting'], quiet: ['wait', 'Quiet'],
+  stalled: ['bad', 'Stalled'], offline: ['bad', 'Offline'], paused: ['wait', 'Paused'], interrupted: ['bad', 'Interrupted'],
 };
 const liveTag = r => {
-  const [icon, word] = LIVE[r.liveness] || ['', String(r.liveness)];
-  return el('span', { class: `lv ${r.liveness}` }, el('i', { 'aria-hidden': 'true' }, icon),
+  const [tone, word] = LIVE[r.liveness] || ['', String(r.liveness)];
+  return el('span', { class: `status lv ${tone}` },
     r.liveness === 'tool' && r.tool ? [r.tool, r.tool_at && el('span', { 'data-since': r.tool_at }, span(r.tool_at))] : word);
 };
 
 // Card stats of a run (`run` event): liveness, last activity, elapsed, subagents, RSS. Times tick in place (ticker).
 function runStats(r) {
-  const stat = (label, value, attrs) => el('span', { class: 'stat' }, el('span', null, label), el('span', attrs, value));
+  const stat = (value, attrs, after) => el('span', { class: 'stat' }, el('span', attrs, value), after);
+  const n = r.subagents_alive ?? 0;
   return el('span', { class: 'fstats' }, liveTag(r),
-    stat('last activity', r.last_event_at ? ago(r.last_event_at) : DASH, r.last_event_at && { 'data-ago': r.last_event_at }),
-    r.live && stat('elapsed', span(r.started_at), { 'data-since': r.started_at }),
-    r.live && stat('agents', String(r.subagents_alive ?? 0)),
-    r.live && stat('RSS', `${r.rss_mb ?? 0} MB`));
+    r.last_event_at && stat(ago(r.last_event_at), { 'data-ago': r.last_event_at, title: 'Last activity' }),
+    r.live && stat(span(r.started_at), { 'data-since': r.started_at }, ' elapsed'),
+    r.live && stat(String(n), null, n === 1 ? ' agent' : ' agents'),
+    r.live && stat(`${r.rss_mb ?? 0} MB`, { title: 'Memory (RSS)' }));
 }
+// a status word with its dot: tone ok green, wait orange, bad red, '' gray
+const dot = (tone, ...text) => el('span', { class: `status${tone ? ` ${tone}` : ''}` }, ...text);
+const TONE = Object.assign(Object.create(null), { done: 'ok', merged: 'ok', red: 'bad', blocked: 'bad', failed: 'bad' }); // a task's or lane's state (agent-set: no prototype keys)
 
 // what a flow waits on, as card and drawer name it: qa:<tag> while another ticket of its tag holds QA (C9)
 const waitLabel = (w, tag) => (w?.reason === 'qa_lock' ? `qa:${tag}` : w?.reason);
@@ -556,11 +584,11 @@ function flowCard(f) {
   const run = ui.runs.get(f.id);
   return el('li', null, el('button', { type: 'button', class: 'fcard', 'data-id': f.id, onclick: () => openTicket(f.id) },
     el('span', { class: 'ftitle' }, vis(f.title)),
-    el('span', { class: 'frow' },
-      el('span', { class: 'chip kind' }, f.kind || DASH),
-      f.tag && el('span', { class: 'chip tag', style: `--h:${hue(f.tag)}` }, f.tag),
-      f.rework > 0 && el('span', { class: 'chip rework' }, `rework ${f.rework}`)),
-    wait && el('span', { class: 'chip wait' }, `waiting: ${waitLabel(f.waiting, f.tag)}${wait === 'children' ? ` ${f.waiting.done ?? '?'}/${f.waiting.total ?? '?'}` : ''}`),
+    el('span', { class: 'fmeta' },
+      el('span', null, f.kind || DASH),
+      f.tag && el('span', null, f.tag),
+      f.rework > 0 && dot('bad', `rework ${f.rework}`),
+      wait && dot('wait', `waiting: ${waitLabel(f.waiting, f.tag)}${wait === 'children' ? ` ${f.waiting.done ?? '?'}/${f.waiting.total ?? '?'}` : ''}`)),
     run && runStats(run)));
 }
 
@@ -582,15 +610,26 @@ function onRun(e) {
   }
 }
 
+// Rail order: what waits on Irfan first (by position and a dot, not color fills), then the pipeline. Empty stages fold
+// into one line at the end.
+const RAIL = ['clarify', 'plan_approval', 'blocked', 'backlog', 'planning', 'working', 'review', 'qa', 'final_gate', 'done'];
+const orList = new Intl.ListFormat('en', { type: 'disjunction' });
 function renderFlows() {
   const by = Object.groupBy(state.flows, f => f.state);
-  $('#rail').replaceChildren(...FLOW_COLS.map(([key, label]) => {
-    const items = by[key] || [];
-    return el('section', { class: `fcol st-${STAGE[key] || 'auto'}${items.length ? '' : ' empty'}`, 'aria-labelledby': `fh-${key}` },
-      el('h3', { id: `fh-${key}` }, label, el('span', { class: 'count' }, String(items.length))),
-      YOU.has(key) && el('p', { class: 'you' }, 'needs you'),
-      el('ul', { class: 'flist' }, ...items.map(flowCard)));
-  }));
+  const full = RAIL.filter(k => by[k]?.length), idle = RAIL.filter(k => !by[k]?.length);
+  const any = full.length > 0;
+  $('#rail').replaceChildren(...[
+    any && !full.some(k => YOU.has(k)) && el('p', { class: 'rail-note' }, 'Nothing needs you right now.'),
+    ...full.map(key => {
+      const items = by[key];
+      return el('section', { class: `fcol st-${STAGE[key] || 'auto'}`, 'aria-labelledby': `fh-${key}` }, // st-you, st-blocked: a dot before the heading
+        el('div', { class: 'fhead' },
+          el('h3', { id: `fh-${key}` }, stateLabel(key), el('span', { class: 'count' }, String(items.length))),
+          YOU.has(key) && el('p', { class: 'you' }, 'Needs you')),
+        el('ul', { class: 'flist' }, ...items.map(flowCard)));
+    }),
+    any && idle.length > 0 && el('p', { class: 'rail-note' }, `Nothing in ${orList.format(idle.map(stateLabel))}.`),
+  ].filter(Boolean));
   $('#flows-empty').hidden = state.flows.length > 0;
   const gone = by.cancelled || [];
   $('#cancelled').hidden = !gone.length;
@@ -601,6 +640,7 @@ function renderFlows() {
 const stateLabel = s => FLOW_COLS.find(([k]) => k === s)?.[1] || s;
 const flowOf = id => state.flows.find(x => x.id === id) || { id };
 const OPS = { resume: 'Resume', restart: 'Restart phase', cancel: 'Cancel' };
+const BTN1 = 'btn btn-sm', BTN2 = 'btn btn-sm btn-gray'; // foundation pills: the one filled action of a drawer state, the rest gray
 // A two-click action (Cancel, Approve): armed by the first click for 4 s, kept across re-renders. A second click within
 // 400 ms of arming is ignored (early): a held Enter repeats clicks on the refocused button.
 const armed = (id, op) => ui.arm?.id === id && ui.arm.op === op && ui.arm.until > Date.now();
@@ -645,10 +685,10 @@ function drawerBody(f, ticket, error) {
   // L7: once frozen (plan_hash) the plan shown is the one approve froze (GET's plan), never a newer round file
   const r = ticket ? (k.plan_hash && ui.plan ? { ...ui.plan, n: ui.round?.n } : ui.round) : null, st = k.state;
   const plan = r?.kind === 'plan' && (st === 'plan_approval' || k.plan_hash) ? planView(f.id, k, r) : null; // a rejected plan (hash cleared) is not shown
-  $('#drawer').replaceChildren(el('div', { class: 'sheet' },
-    el('div', { class: 'sheet-head' },
+  $('#drawer').replaceChildren(el('div', { class: 'insp' },
+    el('div', { class: 'insp-head' },
       el('h2', null, vis(f.title || f.id)),
-      el('button', { type: 'button', class: 'ghost', 'data-role': 'close', 'aria-label': 'Close details', onclick: () => $('#drawer').close() }, '×')),
+      el('button', { type: 'button', class: 'insp-close', 'data-role': 'close', 'aria-label': 'Close details', onclick: () => $('#drawer').close() }, '×')),
     el('dl', { class: 'facts' },
       dd('Kind', f.kind), dd('Tag', f.tag), dd('State', stateLabel(st || f.state)), dd('Waiting', w), dd('Rework', k.rework ?? f.rework), dd('Fix', k.fixes > 0 ? `${k.fixes}/${ui.fixMax}` : null),
       dd('QA', k.qa?.verdict ? `${k.qa.verdict} · ${k.qa.pass} pass · ${k.qa.fail} fail · ${k.qa.blocked} blocked` : null),
@@ -661,7 +701,7 @@ function drawerBody(f, ticket, error) {
       st === 'backlog' && el('section', { class: 'part', 'aria-labelledby': 'as-h' },
         el('h3', { id: 'as-h' }, 'Assign'),
         el('p', { class: 'hint' }, 'Assign starts planning: the planner reads the code, then asks you questions or writes a plan.'),
-        el('div', { class: 'acts' }, actBtn(f.id, 'assign', () => post(f.id, 'assign'), { cls: 'primary' })),
+        el('div', { class: 'acts' }, actBtn(f.id, 'assign', () => post(f.id, 'assign'), { cls: BTN1 })),
         errLine(f.id, 'assign')),
       st === 'planning' && k.reject_comment && el('p', { class: 'hint' }, 'Your comment on the last plan: ', el('q', null, k.reject_comment)),
       st === 'planning' && k.must_ask && el('p', { class: 'hint' }, 'You asked for more: the planner asks you questions before it plans.'),
@@ -679,8 +719,8 @@ function drawerBody(f, ticket, error) {
       family(k),
     ],
     el('section', { id: 'runbox', class: 'runbox', 'aria-labelledby': 'run-h' }, ...runBox(f.id, ticket)),
-    el('h3', null, 'Request'),
-    el('p', { class: 'ticket-text' }, error || (ticket ? vis(ticket.text) || 'No text.' : 'Loading')),
+    el('section', { class: 'part', 'aria-labelledby': 'rq-h' }, el('h3', { id: 'rq-h' }, 'Request'),
+      el('p', { class: 'ticket-text' }, error || (ticket ? vis(ticket.text) || 'No text.' : 'Loading'))),
     st !== 'plan_approval' && plan));
   refocus(foc);
   rescroll(scroll);
@@ -700,7 +740,7 @@ function runBox(id, k) {
   if (l?.error && !l.pending) out.push(el('p', { class: 'warnbox' }, el('strong', null, 'Run refused. '), l.error.replace(BIDI, ''))); // names agent-made files: no bidi reordering
   const can = AGENT.includes(st) || st === 'blocked';
   const sure = armed(id, 'cancel'); // Cancel's confirm click
-  const btn = (op, extra) => el('button', { type: 'button', class: `ghost${op === 'cancel' && sure ? ' armed' : ''}`, 'data-role': op,
+  const btn = (op, extra) => el('button', { type: 'button', class: `${BTN2}${op === 'cancel' && sure ? ' armed' : ''}`, 'data-role': op,
     onclick: () => runAction(id, op), ...extra }, op === 'cancel' && sure ? 'Confirm cancel?' : OPS[op]);
   // from blocked: the phase it blocked in, or an earlier one (tb resume --phase)
   const at = s => FLOW_COLS.findIndex(([c]) => c === s);
@@ -716,8 +756,8 @@ function runBox(id, k) {
   if (acts.length) out.push(el('div', { class: 'run-actions' }, ...acts));
   out.push(el('p', { class: 'hint', 'aria-live': 'polite' }, outcome(id, k, running)));
   const shown = ui.log?.id === id;
-  out.push(el('div', { class: 'log-head' }, el('h3', null, 'Log tail'),
-    l?.log && el('button', { type: 'button', class: 'ghost', 'data-role': 'log', onclick: () => loadLog(id) }, shown ? 'Refresh' : 'Show last 200 lines')));
+  if (l?.log || shown) out.push(el('div', { class: 'log-head' }, el('h4', null, 'Log tail'),
+    l?.log && el('button', { type: 'button', class: 'tlink', 'data-role': 'log', onclick: () => loadLog(id) }, shown ? 'Refresh' : 'Show last 200 lines')));
   if (shown) out.push(ui.log.error ? el('p', { class: 'hint' }, ui.log.error)
     : el('pre', { class: 'log', 'data-role': 'log-tail', tabindex: '0', 'aria-label': 'Run log, last lines' }, ui.log.lines.join('\n') || 'Empty so far.'));
   return out;
@@ -868,7 +908,7 @@ const code = s => el('code', null, vis(s));
 const none = () => el('p', { class: 'hint' }, 'None.');
 
 // While a request runs its buttons are aria-disabled, not disabled: keyboard focus stays on them across re-renders.
-function actBtn(id, role, onclick, { cls = 'ghost', label = undefined, sent = role, disabled = false } = {}) {
+function actBtn(id, role, onclick, { cls = BTN2, label = undefined, sent = role, disabled = false } = {}) {
   const busy = ui.busy.get(id); // one request per ticket; other tickets stay usable
   return el('button', { type: 'button', class: cls, 'data-role': role, disabled, 'aria-disabled': busy ? 'true' : null, onclick: () => { if (!ui.busy.has(id)) onclick(); } },
     busy === role ? SENT[sent][1] : label ?? SENT[sent][0]);
@@ -907,7 +947,7 @@ function notice(id, w) {
     w.reason === 'setup_failed' && /base red/.test(w.error ?? '') && el('p', null, el('strong', null, 'The base branch is red: '),
       'a check fails on base_sha itself, before any change. Fix main first (main stays green), then approve again.'),
     why && el('pre', { class: 'log', 'data-role': 'wait-error', tabindex: '0', 'aria-label': 'Error output, last part' }, vis(why)),
-    w.reason === 'setup_failed' && el('div', { class: 'acts' }, actBtn(id, 'approve', () => approve(id, true), { cls: 'primary', label: 'Approve again' })));
+    w.reason === 'setup_failed' && el('div', { class: 'acts' }, actBtn(id, 'approve', () => approve(id, true), { cls: BTN1, label: 'Approve again' })));
 }
 
 // Parent, blockers and children from the board's flow list: no request per ticket.
@@ -916,8 +956,8 @@ function family(k) {
     const c = state.flows.find(x => x.id === id);
     return el('li', null, el('button', { type: 'button', class: 'kin', 'data-role': `kin-${id}`, onclick: () => openTicket(id) },
       el('span', { class: 'ftitle' }, vis(c?.title || id)),
-      el('span', { class: 'frow' }, el('span', { class: 'chip' }, c ? stateLabel(c.state) : 'not found'),
-        c?.waiting?.reason && el('span', { class: 'chip wait' }, `waiting: ${c.waiting.reason}`))));
+      el('span', { class: 'fmeta' }, el('span', null, c ? stateLabel(c.state) : 'not found'),
+        c?.waiting?.reason && dot('wait', `waiting: ${c.waiting.reason}`))));
   };
   const kids = Array.isArray(k.children) ? k.children : [];
   const done = kids.filter(id => ['done', 'cancelled'].includes(state.flows.find(x => x.id === id)?.state)).length; // J4
@@ -949,7 +989,7 @@ function twoStep(id, op, send) {
   ui.arm = null;
   send();
 }
-function armBtn(id, op, role, send, { sent = role, cls = 'ghost', label = SENT[sent][0], disabled = false } = {}) {
+function armBtn(id, op, role, send, { sent = role, cls = BTN2, label = SENT[sent][0], disabled = false } = {}) {
   const sure = armed(id, op);
   return actBtn(id, role, () => twoStep(id, op, send), { cls: `${cls}${sure ? ' armed' : ''}`, label: sure ? `Confirm: ${label.toLowerCase()}?` : label, sent, disabled });
 }
@@ -991,7 +1031,7 @@ function askPanel(id, k, a) {
       post(id, 'answer', { text: d.comment.trim() }, 'work-answer').then(err => { if (err == null) ui.drafts.delete(key); });
     };
     acts = [el('label', { for: 'wa' }, 'Your answer'), box, d.errs.text && el('p', { class: 'err', id: 'wa-err' }, d.errs.text),
-      el('div', { class: 'acts' }, armBtn(id, 'work-answer', 'work-answer', send, { cls: 'primary' }), replanBtn(id))];
+      el('div', { class: 'acts' }, armBtn(id, 'work-answer', 'work-answer', send, { cls: BTN1 }), replanBtn(id))];
   }
   return el('section', { class: 'part ask', 'aria-labelledby': 'ak-h' },
     el('h3', { id: 'ak-h' }, ASKS[kind] || 'Question', o.task && el('span', { class: 'count' }, 'task ', vis(o.task))),
@@ -1020,13 +1060,13 @@ function stageActs(id, k) {
     delete d.errs.rw;
     post(id, 'rework', { feedback: d.comment.trim() }, 'rework').then(err => { if (err == null) ui.drafts.delete(`${id}:rw`); });
   };
-  return el('section', { class: 'part', 'aria-labelledby': 'sg-h' },
+  return el('section', { class: `part${!merged && (!built || close) ? ' you' : ''}`, 'aria-labelledby': 'sg-h' },
     el('h3', { id: 'sg-h' }, `${stateLabel(st)}: your call`),
     !merged && !built && el('p', { class: 'hint' }, 'While this phase is not built you stand in for it: pass the work on, or send it back with feedback.'),
-    st !== 'final_gate' && el('div', { class: 'acts' }, armBtn(id, 'pass', 'pass', () => post(id, 'pass', {}, 'pass'), { cls: 'primary', label: `Pass to ${stateLabel(next)}` })),
+    st !== 'final_gate' && el('div', { class: 'acts' }, armBtn(id, 'pass', 'pass', () => post(id, 'pass', {}, 'pass'), { cls: BTN1, label: `Pass to ${stateLabel(next)}` })),
     built && el('p', { class: 'hint' }, 'tbd runs the final gate: checks, a final review, the squash. Then you close it (tb close) or push it (tb push).'),
     // role close-flow: data-role close is the drawer's own × (refocus)
-    close && el('div', { class: 'acts' }, armBtn(id, 'close', 'close-flow', () => post(id, 'close', {}, 'close-flow', 'close'), { cls: 'primary', sent: 'close' })),
+    close && el('div', { class: 'acts' }, armBtn(id, 'close', 'close-flow', () => post(id, 'close', {}, 'close-flow', 'close'), { cls: BTN1, sent: 'close' })),
     st === 'final_gate' && !built && !merged && passForm(id),
     merged && el('p', { class: 'hint' }, 'Passed with ', code(String(k.pr.sha ?? '').slice(0, 12)), ` at ${when(k.pr.merged_at)}.`),
     // a BUILT final gate: tbd refuses a rework there (409) but at waiting close, so the send-back box only then
@@ -1052,7 +1092,8 @@ function pushView(id, k, tag) {
     !d.ident && el('p', { class: 'err' }, ...noIdent(tag)),
     // one span: .notice is a grid, so loose text nodes + <code> would each take a row
     armed(id, 'push') && el('p', { class: 'notice' }, el('span', null, 'Push ', code(sha.slice(0, 12)), ' to ', code(remote), ' as branch ', code(k.branch ?? ''), '?')),
-    el('div', { class: 'acts' }, armBtn(id, 'push', 'push', () => post(id, 'push'), { cls: 'primary', disabled: !d.ident || !sha || k.push?.state === 'running' })),
+    // at waiting close Close is the filled one (the usual end); once done Push is the only action
+    el('div', { class: 'acts' }, armBtn(id, 'push', 'push', () => post(id, 'push'), { cls: k.state === 'done' ? BTN1 : 'btn btn-sm btn-outline', disabled: !d.ident || !sha || k.push?.state === 'running' })),
     isObj(k.push) && el('p', { class: k.push.state === 'failed' ? 'err' : 'hint' }, 'Last push: ', pushText(k.push, k)),
     errLine(id, 'push'));
 }
@@ -1089,7 +1130,7 @@ function passForm(id) {
       el('p', null, 'Commit ', code(p.got.sha)), el('p', { class: 'ctext' }, vis(p.got.subject || '(no subject)')),
       el('label', { for: 'pt' }, `Type ${short} to confirm`), typed,
       el('div', { class: 'acts' }, actBtn(id, 'pass', () => post(id, 'pass', { sha: p.got.sha }, 'pass').then(err => { if (err == null) ui.pass = null; }),
-        { cls: 'primary', label: 'Pass', disabled: p.typed !== short }))));
+        { cls: BTN1, label: 'Pass', disabled: p.typed !== short }))));
 }
 
 // Tasks (state, attempt, session mode, verified head), the gate state, base checks, unit ms, rework, replan hashes,
@@ -1102,25 +1143,25 @@ function workView(id, k) {
   const fb = ui.fb?.id === id ? ui.fb : null;
   return el('section', { class: 'part', 'aria-labelledby': 'wk-h' },
     el('h3', { id: 'wk-h' }, 'Work', el('span', { class: 'count' }, `${tasks.filter(x => x.status === 'done').length}/${tasks.length} tasks done`)),
-    tasks.length ? el('table', { class: 'dtable wtable' }, el('caption', { class: 'sr' }, 'Tasks: state, attempt, session mode, verified head'),
-      el('thead', null, el('tr', null, ...['Task', 'State', 'Attempt', 'Mode', 'Head'].map(h => el('th', { scope: 'col' }, h)))),
+    tasks.length ? el('table', { class: 'table dtable wtable' }, el('caption', { class: 'sr' }, 'Tasks: state, attempt, session mode, verified head'),
+      el('thead', null, el('tr', null, ...['Task', 'State', 'Attempt', 'Mode', 'Head'].map(h => el('th', { scope: 'col', class: h === 'Attempt' ? 'num' : null }, h)))),
       el('tbody', null, ...tasks.map(x => el('tr', { class: x.id === w.task ? 'cur' : null, 'aria-current': x.id === w.task ? 'step' : null },
-        el('td', null, code(String(x.id))), el('td', null, el('span', { class: `chip st-${vis(x.status)}` }, vis(x.status))),
-        el('td', null, String(x.attempt ?? DASH)), el('td', null, mode(x)), el('td', null, x.head ? code(String(x.head).slice(0, 12)) : DASH))))) : none(),
-    Array.isArray(k.lanes) && k.lanes.length > 0 && el('table', { class: 'dtable wtable' }, el('caption', { class: 'sr' }, 'Lanes: task, ticket, state, waiting, live, attempt'),
-      el('thead', null, el('tr', null, ...['Task', 'Lane', 'State', 'Waiting', 'Live', 'Attempt'].map(h => el('th', { scope: 'col' }, h)))),
+        el('td', null, code(String(x.id))), el('td', null, dot(TONE[x.status], vis(x.status))),
+        el('td', { class: 'num' }, String(x.attempt ?? DASH)), el('td', null, mode(x)), el('td', null, x.head ? code(String(x.head).slice(0, 12)) : DASH))))) : none(),
+    Array.isArray(k.lanes) && k.lanes.length > 0 && el('table', { class: 'table dtable wtable' }, el('caption', { class: 'sr' }, 'Lanes: task, ticket, state, waiting, live, attempt'),
+      el('thead', null, el('tr', null, ...['Task', 'Lane', 'State', 'Waiting', 'Live', 'Attempt'].map(h => el('th', { scope: 'col', class: h === 'Attempt' ? 'num' : null }, h)))),
       el('tbody', null, ...k.lanes.filter(isObj).map(x => el('tr', null,
-        el('td', null, code(String(x.task))), el('td', null, code(String(x.id))), el('td', null, el('span', { class: `chip st-${vis(x.state)}` }, vis(x.state))),
+        el('td', null, code(String(x.task))), el('td', null, code(String(x.id))), el('td', null, dot(TONE[x.state], vis(x.state))),
         el('td', null, x.waiting ? vis(`${x.waiting.reason}${x.waiting.why ? `: ${x.waiting.why}` : ''}`) : DASH),
-        el('td', null, x.live ? 'yes' : 'no'), el('td', null, String(x.attempt ?? DASH)))))),
+        el('td', null, x.live ? 'yes' : 'no'), el('td', { class: 'num' }, String(x.attempt ?? DASH)))))),
     el('dl', { class: 'facts' },
-      fact('Gate', g && `${vis(g.kind)} gate ${g.ok === undefined ? 'running' : g.ok ? 'green' : `red${g.class ? ` (${vis(g.class)})` : ''}`}${g.n ? ` · #${g.n}` : ''}`),
+      fact('Gate', g && dot(g.ok === undefined ? '' : g.ok ? 'ok' : 'bad', `${vis(g.kind)} gate ${g.ok === undefined ? 'running' : g.ok ? 'green' : `red${g.class ? ` (${vis(g.class)})` : ''}`}${g.n ? ` · #${g.n}` : ''}`)),
       fact('Tries', String(w.tries ?? 0)), fact('Unit', w.unit_ms == null ? null : `${w.unit_ms} ms`),
-      fact('Base checks', base.length ? base.map(([c, x]) => el('span', { class: `chip ${x?.ok ? 'pass' : 'fail'}` }, `${vis(c)} ${x?.ok ? 'ok' : 'red'}${Number.isFinite(x?.ms) ? ` · ${secs(x.ms)}` : ''}`)) : null),
+      fact('Base checks', base.length ? base.map(([c, x]) => dot(x?.ok ? 'ok' : 'bad', `${vis(c)} ${x?.ok ? 'ok' : 'red'}${Number.isFinite(x?.ms) ? ` · ${secs(x.ms)}` : ''}`)) : null),
       fact('Rework', String(k.rework ?? 0)),
-      fact('Plan hashes', hashes.length ? hashes.map(h => el('span', { class: `chip${h === k.plan_hash ? ' cur' : ''}`, title: h === k.plan_hash ? 'the current plan' : 'replaced' }, String(h).slice(0, 12))) : null)),
+      fact('Plan hashes', hashes.length ? hashes.map(h => el('span', { class: `hash${h === k.plan_hash ? ' cur' : ''}`, title: h === k.plan_hash ? 'the current plan' : 'replaced' }, String(h).slice(0, 12))) : null)),
     k.rework > 0 && el('div', { class: 'acts' }, el('span', { class: 'hint' }, 'Your feedback:'),
-      ...Array.from({ length: Math.min(k.rework, 10) }, (_, i) => el('button', { type: 'button', class: 'ghost', 'data-role': `fb-${i + 1}`, onclick: () => loadFeedback(id, i + 1) }, `rework ${i + 1}`))),
+      ...Array.from({ length: Math.min(k.rework, 10) }, (_, i) => el('button', { type: 'button', class: BTN2, 'data-role': `fb-${i + 1}`, onclick: () => loadFeedback(id, i + 1) }, `rework ${i + 1}`))),
     fb && (fb.error ? el('p', { class: 'hint' }, fb.error) : el('pre', { class: 'log', 'data-role': 'feedback', tabindex: '0', 'aria-label': `Your feedback, rework ${fb.n}` }, vis(fb.text))));
 }
 async function loadFeedback(id, n) {
@@ -1134,9 +1175,9 @@ function gatesView(id) {
   const g = ui.gates?.id === id ? ui.gates : null;
   return el('section', { class: 'part', 'aria-labelledby': 'gt-h' },
     el('div', { class: 'log-head' }, el('h3', { id: 'gt-h' }, 'Gates'),
-      el('button', { type: 'button', class: 'ghost', 'data-role': 'gates', onclick: () => loadGates(id) }, g ? 'Refresh' : 'Show gates')),
-    g && (g.error ? el('p', { class: 'hint' }, g.error) : g.items.length ? g.items.map((x, i) => gateItem(id, x, i === 0, x === g.items.find(y => y.gate === 'working'))) : el('p', { class: 'hint' }, 'No gate ran yet.')),
-    g?.next != null && el('div', { class: 'acts' }, el('button', { type: 'button', class: 'ghost', 'data-role': 'gates-more', onclick: () => loadGates(id, g.next) }, 'Older gates')));
+      el('button', { type: 'button', class: 'tlink', 'data-role': 'gates', onclick: () => loadGates(id) }, g ? 'Refresh' : 'Show gates')),
+    g && (g.error ? el('p', { class: 'hint' }, g.error) : g.items.length ? el('div', null, ...g.items.map((x, i) => gateItem(id, x, i === 0, x === g.items.find(y => y.gate === 'working')))) : el('p', { class: 'hint' }, 'No gate ran yet.')),
+    g?.next != null && el('div', { class: 'acts' }, el('button', { type: 'button', class: BTN2, 'data-role': 'gates-more', onclick: () => loadGates(id, g.next) }, 'Older gates')));
 }
 async function loadGates(id, n) {
   try {
@@ -1157,32 +1198,32 @@ function gateItem(id, x, newest, latestWorking) {
   const t = isObj(x.tests) ? x.tests : {}, sc = isObj(x.scope) ? x.scope : {}, checks = Array.isArray(x.checks) ? x.checks.filter(isObj) : [];
   const list = (label, xs) => (Array.isArray(xs) && xs.length ? fact(label, xs.map(v => code(typeof v === 'string' ? v : v?.path ?? JSON.stringify(v)))) : null);
   const changes = (label, xs) => (Array.isArray(xs) && xs.length ? [el('h4', null, label), el('ul', { class: 'plist' }, ...xs.filter(isObj).map(c => el('li', null,
-    code(`${c.op} ${c.ref}`), c.dir ? ` (${vis(c.dir)})` : '', ' ', el('span', { class: `chip ${c.allowed ? 'pass' : 'fail'}` }, c.allowed ? 'allowed' : 'not allowed'))))] : null);
+    code(`${c.op} ${c.ref}`), c.dir ? ` (${vis(c.dir)})` : '', ' ', dot(c.allowed ? 'ok' : 'bad', c.allowed ? 'allowed' : 'not allowed'))))] : null);
   const unused = new Set(Array.isArray(x.unused_allowed) ? x.unused_allowed : []);
   const allowed = latestWorking && ui.plan ? [...(ui.plan.allowed_schema_changes ?? []), ...(ui.plan.allowed_api_changes ?? [])] : [];
   const ff = String(t.failfirst ?? '');
   return el('details', { class: `gate ${x.ok ? 'ok' : 'red'}`, open: newest },
-    el('summary', null, el('span', { class: 'did' }, `#${x.n}`), ` ${vis(x.gate)} gate`, x.task ? [' · ', code(x.task)] : '', x.attempt ? ` · attempt ${x.attempt}` : '', ' ',
-      el('span', { class: `chip ${x.ok ? 'pass' : 'fail'}` }, x.ok ? 'green' : `red${x.class ? `: ${vis(x.class)}` : ''}`), x.ms != null ? ` · ${secs(x.ms)}` : '', x.truncated ? ' · cut to fit' : ''),
-    checks.length ? el('table', { class: 'dtable ctable' }, el('caption', { class: 'sr' }, `Gate ${x.n}: checks`),
-      el('thead', null, el('tr', null, ...['Check', 'Result', 'Time', 'Exit', 'Log'].map(h => el('th', { scope: 'col' }, h)))),
+    el('summary', null, el('span', { class: 'did' }, `#${x.n}`), el('span', null, `${vis(x.gate)} gate`, x.task ? [' · ', code(x.task)] : '', x.attempt ? ` · attempt ${x.attempt}` : ''),
+      dot(x.ok ? 'ok' : 'bad', x.ok ? 'green' : `red${x.class ? `: ${vis(x.class)}` : ''}`), el('span', { class: 'hint' }, [x.ms != null && secs(x.ms), x.truncated && 'cut to fit'].filter(Boolean).join(' · '))),
+    checks.length ? el('table', { class: 'table dtable ctable' }, el('caption', { class: 'sr' }, `Gate ${x.n}: checks`),
+      el('thead', null, el('tr', null, ...['Check', 'Result', 'Time', 'Exit', 'Log'].map(h => el('th', { scope: 'col', class: h === 'Time' || h === 'Exit' ? 'num' : null }, h)))),
       el('tbody', null, ...checks.map(c => el('tr', null,
         el('td', null, code(c.check ?? '?')),
-        el('td', null, el('span', { class: `chip ${c.ok ? 'pass' : 'fail'}` }, c.ok ? 'ok' : c.timed_out ? 'timed out' : 'red'), c.flaky && el('span', { class: 'chip warn' }, 'flaky')),
-        el('td', null, secs(c.ms)), el('td', null, c.exit == null ? DASH : String(c.exit)),
+        el('td', null, dot(c.ok ? 'ok' : 'bad', c.ok ? 'ok' : c.timed_out ? 'timed out' : 'red'), c.flaky && [' ', dot('wait', 'flaky')]),
+        el('td', { class: 'num' }, secs(c.ms)), el('td', { class: 'num' }, c.exit == null ? DASH : String(c.exit)),
         el('td', null, c.log ? el('a', { href: `/api/tickets/${enc(id)}/gates/${enc(x.n)}/log?check=${enc(c.check)}`, target: '_blank', rel: 'noopener' }, 'full log') : DASH))))) : null,
     ...checks.filter(c => c.tail).map(c => el('details', { class: 'tail' }, el('summary', null, `${vis(c.check)}: output (first and last part)`),
       el('pre', { class: 'log', tabindex: '0', 'aria-label': `${vis(c.check)} output` }, vis(c.tail)))),
     el('dl', { class: 'facts' },
-      ff && ff !== 'n/a' && fact('Fail-first', el('span', { class: `chip ${ff.startsWith('proven') ? 'pass' : 'warn'}` }, vis(ff))),
+      ff && ff !== 'n/a' && fact('Fail-first', dot(ff.startsWith('proven') ? 'ok' : 'wait', vis(ff))),
       list(ff.startsWith('unproven') ? 'Unproven tests' : 'Test files', t.files), list('Skips added', t.skips_added), list('Tests deleted', t.deleted),
       list('Count drops', t.count_drops), list('Expects removed', t.expects_removed),
-      isObj(t.count) && (t.count.pre || t.count.head) ? fact('Test count', `${t.count.pre} → ${t.count.head}`) : null,
+      isObj(t.count) && (t.count.pre || t.count.head) ? fact('Test count', `${t.count.pre} before, ${t.count.head} now`) : null,
       list('Outside scope', sc.outside), list('Protected', sc.protected), sc.deps && fact('Dependencies', 'changed'), list('Bad paths', sc.bad),
       list('Migrations', x.migration), list('Flaky', checks.filter(c => c.flaky).map(c => c.check))),
     changes('Schema changes', x.schema), changes('API changes', x.api),
     allowed.length ? [el('h4', null, 'Allowed in the plan'), el('ul', { class: 'plist' }, ...allowed.map(a => el('li', null, code(a), ' ',
-      el('span', { class: `chip ${unused.has(a) ? 'warn' : 'pass'}` }, unused.has(a) ? 'unused' : 'used'))))] : null,
+      dot(unused.has(a) ? 'wait' : 'ok', unused.has(a) ? 'unused' : 'used'))))] : null,
     isObj(x.ask) && el('p', { class: 'hint' }, `It asked you: ${vis(x.ask.kind)}.`),
     x.why && el('pre', { class: 'log', tabindex: '0', 'aria-label': `Gate ${x.n}: what it found` }, vis(x.why)));
 }
@@ -1194,20 +1235,20 @@ function reviewView(id, k) {
   const rows = r?.data ? [...r.data.findings.map(x => [x, x.blocking ? 'open' : 'need review', x.failure_scenario]), ...r.data.closed.map(c => [{ id: c.id }, 'closed', c.how])] : [];
   return el('section', { class: 'part', 'aria-labelledby': 'rv-h' },
     el('div', { class: 'log-head' }, el('h3', { id: 'rv-h' }, 'Review', el('span', { class: 'count' }, `fix ${k.fixes ?? 0}/${ui.fixMax}`)),
-      el('button', { type: 'button', class: 'ghost', 'data-role': 'review', onclick: () => loadReview(id) }, r ? 'Refresh' : 'Show review')),
+      el('button', { type: 'button', class: 'tlink', 'data-role': 'review', onclick: () => loadReview(id) }, r ? 'Refresh' : 'Show review')),
     r?.error && el('p', { class: 'hint' }, r.error),
-    r?.data && [el('p', { class: 'hint' }, `Review ${r.data.n}: `, el('span', { class: `chip ${r.data.verdict === 'pass' ? 'pass' : 'fail'}` }, vis(r.data.verdict)), r.data.at ? ` · ${when(r.data.at)}` : '', r.data.truncated ? ' · cut to fit' : ''),
+    r?.data && [el('p', { class: 'hint' }, `Review ${r.data.n}: `, dot(r.data.verdict === 'pass' ? 'ok' : 'bad', vis(r.data.verdict)), r.data.at ? ` · ${when(r.data.at)}` : '', r.data.truncated ? ' · cut to fit' : ''),
       findingsTable(`Review ${r.data.n}: findings`, rows)]);
 }
 // Review and Final findings, rows [finding, open | need review | closed, scenario or how fixed]. The drawer is 540 px:
 // short fields in one row, the long texts in a full-width row under it.
 function findingsTable(caption, rows) {
-  return rows.length ? el('table', { class: 'dtable rtable' }, el('caption', { class: 'sr' }, caption),
-    el('thead', null, el('tr', null, ...['Id', 'Sev', 'Conf', 'Where', 'State'].map(h => el('th', { scope: 'col' }, h)))),
+  return rows.length ? el('table', { class: 'table dtable rtable ftable' }, el('caption', { class: 'sr' }, caption),
+    el('thead', null, el('tr', null, ...['Id', 'Severity', 'Confidence', 'Where', 'State'].map(h => el('th', { scope: 'col' }, h)))),
     el('tbody', null, ...rows.flatMap(([x, st, why]) => [
-      el('tr', null, el('td', null, code(String(x.id))), el('td', null, vis(x.severity ?? DASH)), el('td', null, vis(x.confidence ?? DASH)),
+      el('tr', { class: st === 'closed' ? 'closed' : null }, el('td', null, code(String(x.id))), el('td', null, vis(x.severity ?? DASH)), el('td', null, vis(x.confidence ?? DASH)),
         el('td', null, x.where ? code(x.where) : DASH),
-        el('td', null, el('span', { class: `chip ${st === 'open' ? 'fail' : st === 'closed' ? 'pass' : 'warn'}` }, st))),
+        el('td', null, dot(st === 'open' ? 'bad' : st === 'closed' ? 'ok' : 'wait', st))),
       el('tr', { class: 'rdetail' }, el('td', { colSpan: 5 }, ...(st === 'closed' ? [['How fixed', why]] : [['Problem', x.problem], ['Scenario', why], ['Fix', x.fix]])
         .map(([h, v]) => el('p', null, el('b', null, `${h}: `), vis(v || DASH)))))]))) : el('p', { class: 'hint' }, 'No findings.');
 }
@@ -1226,8 +1267,8 @@ function finalView(id, k) {
   const text = (x, role, label) => (x.text != null ? el('pre', { class: 'log', 'data-role': role, tabindex: '0', 'aria-label': label }, vis(x.text)) : el('p', { class: 'hint' }, x.error));
   return el('section', { class: 'part', 'aria-labelledby': 'fn-h' },
     el('div', { class: 'log-head' }, el('h3', { id: 'fn-h' }, 'Final', el('span', { class: 'count' }, `fix ${k.fixes ?? 0}/${ui.fixMax}`)),
-      el('button', { type: 'button', class: 'ghost', 'data-role': 'final', onclick: () => loadFinal(id) }, v ? 'Refresh' : 'Show final')),
-    v && [...(d ? [el('p', { class: 'hint' }, `Final review ${d.n}: `, el('span', { class: `chip ${d.verdict === 'pass' ? 'pass' : 'fail'}` }, vis(d.verdict)), d.at ? ` · ${when(d.at)}` : '', d.truncated ? ' · cut to fit' : ''),
+      el('button', { type: 'button', class: 'tlink', 'data-role': 'final', onclick: () => loadFinal(id) }, v ? 'Refresh' : 'Show final')),
+    v && [...(d ? [el('p', { class: 'hint' }, `Final review ${d.n}: `, dot(d.verdict === 'pass' ? 'ok' : 'bad', vis(d.verdict)), d.at ? ` · ${when(d.at)}` : '', d.truncated ? ' · cut to fit' : ''),
       findingsTable(`Final review ${d.n}: findings`, d.findings.map(x => [x, x.blocking ? 'open' : 'need review', x.failure_scenario])),
       el('p', { class: 'hint' }, 'Verification doc: ', ver ? el('a', { href: ver, target: '_blank', rel: 'noopener' }, vis(d.verification_doc)) : code(String(d.verification_doc ?? DASH)))]
       : [el('p', { class: 'hint' }, v.final.error)]),
@@ -1251,43 +1292,43 @@ const DOC_RE = /^docs\/((?:verification|verdicts)\/(?:(?!\.\.?\/)[A-Za-z0-9._-]{
 const docUrl = (id, p) => { const m = DOC_RE.exec(p ?? ''); return m && `/api/tickets/${enc(id)}/docs?path=${enc(m[1])}`; };
 function qaView(id, k) {
   const q = ui.qa?.id === id ? ui.qa : null, d = q?.data, rec = ui.rec?.id === id ? ui.rec : null;
-  const res = x => el('span', { class: `chip ${/^pass$/i.test(x) ? 'pass' : /^fail$/i.test(x) ? 'fail' : 'warn'}` }, vis(x));
+  const res = x => dot(/^pass$/i.test(x) ? 'ok' : /^fail$/i.test(x) ? 'bad' : 'wait', vis(x));
   const para = (h, ...v) => el('p', null, el('b', null, `${h}: `), ...v);
   const list = (h, xs) => (Array.isArray(xs) && xs.length ? para(h, ...xs.flatMap((x, i) => [i ? ' ' : '', code(String(x))])) : null);
   const report = d && docUrl(id, d.report);
   return el('section', { class: 'part', 'aria-labelledby': 'qa-h' },
     el('div', { class: 'log-head' }, el('h3', { id: 'qa-h' }, 'QA', el('span', { class: 'count' }, `QA ${k.qa.n ?? DASH}`)),
-      el('button', { type: 'button', class: 'ghost', 'data-role': 'qa', onclick: () => loadQa(id) }, q ? 'Refresh' : 'Show QA')),
+      el('button', { type: 'button', class: 'tlink', 'data-role': 'qa', onclick: () => loadQa(id) }, q ? 'Refresh' : 'Show QA')),
     q?.error && el('p', { class: 'hint' }, q.error),
     d && [el('p', { class: 'hint' }, `QA ${d.n}: `, res(d.verdict), d.at ? ` · ${when(d.at)}` : '', d.truncated ? ' · cut to fit' : ''),
       d.need_review.length ? el('div', { class: 'notice' }, el('p', null, el('strong', null, 'Check by hand: '), 'agent-made evidence can be faked.'),
         el('ul', { class: 'plist' }, ...d.need_review.map(x => el('li', null, vis(x))))) : null,
-      d.cases.length ? el('table', { class: 'dtable rtable' }, el('caption', { class: 'sr' }, `QA ${d.n}: cases`),
+      d.cases.length ? el('table', { class: 'table dtable rtable' }, el('caption', { class: 'sr' }, `QA ${d.n}: cases`),
         el('thead', null, el('tr', null, ...['Case', 'Type', 'Kind', 'Result', 'Evidence'].map(h => el('th', { scope: 'col' }, h)))),
         el('tbody', null, ...d.cases.flatMap(c => [
           el('tr', null, el('td', null, code(String(c.id))), el('td', null, vis(c.type)), el('td', null, vis(c.kind)),
             el('td', null, res(c.result), c.cause ? ` ${vis(c.cause)}` : ''),
-            el('td', null, el('span', { class: `chip ${c.evidence === 'captured by tbd' ? 'pass' : 'warn'}` }, vis(c.evidence ?? DASH)))),
+            el('td', null, dot(c.evidence === 'captured by tbd' ? 'ok' : 'wait', vis(c.evidence ?? DASH)))),
           el('tr', { class: 'rdetail' }, el('td', { colSpan: 5 }, para('Source', code(String(c.source ?? DASH))), list('Acceptance', c.acceptance),
-            c.pre ? para('Before', vis(c.pre)) : null, para('Steps', vis((Array.isArray(c.steps) ? c.steps : []).join(' → '))), para('Expect', vis(c.expect ?? DASH)),
+            c.pre ? para('Before', vis(c.pre)) : null, para('Steps', vis((Array.isArray(c.steps) ? c.steps : []).join(' · '))), para('Expect', vis(c.expect ?? DASH)),
             para('Observed', isObj(c.observed) && c.observed.status != null ? `${c.observed.status}: ` : '', vis(isObj(c.observed) ? c.observed.note : DASH)),
             list('Recs', c.recs),
             ...(Array.isArray(c.screenshots) ? c.screenshots : []).map(p => (docUrl(id, p) ? el('img', { class: 'shot', src: docUrl(id, p), alt: `${c.id} screenshot ${p}`, loading: 'lazy' }) : list('Screenshot', [p])))))]))) : none(),
       d.findings.length ? el('div', null, el('h4', null, 'Findings'), el('ul', { class: 'plist' }, ...d.findings.map(x => el('li', null, vis(x))))) : null,
       el('div', { class: 'acts' }, el('span', { class: 'hint' }, 'Report: ', code(String(d.report ?? DASH))),
-        report && el('button', { type: 'button', class: 'ghost', 'data-role': 'qa-report', onclick: () => loadQaDoc(id, report) }, q.doc ? 'Refresh report' : 'Show report')),
+        report && el('button', { type: 'button', class: 'tlink', 'data-role': 'qa-report', onclick: () => loadQaDoc(id, report) }, q.doc ? 'Refresh report' : 'Show report')),
       q.doc && (q.doc.error ? el('p', { class: 'hint' }, q.doc.error) : el('pre', { class: 'log', 'data-role': 'qa-doc', tabindex: '0', 'aria-label': 'QA report, as text' }, vis(q.doc.text)))],
     el('div', { class: 'log-head' }, el('h4', null, 'Recs: the HTTP calls tbd made'),
-      el('button', { type: 'button', class: 'ghost', 'data-role': 'recs', onclick: () => loadRecs(id) }, rec ? 'Refresh' : 'Show recs')),
+      el('button', { type: 'button', class: 'tlink', 'data-role': 'recs', onclick: () => loadRecs(id) }, rec ? 'Refresh' : 'Show recs')),
     rec?.error && el('p', { class: 'hint' }, rec.error),
-    rec?.runs?.length > 1 && el('div', { class: 'acts' }, el('span', { class: 'hint' }, 'Run:'), ...rec.runs.map(n => el('button', { type: 'button',
-      class: 'ghost', 'aria-pressed': String(n === rec.run), 'data-role': `recs-${n}`, onclick: () => loadRecs(id, n) }, String(n)))),
+    rec?.runs?.length > 1 && el('div', { class: 'acts' }, el('span', { class: 'hint' }, 'Run'), el('div', { class: 'seg', role: 'group', 'aria-label': 'Run' }, ...rec.runs.map(n => el('button', { type: 'button',
+      'aria-pressed': String(n === rec.run), 'data-role': `recs-${n}`, onclick: () => loadRecs(id, n) }, String(n))))),
     rec?.items && (rec.items.length ? rec.items.map(x => el('div', { class: 'rec' },
       el('p', { class: 'hint' }, code(String(x.n)), ` · ${x.status ?? `no answer: ${vis(x.error)}`} · ${x.ms} ms${x.at ? ` · ${when(x.at)}` : ''}${x.truncated ? ' · cut' : ''}`),
       el('pre', { class: 'log', tabindex: '0', 'aria-label': `rec ${vis(x.n)}: curl` }, vis(x.curl)),
       x.status != null && el('pre', { class: 'log', tabindex: '0', 'aria-label': `rec ${vis(x.n)}: answer` },
         vis([`HTTP ${x.status}`, ...(Array.isArray(x.headers) ? x.headers : []).map(([h, v]) => `${h}: ${v}`), '', x.body ?? ''].join('\n'))))) : none()),
-    rec?.next != null && el('div', { class: 'acts' }, el('button', { type: 'button', class: 'ghost', 'data-role': 'recs-more', onclick: () => loadRecs(id, rec.run, rec.next) }, 'Load more')));
+    rec?.next != null && el('div', { class: 'acts' }, el('button', { type: 'button', class: BTN2, 'data-role': 'recs-more', onclick: () => loadRecs(id, rec.run, rec.next) }, 'Load more')));
 }
 async function loadQa(id) {
   try { ui.qa = { id, data: await api('GET', `/api/tickets/${enc(id)}/report?kind=qa`) }; } catch (e) { ui.qa = { id, error: e.status === 404 ? 'No QA result kept yet.' : e.message }; }
@@ -1311,11 +1352,11 @@ function ivsView(id) {
   const v = ui.ivs?.id === id ? ui.ivs : null;
   return el('section', { class: 'part', 'aria-labelledby': 'iv-h' },
     el('div', { class: 'log-head' }, el('h3', { id: 'iv-h' }, 'Your actions'),
-      el('button', { type: 'button', class: 'ghost', 'data-role': 'ivs', onclick: () => loadIvs(id) }, v ? 'Refresh' : 'Show')),
-    v && (v.error ? el('p', { class: 'hint' }, v.error) : v.items.length ? el('table', { class: 'dtable' }, el('caption', { class: 'sr' }, 'Your actions on this flow'),
+      el('button', { type: 'button', class: 'tlink', 'data-role': 'ivs', onclick: () => loadIvs(id) }, v ? 'Refresh' : 'Show')),
+    v && (v.error ? el('p', { class: 'hint' }, v.error) : v.items.length ? el('table', { class: 'table dtable' }, el('caption', { class: 'sr' }, 'Your actions on this flow'),
       el('thead', null, el('tr', null, ...['Time', 'By', 'Action', 'Task'].map(h => el('th', { scope: 'col' }, h)))),
       el('tbody', null, ...v.items.filter(isObj).map(x => el('tr', null, el('td', null, when(x.at) ?? DASH), el('td', null, vis(x.actor)), el('td', null, vis(x.verb)), el('td', null, x.task ? code(x.task) : DASH))))) : none()),
-    v?.next != null && el('div', { class: 'acts' }, el('button', { type: 'button', class: 'ghost', 'data-role': 'ivs-more', onclick: () => loadIvs(id, v.next) }, 'More')));
+    v?.next != null && el('div', { class: 'acts' }, el('button', { type: 'button', class: BTN2, 'data-role': 'ivs-more', onclick: () => loadIvs(id, v.next) }, 'More')));
 }
 async function loadIvs(id, after) {
   try {
@@ -1338,7 +1379,7 @@ const answered = (d, r) => `${r.questions.filter(x => answerOf(d.a[x.id], x)).le
 
 function clarifyForm(id, r) {
   const d = draftOf(id, r.n);
-  return el('section', { class: 'part', 'aria-labelledby': 'cq-h' },
+  return el('section', { class: 'part you', 'aria-labelledby': 'cq-h' },
     el('h3', { id: 'cq-h' }, `Questions · round ${r.n}`),
     el('p', { class: 'hint' }, "Answer each one, or press Enough, plan now: what you leave open is the planner's call."),
     el('div', { class: 'acts' }, actBtn(id, 'lavish', () => post(id, 'lavish', {}), { sent: 'lavish' })),
@@ -1346,7 +1387,7 @@ function clarifyForm(id, r) {
     ...byTopic(r.questions).flatMap(([topic, qs]) => [topic && el('h4', null, vis(topic)), ...qs.map(([x, i]) => question(d, x, i))]),
     d.errs._ && el('p', { class: 'err' }, d.errs._),
     el('div', { class: 'acts' },
-      actBtn(id, 'answer', () => sendAnswers(id, r, false), { cls: 'primary' }),
+      actBtn(id, 'answer', () => sendAnswers(id, r, false), { cls: BTN1 }),
       actBtn(id, 'plan-now', () => sendAnswers(id, r, true)),
       el('span', { class: 'hint', 'data-count': '' }, answered(d, r))));
 }
@@ -1375,7 +1416,7 @@ function question(d, x, i) {
   return el('fieldset', { class: 'q', 'aria-describedby': [`${name}-why`, d.errs[x.id] && `${name}-err`].filter(Boolean).join(' ') },
     el('legend', null, vis(x.question)),
     el('p', { class: 'why', id: `${name}-why` }, 'Why: ', vis(x.why)),
-    ...opts.map((o, j) => radio('pick', j, vis(o), o === x.recommended && el('span', { class: 'chip rec' }, 'Recommended'))),
+    ...opts.map((o, j) => radio('pick', j, vis(o), o === x.recommended && el('span', { class: 'rmark' }, 'Recommended'))),
     radio('recommended', null, 'Use recommended', !opts.includes(x.recommended) && [': ', el('b', null, vis(x.recommended))]),
     radio('you_decide', null, "You decide (planner's call)"),
     radio('text', null, 'My own answer'),
@@ -1434,22 +1475,22 @@ function planView(id, k, r) {
   const count = who => decs.filter(([, s]) => s[0] === who).length;
   const tally = [['you', 'yours'], ['ticket', 'from the ticket'], ['adr', 'from ADRs'], ['planner', "planner's calls"]]
     .map(([who, l]) => count(who) && `${count(who)} ${l}`).filter(Boolean).join(' · ');
-  return el('section', { class: 'part plan', 'aria-labelledby': 'pl-h' },
+  return el('section', { class: `part plan${open ? ' you' : ''}`, 'aria-labelledby': 'pl-h' },
     el('h3', { id: 'pl-h' }, open ? `Plan to approve · round ${r.n}` : 'Approved plan'),
     el('p', { class: 'summary' }, vis(r.summary)),
     el('h4', null, 'Acceptance criteria'),
-    list(r.acceptance, a => [el('span', { class: `chip ac ${a.type === 'new' ? 'new' : ''}` }, vis(a.type)), ' ', el('span', { class: 'did' }, vis(a.id)), ' ', vis(a.text)]),
+    list(r.acceptance, a => [el('span', { class: 'did' }, vis(a.id)), ' ', vis(a.text), ' ', el('span', { class: `ac${a.type === 'new' ? ' new' : ''}` }, vis(a.type))]),
     el('h4', null, 'Tasks'),
     Array.isArray(r.tasks) && r.tasks.length ? el('ol', { class: 'tasks' }, ...r.tasks.map(task)) : none(),
     el('h4', null, 'Schema changes allowed'), list(r.allowed_schema_changes, vis),
     el('h4', null, 'API changes allowed'), list(r.allowed_api_changes, vis),
     el('h4', null, 'Skills for Working'),
-    Array.isArray(r.skills) && r.skills.length ? el('p', { class: 'frow' }, ...r.skills.map(s => el('span', { class: 'chip' }, vis(s)))) : none(),
+    Array.isArray(r.skills) && r.skills.length ? el('p', { class: 'toks' }, ...r.skills.map(code)) : none(),
     r.ui && [el('h4', null, 'UI'), el('p', { class: 'ctext' }, vis(r.ui))],
     el('h4', null, 'Child tickets'),
     list(r.children, c => [el('strong', null, vis(c.title)), c.blocked_by?.length ? ` · waits for ${c.blocked_by.map(vis).join(', ')}` : '', el('span', { class: 'ctext' }, vis(c.text))]),
     el('h4', null, 'Decisions'),
-    decs.length ? [el('p', { class: 'hint' }, tally), el('table', { class: 'dtable' },
+    decs.length ? [el('p', { class: 'hint' }, tally), el('table', { class: 'table dtable' },
       el('caption', { class: 'sr' }, 'Decisions and their source'),
       el('thead', null, el('tr', null, el('th', { scope: 'col' }, 'Decision'), el('th', { scope: 'col' }, 'Source'))),
       el('tbody', null, ...decs.map(([x, [who, label]]) => el('tr', { class: who },
@@ -1459,7 +1500,7 @@ function planView(id, k, r) {
 }
 
 const task = t => el('li', { class: 'task' },
-  el('p', null, el('span', { class: 'did' }, vis(t.id)), ' ', el('strong', null, vis(t.title)), t.type && [' ', el('span', { class: 'chip' }, vis(t.type))]),
+  el('p', null, el('span', { class: 'did' }, vis(t.id)), ' ', el('strong', null, vis(t.title)), t.type && [' ', el('span', { class: 'tt' }, vis(t.type))]),
   el('dl', { class: 'facts' },
     el('dt', null, 'Files'), el('dd', null, ...(t.files?.length ? t.files.map(code) : ['none'])),
     t.modules?.length > 0 && [el('dt', null, 'Modules'), el('dd', null, ...t.modules.map(code))],
@@ -1477,7 +1518,7 @@ function planActs(id, k, r) {
     box,
     d.errs.comment && el('p', { class: 'err', id: 'rj-err' }, d.errs.comment),
     el('div', { class: 'acts' },
-      k.waiting?.reason !== 'setup_failed' && actBtn(id, 'approve', () => approve(id), { cls: `primary${sure ? ' armed' : ''}`, label: sure ? 'Confirm approve?' : 'Approve' }),
+      k.waiting?.reason !== 'setup_failed' && actBtn(id, 'approve', () => approve(id), { cls: `${BTN1}${sure ? ' armed' : ''}`, label: sure ? 'Confirm approve?' : 'Approve' }),
       actBtn(id, 'reject', () => sendReject(id, r, false)),
       actBtn(id, 'ask', () => sendReject(id, r, true))),
     sure && el('p', { class: 'hint' }, 'Press again to approve. The plan is frozen and setup starts.'),
@@ -1508,7 +1549,7 @@ function sendReject(id, r, ask) {
 }
 
 // ---------- composer ----------
-const mode = () => $('#composer input[name="mode"]:checked').value;
+const mode = () => $('#composer .seg [aria-pressed="true"]').value;
 
 // flows need a leaf tag that has a path (a tag with children is only a group)
 const leafTags = tags => Object.keys(tags).filter(n => tags[n]?.path && !Object.keys(tags).some(o => o.startsWith(`${n}/`))).sort();
@@ -1528,8 +1569,10 @@ async function loadTags() {
 function initComposer() {
   $('#flowKind').replaceChildren(...KINDS.map(k => el('option', { value: k }, k)));
   $('#flowTag').replaceChildren(...tagOptions());
-  $('#composer').addEventListener('change', e => {
-    if (e.target.name !== 'mode') return;
+  $('#composer .seg').addEventListener('click', e => {
+    const b = e.target.closest('button');
+    if (!b) return;
+    press($('#composer .seg'), b.value);
     const flow = mode() === 'flow';
     $('#flowKind').hidden = $('#flowTag').hidden = !flow;
     $('#newTitle').placeholder = flow ? 'Describe the goal for an agent.' : 'Add a reminder. It lands in Inbox.';
@@ -1537,7 +1580,7 @@ function initComposer() {
   });
   $('#composer').addEventListener('submit', async e => {
     e.preventDefault();
-    const input = $('#newTitle'), v = input.value.trim(), flow = mode() === 'flow', btn = $('.primary', e.target);
+    const input = $('#newTitle'), v = input.value.trim(), flow = mode() === 'flow', btn = $('button[type="submit"]', e.target);
     if (!v) return;
     btn.disabled = true;
     try {
@@ -1545,6 +1588,7 @@ function initComposer() {
       else await api('POST', '/api/reminders', { title: v, status: 'inbox', pos: 'top' });
       input.value = '';
       refresh();
+      if (root.dataset.view !== (flow ? 'flows' : 'reminders')) toast(flow ? 'The flow is in Backlog.' : 'The reminder is in Inbox.', { kind: 'info', title: 'Added' }); // it landed out of sight
     } catch (err) {
       toast(err.message, { title: refused(err, `Could not add ${flow ? 'flow' : 'reminder'}`) });
     }
@@ -1563,10 +1607,10 @@ function render() {
   renderFlows();
 }
 
-syncThemeBtn();
+route();
+globalThis.onhashchange = route; // window's handler (the vm test stub has no addEventListener)
+document.addEventListener('click', e => { if (ui.tray && !e.target.closest('.tray, .menu')) closeTray(); });
 initComposer();
-document.body.classList.add('boot');
-setTimeout(() => document.body.classList.remove('boot'), 1500);
 if (uiKey) reconnect(); else lockOut(); // no ui_key (first visit after D39, or storage blocked): tb open once more
 // DOM-only refresh of relative times ("in 20 min"); no network
 setInterval(() => { if (document.visibilityState === 'visible' && state && !ui.locked) renderSched(); }, 60000);

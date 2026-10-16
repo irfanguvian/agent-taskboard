@@ -1,0 +1,421 @@
+<!doctype html>
+<html lang="en" data-theme="auto">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Overview · Till</title>
+<script>try { const t = localStorage.getItem('till-theme'); if (t) document.documentElement.dataset.theme = t; } catch {}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource-variable/inter@5/opsz.css">
+<link rel="stylesheet" href="foundation.css">
+<style>
+/* Page layout only. Tokens, type and components come from foundation.css. */
+[hidden] { display: none !important; }
+.app { display: grid; grid-template-columns: 240px minmax(0, 1fr); min-height: 100vh; font-size: 14px; line-height: 1.42859; letter-spacing: -0.016em; }
+.muted, .label { color: var(--text-2); }
+.label { font-size: 12px; line-height: 1.33337; letter-spacing: -0.01em; }
+.sec-title { font-size: 17px; line-height: 1.29412; font-weight: 600; letter-spacing: -0.022em; }
+.ic { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+
+/* Sidebar */
+.side {
+  position: sticky; top: 0; height: 100vh; display: flex; flex-direction: column; gap: 4px; padding: 0 12px 16px;
+  background: var(--bg-alt); border-right: 1px solid var(--separator);
+}
+.shop { display: flex; flex-direction: column; justify-content: center; height: 64px; padding: 0 8px; }
+.nav-item {
+  display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 8px; border-radius: var(--radius-sm);
+  color: var(--text); transition: background-color var(--dur-fast) linear;
+}
+.nav-item:hover { background: var(--hover); text-decoration: none; }
+.nav-item .ic { color: var(--text-2); }
+.nav-item[aria-current="page"] { background: color-mix(in srgb, var(--text) 7%, transparent); font-weight: 600; }
+.nav-item[aria-current="page"] .ic { color: var(--link); }
+.side .nav-item:last-child { margin-top: auto; }
+
+/* Toolbar: translucent from --bg, so dark mode shows no gray strip */
+.bar {
+  position: sticky; top: 0; z-index: 5; display: flex; align-items: center; gap: 12px; height: 64px; padding: 0 40px;
+  background: color-mix(in srgb, var(--bg) 80%, transparent); border-bottom: 1px solid var(--separator-soft);
+  -webkit-backdrop-filter: saturate(180%) blur(20px); backdrop-filter: saturate(180%) blur(20px);
+}
+.bar h1 { margin-right: auto; font-family: var(--font-display); font-size: 28px; line-height: 1.14286; letter-spacing: 0; }
+.search { position: relative; display: flex; align-items: center; }
+.search .ic { position: absolute; left: 10px; color: var(--text-2); pointer-events: none; }
+.search input { width: 200px; height: 32px; padding: 0 12px 0 32px; border: 0; border-radius: var(--radius-pill); background: var(--fill); }
+.search input::placeholder { color: var(--text-2); }
+.icon-btn { display: none; place-items: center; width: 32px; height: 32px; color: var(--text-2); }
+.icon-btn .ic { width: 22px; height: 22px; stroke-width: 1.1; }
+/* Each view shows only the toolbar controls that act on it. */
+main:not([data-view="overview"]) .bar .seg,
+main:is([data-view="invoices"], [data-view="settings"]) .bar :is(.search, .btn) { display: none; }
+
+.view { max-width: 1080px; padding: 32px 40px 64px; }
+
+/* Summary: one hero number, the rest 21px. No cards, no icons. */
+.summary { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 32px 64px; }
+.hero-num { margin: 4px 0; font-family: var(--font-display); font-size: 48px; line-height: 1.08349; font-weight: 600; letter-spacing: -0.003em; }
+.up { color: var(--green); }
+.down { color: var(--red); }
+.stats { display: flex; gap: 48px; padding-bottom: 20px; }
+.stats dd { margin-top: 4px; font-family: var(--font-display); font-size: 21px; line-height: 1.19048; font-weight: 600; letter-spacing: 0; }
+
+/* Chart: one accent series, y labels on the right */
+.chart { position: relative; margin-top: 48px; }
+.chart-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 24px; }
+.plot { position: relative; height: 240px; margin-right: 56px; }
+.gl { position: absolute; left: 0; right: 0; border-top: 1px solid var(--separator-soft); }
+.gl span { position: absolute; left: calc(100% + 8px); transform: translateY(-50%); }
+.cols, .xl { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); }
+.cols { position: absolute; inset: 0; }
+.col { position: relative; display: flex; justify-content: center; align-items: flex-end; border-radius: 4px; }
+.bar-v { width: min(24px, 60%); border-radius: 4px 4px 0 0; background: var(--accent); transition: background-color var(--dur-fast) linear; }
+.bar-v.open { background: color-mix(in srgb, var(--accent), var(--bg) 45%); }
+.col:hover .bar-v:not(.open), .col:focus-visible .bar-v:not(.open) { background: var(--accent-hover); }
+.col:is(:hover, :focus) .peak { visibility: hidden; } /* the tooltip says it */
+.peak { position: absolute; left: 50%; margin-bottom: 4px; padding: 0 4px; transform: translateX(-50%); background: var(--bg); color: var(--text); font-weight: 600; white-space: nowrap; }
+.xl { margin: 8px 56px 0 0; text-align: center; }
+.tip {
+  position: absolute; z-index: 2; padding: 8px 12px; border-radius: var(--radius-sm); pointer-events: none; white-space: nowrap;
+  transform: translate(-50%, calc(-100% - 8px)); background: var(--bg-elevated); box-shadow: var(--shadow-float);
+}
+.tip b { display: block; color: var(--text); font-size: 14px; letter-spacing: -0.016em; }
+
+/* Payments */
+.view .label + .table { margin-top: 16px; }
+
+/* Settings */
+.group { max-width: 640px; }
+.group + .group { margin-top: 40px; }
+.group .sec-title { margin-bottom: 12px; }
+.fields { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.rows li { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 56px; padding: 8px 0; border-bottom: 1px solid var(--separator-soft); }
+.rows label, .rows li > span { flex: 1; cursor: pointer; }
+.rows .label { display: block; }
+
+/* Empty state: title, one line, one button */
+.empty { display: flex; flex-direction: column; align-items: center; gap: 4px; max-width: none; padding-top: 120px; text-align: center; }
+.empty .btn { margin-top: 16px; }
+
+/* Visible at once on open so the field can take focus; still fades out on close. */
+.scrim.open { transition-duration: var(--dur), 0s; }
+.sheet-fields { display: grid; gap: 12px; margin: 24px 0; }
+.tabs { display: none; }
+
+/* Phones get an app layout: tab bar, two-line rows, bottom sheet, settings in the top bar */
+@media (max-width: 734px) {
+  .app { grid-template-columns: minmax(0, 1fr); }
+  .side { display: none; }
+  .bar { flex-wrap: wrap; height: auto; min-height: 56px; padding: 12px 16px; }
+  .bar .seg { display: flex; order: 1; flex: 1 0 100%; }
+  .bar .seg button { flex: 1; }
+  .search { order: 1; flex: 1 0 100%; }
+  .search input { width: 100%; }
+  main[data-view="overview"] .bar .search { display: none; }
+  .icon-btn { display: grid; }
+  .view { padding: 24px 16px calc(80px + env(safe-area-inset-bottom)); }
+  .stats { gap: 32px; padding: 0; }
+  .plot { height: 200px; margin-right: 48px; }
+  .xl { margin-right: 48px; }
+  .xl.dense span:nth-child(even) { visibility: hidden; }
+  .fields { grid-template-columns: 1fr; }
+  .pay thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+  .pay tr { display: grid; grid-template-columns: auto auto 1fr auto; gap: 4px 8px; padding: 12px 0; border-bottom: 1px solid var(--separator-soft); }
+  .pay td { height: auto; padding: 0; border: 0; }
+  .pay td:nth-child(2) { grid-area: 1 / 1 / 2 / 4; }
+  .pay td.num { grid-area: 1 / 4; }
+  .pay td:is(:nth-child(1), :nth-child(3), :nth-child(4)) { grid-row: 2; color: var(--text-2); font-size: 12px; }
+  .pay td:nth-child(4) { grid-column: 4; justify-self: end; color: var(--text); }
+  .tabs {
+    position: fixed; inset: auto 0 0; z-index: 5; display: grid; grid-auto-flow: column; grid-auto-columns: 1fr;
+    padding-bottom: env(safe-area-inset-bottom); border-top: 1px solid var(--separator-soft);
+    background: color-mix(in srgb, var(--bg) 80%, transparent);
+    -webkit-backdrop-filter: saturate(180%) blur(20px); backdrop-filter: saturate(180%) blur(20px);
+  }
+  .tabs a { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; height: 48px; color: var(--text-2); font-size: 10px; line-height: 1.2; letter-spacing: 0; }
+  .tabs a:hover { text-decoration: none; }
+  .tabs a[aria-current="page"] { color: var(--link); }
+  .tabs .ic { width: 22px; height: 22px; stroke-width: 1.1; }
+}
+</style>
+</head>
+<body>
+
+<svg hidden>
+  <symbol id="i-overview" viewBox="0 0 16 16"><rect x="2" y="2" width="5" height="5" rx="1.25"/><rect x="9" y="2" width="5" height="5" rx="1.25"/><rect x="2" y="9" width="5" height="5" rx="1.25"/><rect x="9" y="9" width="5" height="5" rx="1.25"/></symbol>
+  <symbol id="i-payments" viewBox="0 0 16 16"><rect x="1.75" y="3.25" width="12.5" height="9.5" rx="2"/><path d="M1.75 6.5h12.5M4.5 10h2"/></symbol>
+  <symbol id="i-invoices" viewBox="0 0 16 16"><path d="M9.5 1.75H4.25a1 1 0 0 0-1 1v10.5a1 1 0 0 0 1 1h7.5a1 1 0 0 0 1-1V4.75z"/><path d="M9.5 1.75v3h3M5.75 8.5h4.5M5.75 11h3"/></symbol>
+  <symbol id="i-settings" viewBox="0 0 16 16"><path d="M2 4.5h6.5M11.5 4.5H14M2 11.5h2.5M7.5 11.5H14"/><circle cx="10" cy="4.5" r="1.5"/><circle cx="6" cy="11.5" r="1.5"/></symbol>
+  <symbol id="i-search" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5"/><path d="m10.5 10.5 3 3"/></symbol>
+</svg>
+
+<div class="app">
+  <nav class="side" aria-label="Sections">
+    <p class="shop"><b>Kopi Rejeki</b><span class="label">Jl. Kaliurang, Yogyakarta</span></p>
+    <a class="nav-item" href="#overview"><svg class="ic" aria-hidden="true"><use href="#i-overview"/></svg>Overview</a>
+    <a class="nav-item" href="#payments"><svg class="ic" aria-hidden="true"><use href="#i-payments"/></svg>Payments</a>
+    <a class="nav-item" href="#invoices"><svg class="ic" aria-hidden="true"><use href="#i-invoices"/></svg>Invoices</a>
+    <a class="nav-item" href="#settings"><svg class="ic" aria-hidden="true"><use href="#i-settings"/></svg>Settings</a>
+  </nav>
+
+  <main id="main" data-view="overview">
+    <header class="bar">
+      <h1 id="title">Overview</h1>
+      <a class="icon-btn" href="#settings" aria-label="Settings"><svg class="ic" aria-hidden="true"><use href="#i-settings"/></svg></a>
+      <div class="seg" id="period" role="group" aria-label="Period">
+        <button type="button" value="today" aria-pressed="true">Today</button><button type="button" value="week" aria-pressed="false">Week</button><button type="button" value="month" aria-pressed="false">Month</button>
+      </div>
+      <label class="search"><svg class="ic" aria-hidden="true"><use href="#i-search"/></svg><input id="q" type="search" placeholder="Search payments" aria-label="Search payments"></label>
+      <button class="btn btn-sm" type="button" data-sheet="sale">New sale</button>
+    </header>
+
+    <section class="view" id="view-overview" aria-labelledby="title">
+      <div class="summary">
+        <div>
+          <p class="label" id="hero-label">Takings today</p>
+          <p class="hero-num" id="hero-num">Rp 4.820.500</p>
+          <p class="muted"><span id="hero-delta" class="up">+12%</span> <span id="hero-vs">vs this time last Friday</span></p>
+        </div>
+        <dl class="stats">
+          <div><dt class="label">Payments</dt><dd id="s-count">138</dd></div>
+          <div><dt class="label">Average sale</dt><dd id="s-avg">Rp 34.931</dd></div>
+          <div><dt class="label">Refunds</dt><dd id="s-refunds">Rp 86.000</dd></div>
+        </dl>
+      </div>
+      <figure class="chart" id="chart">
+        <figcaption class="chart-head"><span class="sec-title" id="chart-title">Takings by hour</span><span class="label" id="chart-sub">Friday 16 October</span></figcaption>
+        <div class="plot label" id="plot"></div>
+        <div class="xl label" id="xl" aria-hidden="true"></div>
+        <div class="tip label" id="tip" hidden></div>
+        <table class="sr-only"><caption id="sr-caption"></caption><thead><tr><th scope="col">Period</th><th scope="col">Takings</th></tr></thead><tbody id="sr-rows"></tbody></table>
+      </figure>
+    </section>
+
+    <section class="view" id="view-payments" aria-labelledby="title" hidden>
+      <p class="label">Friday 16 October · 138 payments</p>
+      <table class="table pay">
+        <thead><tr><th scope="col">Time</th><th scope="col">Item</th><th scope="col">Method</th><th scope="col">Status</th><th scope="col" class="num">Amount</th></tr></thead>
+        <tbody id="pay-rows">
+          <tr><td>14:18</td><td>Es kopi susu ×2, roti bakar cokelat</td><td>QRIS</td><td><span class="status ok">Paid</span></td><td class="num">Rp 61.000</td></tr>
+          <tr><td>14:11</td><td>Kopi tubruk</td><td>Card</td><td><span class="status ok">Paid</span></td><td class="num">Rp 12.000</td></tr>
+          <tr><td>14:05</td><td>Nasi goreng kampung ×3</td><td>Bank transfer</td><td><span class="status wait">Pending</span></td><td class="num">Rp 105.000</td></tr>
+          <tr><td>13:58</td><td>Es teh manis ×4</td><td>QRIS</td><td><span class="status ok">Paid</span></td><td class="num">Rp 32.000</td></tr>
+          <tr><td>13:47</td><td>Catering, 10 boxes</td><td>Card</td><td><span class="status bad">Declined</span></td><td class="num">Rp 450.000</td></tr>
+          <tr><td>13:40</td><td>Kopi susu gula aren</td><td>QRIS</td><td><span class="status ok">Paid</span></td><td class="num">Rp 22.000</td></tr>
+          <tr><td>13:22</td><td>Pisang goreng ×2</td><td>Card</td><td><span class="status">Refunded</span></td><td class="num">Rp 24.000</td></tr>
+          <tr><td>13:15</td><td>Es kopi susu, croissant</td><td>QRIS</td><td><span class="status ok">Paid</span></td><td class="num">Rp 46.000</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="view empty" id="view-invoices" aria-labelledby="empty-title" hidden>
+      <h2 class="sec-title" id="empty-title">No invoices yet</h2>
+      <p class="muted">Send an invoice and get paid by bank transfer.</p>
+      <button class="btn btn-sm" type="button">Create invoice</button>
+    </section>
+
+    <section class="view" id="view-settings" aria-labelledby="title" hidden>
+      <div class="group">
+        <h2 class="sec-title">Shop</h2>
+        <div class="fields">
+          <div class="field"><input id="shop-name" value="Kopi Rejeki" placeholder=" " autocomplete="organization"><label for="shop-name">Shop name</label></div>
+          <div class="field"><input id="shop-wa" type="tel" value="+62 812-3456-0417" placeholder=" " autocomplete="tel"><label for="shop-wa">WhatsApp number</label></div>
+        </div>
+      </div>
+      <div class="group">
+        <h2 class="sec-title">Payments</h2>
+        <ul class="rows">
+          <li><label for="sw-qris">QRIS<span class="label">0,7% per payment</span></label><input class="switch" type="checkbox" id="sw-qris" checked></li>
+          <li><label for="sw-card">Cards<span class="label">1,8% per payment</span></label><input class="switch" type="checkbox" id="sw-card" checked></li>
+          <li><label for="sw-transfer">Bank transfer<span class="label">Rp 2.500 per payment</span></label><input class="switch" type="checkbox" id="sw-transfer"></li>
+          <li><label for="sw-receipt">Receipts on WhatsApp<span class="label">Sent to the customer after each payment</span></label><input class="switch" type="checkbox" id="sw-receipt" checked></li>
+        </ul>
+      </div>
+      <div class="group">
+        <h2 class="sec-title">Payouts</h2>
+        <ul class="rows"><li><span>BCA ••• 4821<span class="label">Every day by 09:00</span></span><button class="btn btn-gray btn-sm" type="button">Change</button></li></ul>
+      </div>
+      <div class="group">
+        <h2 class="sec-title" id="appearance">Appearance</h2>
+        <ul class="rows"><li><span>Theme</span>
+          <div class="seg" id="theme" role="group" aria-labelledby="appearance">
+            <button type="button" value="auto" aria-pressed="true">Auto</button><button type="button" value="light" aria-pressed="false">Light</button><button type="button" value="dark" aria-pressed="false">Dark</button>
+          </div>
+        </li></ul>
+      </div>
+    </section>
+  </main>
+
+  <nav class="tabs" aria-label="Sections">
+    <a href="#overview"><svg class="ic" aria-hidden="true"><use href="#i-overview"/></svg>Overview</a>
+    <a href="#payments"><svg class="ic" aria-hidden="true"><use href="#i-payments"/></svg>Payments</a>
+    <a href="#invoices"><svg class="ic" aria-hidden="true"><use href="#i-invoices"/></svg>Invoices</a>
+  </nav>
+</div>
+
+<div class="scrim" id="sale">
+  <form class="sheet" role="dialog" aria-modal="true" aria-labelledby="sale-title" aria-describedby="sale-sub">
+    <h2 class="sheet-title" id="sale-title">New sale</h2>
+    <p class="sheet-sub" id="sale-sub">The amount shows on your Till Terminal for the customer to pay.</p>
+    <div class="sheet-fields">
+      <div class="field"><input id="sale-amount" inputmode="numeric" placeholder=" " required><label for="sale-amount">Amount (Rp)</label></div>
+      <div class="field"><input id="sale-note" placeholder=" "><label for="sale-note">Note</label></div>
+    </div>
+    <div class="sheet-actions">
+      <button class="btn btn-gray btn-sm" type="button" data-close>Cancel</button>
+      <button class="btn btn-sm" type="submit">Charge</button>
+    </div>
+  </form>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+// Builds DOM with textContent only, never innerHTML.
+function el(tag, attrs, ...kids) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (k.startsWith('on')) e.addEventListener(k.slice(2), v);
+    else if (k === 'class') e.className = v;
+    else e.setAttribute(k, v);
+  }
+  e.append(...kids);
+  return e;
+}
+
+// One locale for every number: Rp 4.820.500, 0,7%, 912 rb, 1 jt.
+const rp = new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR', maximumFractionDigits: 0 });
+const compact = new Intl.NumberFormat('id-ID', { notation: 'compact' });
+const pct = new Intl.NumberFormat('id-ID', { style: 'percent', signDisplay: 'exceptZero' });
+const hh = h => String(h).padStart(2, '0') + ':00';
+const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+
+// Totals and averages are computed from the bars, so the numbers on screen always agree.
+// The last bar with a value is still open (partial data).
+const periods = {
+  today: { label: 'Takings today', title: 'Takings by hour', sub: 'Friday 16 October', vs: 'vs this time last Friday', delta: 0.12, count: 138, refunds: 86000,
+    bars: [312000, 684500, 598000, 421000, 655000, 912000, 806000, 432000].map((v, i) => ({ x: hh(7 + i), name: `${hh(7 + i)}–${hh(8 + i)}`, v })) },
+  week: { label: 'Takings this week', title: 'Takings by day', sub: '12–18 October', vs: 'vs this time last week', delta: 0.08, count: 761, refunds: 254000,
+    bars: days.map((x, i) => ({ x, name: `${x} ${12 + i} Oct`, v: [5215000, 4988500, 5402000, 6104500, 4820500][i] })) },
+  month: { label: 'Takings in October', title: 'Takings by day', sub: '1–16 October', vs: 'vs this time in September', delta: -0.03, count: 2441, refunds: 611500,
+    bars: [4512000, 5034500, 6218000, 5876500, 4190000, 4655000, 4903500, 5312000, 5587000, 6442500, 6031000, 5215000, 4988500, 5402000, 6104500, 4820500]
+      .map((v, i) => ({ x: String(i + 1), name: `${i + 1} Oct`, v })) },
+};
+
+// 4 gridlines whose step is 1, 2, 2,5 or 5 × 10ⁿ: 250 rb, 500 rb, 1 jt, 2 jt…
+function niceStep(peak) {
+  const m = 10 ** Math.floor(Math.log10(peak / 4));
+  return [1, 2, 2.5, 5, 10].map(s => s * m).find(s => s * 4 >= peak);
+}
+
+const chart = $('#chart'), tip = $('#tip');
+function showTip(col, b, open) {
+  tip.replaceChildren(el('b', {}, rp.format(b.v)), b.name + (open ? ', so far' : ''));
+  tip.hidden = false;
+  const c = chart.getBoundingClientRect(), r = col.firstChild.getBoundingClientRect(), w = tip.offsetWidth / 2;
+  // CSSOM, not style attributes: the board's CSP blocks inline style attributes.
+  tip.style.left = Math.min(Math.max(r.left + r.width / 2 - c.left, w), c.width - w) + 'px';
+  tip.style.top = r.top - c.top + 'px';
+}
+const hideTip = () => { tip.hidden = true; };
+
+function render(key) {
+  const p = periods[key], vals = p.bars.filter(b => b.v != null);
+  const total = vals.reduce((s, b) => s + b.v, 0), peak = Math.max(...vals.map(b => b.v)), last = vals.at(-1);
+  const step = niceStep(peak), max = step * 4;
+
+  $('#hero-label').textContent = p.label;
+  $('#hero-num').textContent = rp.format(total);
+  $('#hero-delta').textContent = pct.format(p.delta);
+  $('#hero-delta').className = p.delta < 0 ? 'down' : 'up';
+  $('#hero-vs').textContent = p.vs;
+  $('#s-count').textContent = p.count.toLocaleString('id-ID');
+  $('#s-avg').textContent = rp.format(Math.round(total / p.count));
+  $('#s-refunds').textContent = rp.format(p.refunds);
+  $('#chart-title').textContent = p.title;
+  $('#chart-sub').textContent = p.sub;
+
+  const lines = [0, 1, 2, 3, 4].map(i => {
+    const g = el('div', { class: 'gl', 'aria-hidden': 'true' }, el('span', {}, i ? compact.format(step * i) : '0'));
+    g.style.bottom = i * 25 + '%';
+    return g;
+  });
+  const cols = p.bars.map(b => {
+    if (b.v == null) return el('div', { class: 'col' });
+    const open = b === last, h = b.v / max * 100;
+    const bar = el('div', { class: 'bar-v' + (open ? ' open' : '') });
+    bar.style.height = h + '%';
+    const col = el('div', {
+      class: 'col', tabindex: 0, role: 'img', 'aria-label': `${b.name}, ${rp.format(b.v)}${open ? ', so far' : ''}`,
+      onmouseenter: () => showTip(col, b, open), onfocus: () => showTip(col, b, open), onmouseleave: hideTip, onblur: hideTip,
+    }, bar);
+    if (b.v === peak) { // only the peak gets a label
+      const tag = el('span', { class: 'peak', 'aria-hidden': 'true' }, compact.format(b.v));
+      tag.style.bottom = h + '%';
+      col.append(tag);
+    }
+    return col;
+  });
+  $('#plot').replaceChildren(...lines, el('div', { class: 'cols' }, ...cols));
+  $('#xl').replaceChildren(...p.bars.map(b => el('span', {}, b.x)));
+  $('#xl').classList.toggle('dense', p.bars.length > 7); // phones label every other bar
+  $('#sr-caption').textContent = `${p.title}, ${p.sub}`;
+  $('#sr-rows').replaceChildren(...vals.map(b => el('tr', {}, el('th', { scope: 'row' }, b.name), el('td', {}, rp.format(b.v) + (b === last ? ' so far' : '')))));
+}
+
+// Segmented control: one pressed button per group.
+function seg(group, onPick) {
+  group.addEventListener('click', e => {
+    const b = e.target.closest('button');
+    if (!b) return;
+    for (const x of group.querySelectorAll('button')) x.setAttribute('aria-pressed', x === b);
+    onPick(b.value);
+  });
+}
+seg($('#period'), render);
+const root = document.documentElement;
+seg($('#theme'), t => { root.dataset.theme = t; try { localStorage.setItem('till-theme', t); } catch {} });
+for (const b of $('#theme').children) b.setAttribute('aria-pressed', b.value === root.dataset.theme);
+
+// Views: the hash names the view; the title stays true whatever filter is picked.
+const views = { overview: 'Overview', payments: 'Payments', invoices: 'Invoices', settings: 'Settings' };
+function route() {
+  const v = location.hash.slice(1) in views ? location.hash.slice(1) : 'overview';
+  $('#main').dataset.view = v;
+  for (const s of document.querySelectorAll('.view')) s.hidden = s.id !== 'view-' + v;
+  for (const a of document.querySelectorAll('.nav-item, .tabs a')) {
+    if (a.hash === '#' + v) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
+  }
+  $('#title').textContent = views[v];
+  document.title = views[v] + ' · Till';
+  scrollTo(0, 0);
+}
+addEventListener('hashchange', route);
+route();
+render('today');
+
+$('#q').addEventListener('input', e => {
+  const q = e.target.value.trim().toLowerCase();
+  if (q && location.hash !== '#payments') location.hash = 'payments';
+  for (const tr of $('#pay-rows').rows) tr.hidden = !tr.textContent.toLowerCase().includes(q);
+});
+
+// Sheet: inert shell keeps focus inside; Esc and a scrim click close; focus returns to the opener.
+const scrim = $('#sale'), shell = $('.app');
+let opener = null;
+function openSheet() {
+  opener = document.activeElement;
+  scrim.classList.add('open');
+  shell.inert = true;
+  $('#sale-amount').focus();
+}
+function closeSheet() {
+  scrim.classList.remove('open');
+  shell.inert = false;
+  opener?.focus();
+}
+document.querySelector('[data-sheet="sale"]').addEventListener('click', openSheet);
+scrim.addEventListener('click', e => { if (e.target === scrim || e.target.closest('[data-close]')) closeSheet(); });
+scrim.addEventListener('submit', e => { e.preventDefault(); e.target.reset(); closeSheet(); });
+addEventListener('keydown', e => { if (e.key === 'Escape' && scrim.classList.contains('open')) closeSheet(); });
+</script>
+</body>
+</html>
