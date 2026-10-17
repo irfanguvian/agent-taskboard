@@ -3,7 +3,11 @@
 // result that misses the point fails the matching check.
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 const E = require('../scripts/eval-phase');
+const H = require('../scripts/harness');
 
 const fails = (c, result) => E.score(c, { accepted: true, why: '', result }).filter((x) => !x.ok).map((x) => x.name);
 
@@ -95,4 +99,91 @@ test('parse: --phase picks review, qa or final_gate; --packet is the review eval
   assert.throws(() => E.parse(['--fake', '--phase', 'qa', '--packet', 'x']), /--packet: the review evals only/);
   assert.equal(E.parse(['--real', '--no-ram-wait']).noRamWait, true);
   assert.throws(() => E.parse(['--fake', '--no-ram-wait']), /--no-ram-wait: --real only/);
+});
+
+// D-0110 review E4 = final_gate E2's IDOR: a blocking finding at the service or controller lines passes whether labelled
+// CRIT (the example) or HIGH; the check's evidence keeps the label for the report.
+test('score E4: the CRIT example and a HIGH copy pass, the label in the evidence; verdict pass or the finding in another file fail', () => {
+  const e4 = E.loadCase('E4');
+  const f = e4.example.findings[0];
+  const want = 'an open HIGH/CRIT high-confidence finding at src/orders/orders.service.ts:19-23 or src/orders/orders.controller.ts:18-24';
+  const evidence = (result) => E.score(e4, { accepted: true, why: '', result }).find((x) => x.name === want).evidence;
+  const high = { ...e4.example, findings: [{ ...f, severity: 'HIGH' }] };
+  assert.deepEqual(fails(e4, e4.example), []);
+  assert.equal(evidence(e4.example), 'F1 CRIT (high) src/orders/orders.controller.ts:22-23');
+  assert.deepEqual(fails(e4, high), []);
+  assert.equal(evidence(high), 'F1 HIGH (high) src/orders/orders.controller.ts:22-23');
+  assert.deepEqual(fails(e4, { ...e4.example, verdict: 'pass' }), ['verdict block']);
+  assert.deepEqual(fails(e4, { ...e4.example, findings: [{ ...f, where: 'src/common/caller.guard.ts:10-11' }] }), [want]);
+});
+
+test('parse: E4 is a review case, only when named (default E1-E3); qa or final_gate E4 refused', () => {
+  assert.deepEqual(E.parse(['--fake', '--cases', 'E1,E2,E3,E4']).cases, ['E1', 'E2', 'E3', 'E4']);
+  assert.deepEqual(E.parse(['--fake']).cases, ['E1', 'E2', 'E3']);
+  assert.throws(() => E.parse(['--fake', '--phase', 'qa', '--cases', 'E4']), /^Error: --cases: pick from E1,E2,E3$/);
+  assert.throws(() => E.parse(['--fake', '--phase', 'final_gate', '--cases', 'E1,E4']), /^Error: --cases: pick from E1,E2,E3$/);
+  assert.throws(() => E.caseOf('qa', 'E4'), /no qa case E4/);
+});
+
+// harness.js blindPacket (D-0069): neutral labels, README with the lenses, labels outside; agent text may say "expect" or
+// "PASS"; an answer-key name, a labels file inside, a file over 1 MB throw before anything is written.
+test('blindPacket: neutral labels, README (7 lenses, 1-5, ./repo-at-base/, base), labels outside, "expect"/"PASS" kept; a key name, labels inside, > 1 MB throw', () => {
+  const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'tbbp-')));
+  try {
+    const base = 'a1'.repeat(20);
+    const diff = '+  it(\'answers 404\', () => expect(res.status).toBe(404)); // PASS before, FAIL after\n';
+    const items = ['B', 'C'].map((key) => ({ key, files: { 'ticket.md': `# Ticket\n\nchange ${key.toLowerCase()}\n`, 'change.diff': diff } }));
+    const dir = path.join(tmp, 'p');
+    const labelsFile = path.join(tmp, 'labels.json');
+    const labels = H.blindPacket(dir, items, { base, labelsFile });
+    assert.deepEqual(Object.keys(labels).sort(), ['B', 'C']);
+    assert.deepEqual(Object.values(labels).sort(), ['item-a', 'item-b']);
+    assert.deepEqual(JSON.parse(fs.readFileSync(labelsFile, 'utf8')), labels);
+    assert.deepEqual(fs.readdirSync(dir).sort(), ['README.md', 'item-a', 'item-b']);
+    assert.deepEqual(fs.readdirSync(path.join(dir, labels.B)).sort(), ['change.diff', 'ticket.md']);
+    assert.equal(fs.readFileSync(path.join(dir, labels.C, 'change.diff'), 'utf8'), diff);
+    const readme = fs.readFileSync(path.join(dir, 'README.md'), 'utf8');
+    for (const s of ['correctness, security, performance, API and data, code, tests, honesty', 'Score each folder 1-5', '`./repo-at-base/`', base]) assert.ok(readme.includes(s), s);
+
+    const leak = path.join(tmp, 'leak');
+    const l2 = path.join(tmp, 'l2.json');
+    assert.throws(() => H.blindPacket(leak, [{ key: 'B', files: { 'change.diff': '+// the traps: sandbox-traps.md\n' } }], { base, labelsFile: l2 }), /blind packet: B change\.diff holds "sandbox-traps"/);
+    assert.equal(fs.existsSync(leak), false);
+    assert.equal(fs.existsSync(l2), false);
+    const inside = path.join(tmp, 'in');
+    assert.throws(() => H.blindPacket(inside, items, { base, labelsFile: path.join(inside, 'labels.json') }), /the labels file must lie outside/);
+    assert.equal(fs.existsSync(inside), false);
+    assert.throws(() => H.blindPacket(path.join(tmp, 'big'), [{ key: 'B', files: { 'change.diff': 'x'.repeat(1024 * 1024 + 1) } }], { base, labelsFile: path.join(tmp, 'l3.json') }),
+      /diff too big for blind scoring/);
+    assert.equal(fs.existsSync(path.join(tmp, 'big')), false);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+// eval-phase --packet keeps working through blindPacket: a transcript's worktree path and ticket id are anonymised, a
+// tool named get_feedback stays; a transcript naming the answer key throws, nothing written.
+test('writePacket: <root>/tbhome/worktrees/t_1a2b3c → <tmp>/tbhome/worktrees/<ticket>, get_feedback kept; test/golden/ in the transcript throws', () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'tbr-')));
+  try {
+    const e1 = E.loadCase('E1');
+    const use = (input) => ({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'get_feedback', input }] } });
+    const run = (evs) => [{ key: 'E1', text: e1.ticket, diff: fs.readFileSync(e1.commits[0], 'utf8'), result: e1.example, runs: [{ n: 1, evs }] }];
+    const evs = [use({ file_path: `${root}/tbhome/worktrees/t_1a2b3c/src/x.ts` })];
+    const env = { root, base: 'b2'.repeat(20) };
+    const dir = path.join(root, 'packet');
+    const labels = E.writePacket(dir, env, run(evs));
+    assert.deepEqual(labels, { E1: 'review-a' });
+    const t = fs.readFileSync(path.join(dir, 'review-a', 'transcript.md'), 'utf8');
+    assert.ok(t.includes('<tmp>/tbhome/worktrees/<ticket>/src/x.ts'), t);
+    assert.ok(t.includes('**tool get_feedback:**'), t);
+    assert.equal(t.includes('t_1a2b3c'), false);
+    assert.equal(t.includes(root), false);
+
+    const dir2 = path.join(root, 'packet2');
+    assert.throws(() => E.writePacket(dir2, env, run([...evs, use({ command: 'cat test/golden/m5/review/E1/case.json' })])), /blind packet: E1 transcript\.md holds "test\/golden"/);
+    assert.equal(fs.existsSync(dir2), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });

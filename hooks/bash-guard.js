@@ -9,8 +9,9 @@
 // (S2 belt). S3: no RegExp is built from agent text; main() denies a check that runs past 3 s (fail closed, io.run).
 // P5 (D5, RO2): in working, no npx / npm exec / pnpm dlx / yarn dlx: they fetch and run a package outside the lockfile
 // (a dependency is Irfan's call: NEEDS_SCOPE with packages); local tools run as ./node_modules/.bin/<tool> or npm scripts.
-// D-0107 (SEC-6): final_gate's git reads as planning's does (J16's git rules: `git log --output=x` wrote a file in a phase
-// that only reads; --ext-diff / --textconv / -c ran programs); not its redirect or export rules.
+// D-0107 (SEC-6) + H1: every read-only phase (RO: planning, final_gate, review, context) gets planning's rules whole:
+// J16's git rules (`git log --output=x` wrote a file in a phase that only reads; --ext-diff / --textconv / -c ran
+// programs), the redirect rule and the export / GIT_* rule (guard()).
 // M5 C7 (D-0087): in qa and final_gate, no dropdb, no DROP DATABASE / SCHEMA (SQL /*…*/ and -- comments read as space),
 // no psql TRUNCATE and no postgres-irfan-axi with --yes (its confirmed writes), case-insensitive, read with quotes and
 // backslashes taken out (`--y''es`). A line naming a DB tool with a shell expansion ($x, ${…}, $(…), $'…', `…`, an
@@ -264,8 +265,8 @@ function denyWhy(w, env = false) {
   return null;
 }
 
-// J16: why a planning (or final_gate: D-0107) run's simple command may not run (git with a write/exec option, or env vars
-// in front), else null. ro: the phase.
+// J16: why a read-only phase's (RO) simple command may not run (git with a write/exec option, or env vars in front), else
+// null. ro: the phase.
 function planGitWhy(w, env, ro) {
   if (base(w[0] ?? '') !== 'git') return null;
   const who = WHO[ro];
@@ -280,7 +281,7 @@ function planGitWhy(w, env, ro) {
 const pin = (seg, flag, want, to) => (seg.match(flag) ? seg.replace(flag, want) : `${seg.slice(0, to)} ${want}${seg.slice(to)}`);
 
 // Walks the simple commands of cmd (and one level of `sh -c '…'` text per depth) → {heavy, deny, out: cmd with worker pins}.
-// ro ('planning' | 'final_gate'): J16's git rules apply too. Redirects (and the S2 redirect rule): redirects().
+// ro (a read-only phase, RO): J16's git rules apply too. Redirects (and the S2 redirect rule): redirects().
 function scan(cmd, heavy, depth = 0, ro = '', working = false) {
   let isHeavy = false;
   let why = null;

@@ -258,3 +258,117 @@ test('code copy for the harness tbd: has what tbd needs, none of the answer key'
     assert.deepEqual(all.filter((f) => /golden|\.omc|sandbox-traps|n1\.e2e/.test(f)), []);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
+
+// ---- R box (.omc/handoffs/r-build.md R-A): --stop close, clone seed, --packet, --json, --blind ----------------------
+const H = require('../scripts/harness');
+const { REPO } = require('./helpers/tbd');
+const gitOut = (...a) => execFileSync('/usr/bin/git', a, { encoding: 'utf8' }).trim();
+const CLOSE = { stop: 'close', state: 'final_gate', waiting: { reason: 'close' } };
+
+test('G1 --stop close: check 0 holds at final_gate waiting close (B, C); live() runs through review, qa, final_gate until it waits close; a close run stopped in qa, review or blocked fails check 0', () => {
+  const b = G.checksB(factsB(CLOSE));
+  assert.match(b[0].name, /reached final_gate waiting close/);
+  assert.deepEqual(failed(b), []);
+  assert.equal(G.checksC(factsC(CLOSE))[0].ok, true);
+  for (const state of ['plan_approval', 'working', 'review', 'qa', 'final_gate']) assert.equal(G.live({ state }, 'close'), true, state);
+  for (const t of [{ state: 'final_gate', waiting: { reason: 'close' } }, { state: 'blocked' }, { state: 'clarify' }, { state: 'cancelled' }, { state: 'plan_approval', waiting: { reason: 'setup_failed' } }]) {
+    assert.equal(G.live(t, 'close'), false, JSON.stringify(t));
+  }
+  for (const f of [{ state: 'qa' }, { state: 'review' }, { state: 'blocked', waiting: { reason: 'qa' } }, { state: 'final_gate', waiting: null }]) {
+    assert.equal(G.checksB(factsB({ stop: 'close', ...f }))[0].ok, false, f.state);
+    assert.equal(G.checksC(factsC({ stop: 'close', ...f }))[0].ok, false, f.state);
+  }
+});
+
+test('G3 --packet: a run whose change is the real b.patch passes the leak scan; the packet = README + ticket.md + change.diff, no plan, phase output, transcript or ticket id; a diff carrying the harness root is refused, nothing written', (t) => {
+  const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'tbg3-')));
+  t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
+  const r = { key: 'B', i: 1, id: 't_abc123', scored: true, contaminated: [], text: "GET /users should include each user's latest order.", change: fs.readFileSync(path.join(FIX, 'b.patch'), 'utf8'),
+    plan: 'plan-b.json', checks: G.checksB(factsB(CLOSE)), ticket: { id: 't_abc123', ...CLOSE }, runs: [{ n: 1, result: { structured_output: { verdict: 'pass' } } }], notes: ['t_abc123 seeded'] };
+  const p = path.join(tmp, 'p');
+  const labels = G.packetOf(p, [r, { ...r, key: 'C-empty', scored: false, change: undefined }], { base: 'a'.repeat(40), labelsFile: path.join(tmp, 'l.json') });
+  assert.deepEqual(labels, { 'golden:B#1': 'item-a' });
+  assert.deepEqual(fs.readdirSync(p, { recursive: true }).sort(), ['README.md', 'item-a', 'item-a/change.diff', 'item-a/ticket.md']);
+  assert.deepEqual([fs.readFileSync(path.join(p, 'item-a', 'ticket.md'), 'utf8'), fs.readFileSync(path.join(p, 'item-a', 'change.diff'), 'utf8')], [`${r.text}\n`, r.change]);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(tmp, 'l.json'), 'utf8')), labels);
+  assert.equal(['README.md', 'item-a/ticket.md', 'item-a/change.diff'].some((f) => fs.readFileSync(path.join(p, f), 'utf8').includes('t_abc123')), false);
+  const root = path.join(fs.realpathSync(os.tmpdir()), 'tbg-a1b2c3');
+  assert.throws(() => G.packetOf(path.join(tmp, 'q'), [{ ...r, change: `${r.change}+// ${root}/tbhome/worktrees/t_abc123/src/x.ts\n` }], { base: 'a'.repeat(40), labelsFile: path.join(tmp, 'l2.json') }), /holds/);
+  assert.deepEqual([fs.existsSync(path.join(tmp, 'q')), fs.existsSync(path.join(tmp, 'l2.json'))], [false, false]);
+});
+
+test('G4 --json: fake results → score JSON v1 (golden:B, stop final_gate:close, integer cost_micro); 2 reviews merge by label to the lower score, a spread of 2+ asks for a 3rd; an unknown label or a score of 6 is refused', () => {
+  const meta = { commit: 'c'.repeat(40), sandbox_base: 'a'.repeat(40), mode: 'dry', at: '2026-10-16T00:00:00.000Z' };
+  const r = { key: 'B', i: 1, checks: G.checksB(factsB(CLOSE)), contaminated: [], min: 22, ticket: { ...CLOSE, fixes: 0, rework: 0 }, runs: [{ metric: { cost_delta: 1100000 } }, { metric: { cost_delta: 2000000 } }] };
+  assert.deepEqual(G.scoreOf([r], meta), { v: 1, kind: 'golden-score', ...meta, sources: ['golden-working'],
+    cases: [{ id: 'golden:B', run: 1, stop: 'final_gate:close', checks: { pass: 8, total: 8 }, contaminated: false, fix_rounds: 0, rework: 0, cost_micro: 3100000, min: 22, blind: null }], pass: true });
+  const labels = { 'golden:B#1': 'item-b', 'golden:C#1': 'item-a' };
+  const rv = (b, c) => ({ items: [{ label: 'item-a', score: c, agree: [], wrong: [], missing: [], why: '-' }, { label: 'item-b', score: b, agree: [], wrong: [], missing: [], why: '-' }] });
+  const m = G.blindMerge(labels, [rv(5, 4), rv(4, 2)]);
+  assert.deepEqual(m, { scores: { 'golden:B#1': [5, 4], 'golden:C#1': [4, 2] }, third: ['golden:C#1'] });
+  const blind = H.scoreJson([{ ...r, id: 'golden:B', run: 1, stop: 'final_gate:close', cost_micro: 0, blind: { scores: m.scores['golden:B#1'] } }], meta).cases[0].blind;
+  assert.deepEqual(blind, { scores: [5, 4], score: 4, pass: true });
+  assert.throws(() => G.blindMerge(labels, [{ items: [{ label: 'item-z', score: 4 }] }]), /label "item-z" unknown/);
+  assert.throws(() => G.blindMerge(labels, [rv(6, 4)]), /score 6 is not an integer 1-5/);
+});
+
+test('G5 --blind reviewer, built not spawned: argv = -p + spawn\'s isolation flags; denyRead holds this repo, the labels\' and scores\' dirs, the packet, the run root; cwd = the reviewer dir, outside them; a reviewer dir in a denied dir throws before anything is built', (t) => {
+  const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'tbg5-')));
+  t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
+  const [lab, sco, packet, runRoot, dir] = ['lab', 'sco', 'p', 'run', 'rev'].map((d) => { fs.mkdirSync(path.join(tmp, d)); return path.join(tmp, d); });
+  const deny = G.blindDeny({ labels: path.join(lab, 'l.json'), scores: path.join(sco, 's.json'), packet, runRoot });
+  const r = G.reviewer({ dir, box: path.join(tmp, 'box'), deny, port: 4999 });
+  const pair = (a, b) => r.argv.some((x, i) => x === a && r.argv[i + 1] === b);
+  assert.equal(r.argv[0], '-p');
+  for (const [a, b] of [['--setting-sources', 'project'], ['--permission-mode', 'dontAsk'], ['--disallowedTools', 'Agent'], ['--model', 'opus']]) assert.ok(pair(a, b), `${a} ${b}`);
+  assert.ok(r.argv.includes('--strict-mcp-config'));
+  const denied = r.settings.sandbox.filesystem.denyRead;
+  for (const d of [REPO, lab, sco, packet, runRoot]) assert.ok(denied.includes(d) && r.settings.permissions.deny.includes(`Read(/${d}/**)`), d);
+  assert.equal(r.cwd, dir);
+  assert.equal(denied.some((d) => dir === d || dir.startsWith(d + path.sep)), false);
+  assert.equal(r.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY, '1');
+  assert.deepEqual([r.env.TB_PHASE, r.env.GIT_TERMINAL_PROMPT], ['review', '0'], 'bash-guard read-only git + spawn\'s git env');
+  fs.mkdirSync(path.join(packet, 'rev'));
+  assert.throws(() => G.reviewer({ dir: path.join(packet, 'rev'), box: path.join(tmp, 'box2'), deny, port: 4999 }), /lies in denied/);
+  assert.equal(fs.existsSync(path.join(tmp, 'box2')), false);
+  const o = G.parse(['--blind', '/p', '--labels', '/l.json', '--scores', '/s.json', '--json', '/o.json']);
+  assert.deepEqual([o.blind, o.labels, o.scores, o.json], ['/p', '/l.json', '/s.json', '/o.json']);
+  assert.throws(() => G.parse(['--blind', '/p', '--labels', '/l.json', '--json', '/o.json']), /--blind needs --labels, --scores and --json/);
+  assert.throws(() => G.parse(['--dry', '--blind', '/p', '--labels', '/l', '--scores', '/s', '--json', '/o']), /no --dry or --real/);
+});
+
+test('G6 seed after H: the ticket gets its own clone (clone {config}, git_dir = <wt>/.git, no linked worktree) and refs/tb/<id>/base = base in tb-sandbox; cleanup refuses a dir outside TB_HOME/worktrees or a non-harness id', async (t) => {
+  const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'tbg6-')));
+  const tbHome = path.join(tmp, 'tbhome');
+  const base = gitOut('-C', SANDBOX, 'rev-parse', 'main');
+  const commonDir = fs.realpathSync(gitOut('-C', SANDBOX, 'rev-parse', '--path-format=absolute', '--git-common-dir'));
+  const s = await G.seed({ tbHome, base, commonDir }, plan('plan-b.json'), "GET /users should include each user's latest order.");
+  t.after(() => {
+    execFileSync('/usr/bin/git', ['-C', SANDBOX, 'update-ref', '-d', `refs/tb/${s.id}/base`]);
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+  const tk = JSON.parse(fs.readFileSync(path.join(s.dir, 'ticket.json'), 'utf8'));
+  assert.deepEqual([tk.state, tk.worktree, tk.git_dir, tk.common_dir, tk.base_sha], ['plan_approval', s.wt, path.join(s.wt, '.git'), commonDir, base]);
+  assert.match(tk.clone?.config ?? '', /^[0-9a-f]{64}$/);
+  assert.deepEqual([gitOut('-C', SANDBOX, 'rev-parse', `refs/tb/${s.id}/base`), gitOut('-C', s.wt, 'rev-parse', 'HEAD')], [base, base]);
+  assert.equal(gitOut('-C', SANDBOX, 'worktree', 'list', '--porcelain').includes(s.wt), false, 'a clone, not git worktree add');
+  assert.throws(() => G.cleanSandbox(s.id, path.join(tmp, s.id), tbHome), /not TB_HOME\/worktrees/);
+  assert.throws(() => G.cleanSandbox('t_zzzzzz', s.wt, tbHome), /not a harness ticket id/);
+  assert.equal(fs.existsSync(s.wt), true, 'left alone');
+});
+
+test('G7 no --stop: review mode as today (parse sets no stop, the phases copy drops code/review/prompt.md, no qa port, live() stops at review); --stop close keeps every phase prompt; bad --stop, --cap-min or a --packet without close are refused', (t) => {
+  const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'tbg7-')));
+  t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
+  assert.equal('stop' in G.parse(['--dry']), false);
+  const d = G.phasesCopy(path.join(tmp, 'a'), 'working under test\n');
+  assert.deepEqual([fs.existsSync(path.join(d, 'code', 'review', 'prompt.md')), fs.readFileSync(path.join(d, 'code', 'working', 'prompt.md'), 'utf8')], [false, 'working under test\n']);
+  assert.equal('qa_ports' in G.goldenTag('/r'), false);
+  assert.deepEqual([G.live({ state: 'working' }), G.live({ state: 'review' })], [true, false]);
+  const c = G.phasesCopy(path.join(tmp, 'b'), 'x', 'close');
+  for (const ph of ['review', 'qa', 'final_gate']) assert.equal(fs.existsSync(path.join(c, 'code', ph, 'prompt.md')), true, ph);
+  assert.deepEqual(G.goldenTag('/r', 4123).qa_ports, [4123]);
+  assert.throws(() => G.parse(['--dry', '--stop', 'qa']), /--stop: review or close/);
+  assert.throws(() => G.parse(['--dry', '--stop', 'close', '--cap-min', '481']), /--cap-min: 1 to 480/);
+  assert.throws(() => G.parse(['--dry', '--packet', '/tmp/p']), /--packet needs --stop close/);
+});

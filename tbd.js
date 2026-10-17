@@ -68,6 +68,7 @@ async function stop(code = 0) {
   server.close();
   server.closeAllConnections();
   await working.stop(); // gate jobs aborted (shutdown) + killed: their gates run again after the restart
+  await require('./lib/push').stop(); // push / leak-check groups killed: the next boot marks the push failed
   await runner?.stop(); // runs keep going: the next tbd re-attaches them
   await slots?.stop();
   await store.flush();

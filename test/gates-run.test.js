@@ -43,9 +43,11 @@ test('K5 deny globs → SBPL regex: * one part, ** any depth (zero too), [class]
 });
 
 // M5.3: lib/final.js (the final gate's decisions, squash, close) loads at boot too and never requires lib/gates
-test('RAM: no lib/gates module is loaded by what tbd requires at boot (working, final, planning, runner, doctor, metrics, monitor, tbx)', () => {
+// R: the list = every lib module tbd.js requires at boot (push in boot(); recovery, spawn, tbx come in through runner)
+test('RAM: no lib/gates module is loaded by what tbd requires at boot (every lib module tbd.js requires at boot)', () => {
   const REPO = path.join(__dirname, '..');
-  const code = `for (const m of ['store', 'working', 'final', 'planning', 'runner', 'doctor', 'metrics', 'monitor', 'tbx', 'slots']) require('./lib/' + m);
+  const code = `for (const m of ['store', 'http', 'notify', 'monitor', 'doctor', 'slots', 'runner', 'planning', 'working', 'review', 'qa', 'final', 'pass',
+      'interview', 'lanes', 'metrics', 'push', 'recovery', 'spawn', 'tbx']) require('./lib/' + m);
     process.stdout.write(String(Object.keys(require.cache).filter((k) => k.includes('/lib/gates/')).length));`;
   const env = { ...process.env, TB_HOME: path.join(require('node:os').tmpdir(), 'gates-run-no-home') };
   assert.equal(execFileSync(process.execPath, ['-e', code], { cwd: REPO, env, encoding: 'utf8' }), '0');

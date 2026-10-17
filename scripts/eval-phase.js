@@ -11,6 +11,8 @@
 // our worktree).
 // Usage: node scripts/eval-phase.js (--fake | --real) [--cases E1,E2,E3] [--model <m> [--effort <e>]] [--prompt <md>]
 //   [--claude <bin>] [--keep] [--out <md>] [--packet <dir>] [--no-ram-wait]
+//   --cases E4 (review only, D-0110): final_gate E2's IDOR diff; HIGH or CRIT both block, the report shows the label.
+//     Never in the default (E1-E3, as before).
 //   --real: claude_bin = the pinned version; tbd keeps the real HOME (claude's keychain login); TB_HOME is temp. Model =
 //     config default models.review (production) unless --model. --fake: test/fake-claude.js answers each case's example.
 //   --no-ram-wait (--real; Irfan 2026-10-13): this eval's temp TB_HOME admits every run at once, as --fake does (no
@@ -38,29 +40,29 @@
 // Exit 0 = every case clean and every scripted check passed.
 const crypto = require('node:crypto');
 const fs = require('node:fs');
-const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
-const { execFileSync, spawn } = require('node:child_process');
+const { execFileSync } = require('node:child_process');
 const { startTbd, runTb, REPO, TBD } = require('../test/helpers/tbd');
 const { FAKE, RUN_SPY } = require('../test/helpers/runs');
 const { DEFAULT_PIN, cloneAt, cloneConfig } = require('../lib/util');
 const { SANDBOX, arr, sleep, readJson, write, git, events, runNs, runInfo, metricLines, ticketOf, reapRuns, chk, fence, details, usd, costOf, cell } = require('./eval-planner');
 const { codeCopy, freshPath, guardHome, contamination } = require('./golden-working');
+const { memLevel, freePort, FAKE_APP, fakeExec, fakeDocs, hold, killIn, cleanup, blindPacket } = require('./harness');
 const { configBaseline } = require('../lib/spawn');
 
 const PHASES = ['review', 'qa', 'final_gate'];
 const MILESTONE = { review: 1, qa: 2, final_gate: 3 };
 const FILES = { review: 'review', qa: 'qa', final_gate: 'final' }; // the dir of the phase's result files (NN.json)
 const NEXT = { review: 'qa', qa: 'final_gate' }; // where a pass goes: unbuilt in the eval's phases copy (final_gate: done is Irfan's)
-const CASES = ['E1', 'E2', 'E3'];
+const CASES = ['E1', 'E2', 'E3']; // every phase; the default --cases
+const CASES_OF = { review: [...CASES, 'E4'], qa: CASES, final_gate: CASES }; // review E4 (D-0110): final_gate E2's IDOR, only when named
 const ARROW = String.fromCodePoint(0x2192);
 const DIFF_MAX = 64 * 1024;
 const SETUP = ['ci', '--prefer-offline']; // the golden tag's setup (scripts/golden-working.js goldenTag)
 const QA_PORT = 50461; // final_gate: the port in the seeded QA recs (no app runs)
 const EVIDENCE = '## Evidence (captured by tbd)';
 const iso = () => new Date().toISOString();
-const memLevel = () => Number(execFileSync('/usr/sbin/sysctl', ['-n', 'kern.memorystatus_level'], { encoding: 'utf8' }).trim());
 // plan_hash as approve sets it (lib/planning.js canon: keys sorted at every level; not required here: it loads lib/store)
 const canon = (v) => (Array.isArray(v) ? `[${v.map(canon).join(',')}]`
   : v && typeof v === 'object' ? `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canon(v[k])}`).join(',')}}` : JSON.stringify(v));
@@ -69,6 +71,7 @@ const readText = (f) => (fs.existsSync(f) ? fs.readFileSync(f, 'utf8') : null);
 
 // a phase's case.json with its plan + patch paths resolved (relative to the case dir); final_gate: + the QA report text
 function caseOf(phase, key) {
+  if (!CASES_OF[phase]?.includes(key)) throw new Error(`no ${phase} case ${key}: pick from ${CASES_OF[phase]?.join(',') ?? '-'}`);
   const dir = path.join(REPO, 'test', 'golden', 'm5', phase, key);
   const c = JSON.parse(fs.readFileSync(path.join(dir, 'case.json'), 'utf8'));
   return { ...c, key, plan: JSON.parse(fs.readFileSync(path.join(dir, c.plan), 'utf8')), commits: c.commits.map((p) => path.join(dir, p)),
@@ -227,9 +230,6 @@ function scoreFinal(c, r) {
 }
 
 // ---- one case -----------------------------------------------------------------------------------------------------
-const freePort = () => new Promise((resolve, reject) => {
-  const s = net.createServer().once('error', reject).listen(0, '127.0.0.1', () => { const { port } = /** @type {any} */ (s.address()); s.close(() => resolve(port)); });
-});
 const gitc = (wt, ...args) => git(wt, '-c', 'user.name=eval', '-c', 'user.email=eval@localhost', '-c', 'commit.gpgsign=false', ...args);
 
 // A worktree of tb-sandbox at base + the case's commits (messages as the sessions would write them) + the ticket as
@@ -304,64 +304,6 @@ function seedQa(env, c, id, dir, head, now) {
 
 // a run's last structured output (its result event), refused or not
 const outputOf = (evs) => evs.findLast((m) => m.type === 'result')?.structured_output ?? null;
-
-// --fake qa: the agent's tool work as one exec step (pattern test/qa.test.js qaExec): the report written where the example
-// says; then, when the case has fake routes, the fixture app on the qa port (a child of the step's shell: under the run
-// root) answers them, tbx req calls each in order (rec 1.1, 1.2, ...; the first retried while tbd does not know the run
-// key yet), the app stops.
-const FAKE_APP = `const fs = require('node:fs');
-const [port, routes, ready] = process.argv.slice(2);
-const map = new Map(JSON.parse(fs.readFileSync(routes, 'utf8')).map(([u, s, b]) => [u, [s, b]]));
-require('node:http').createServer((q, r) => { const [s, b] = map.get(q.url) ?? [404, { message: 'not found' }]; r.writeHead(s, { 'content-type': 'application/json' }).end(JSON.stringify(b)); })
-  .listen(Number(port), '127.0.0.1', () => fs.writeFileSync(ready, ''));
-`;
-function fakeExec(env, c) {
-  const f = (ext) => path.join(env.root, `fake-${c.key}.${ext}`);
-  write(f('json'), arr(c.fake));
-  write(f('md'), `# QA ${c.key} (fake)\n\n\`\`\`mermaid\nflowchart LR\n  A[cases] --> B[tbx req]\n\`\`\`\n\n**Verdict:** ${String(c.example.verdict).toUpperCase()}\n`);
-  const req = (u) => `tbx req GET 'http://127.0.0.1:${env.port}${u}'`;
-  const [first, ...rest] = arr(c.fake).map(([u]) => u);
-  write(f('sh'), [`mkdir -p '${path.dirname(c.example.report)}'`, `cp '${f('md')}' '${c.example.report}'`, ...(first ? [
-    `ready='${f('ready')}'; out='${f('out')}'`,
-    `'${process.execPath}' '${env.app}' ${env.port} '${f('json')}' "$ready" & srv=$!`,
-    'i=0; while [ ! -f "$ready" ] && [ $i -lt 200 ]; do i=$((i+1)); sleep 0.05; done',
-    `i=0; while ! ${req(first)} > "$out" 2>&1 && grep -q 'unknown run key' "$out" && [ $i -lt 100 ]; do i=$((i+1)); sleep 0.1; done`,
-    ...rest.map((u) => `${req(u)} >> "$out" 2>&1`), 'kill $srv'] : [])].join('\n') + '\n');
-  return { exec: ['/bin/sh', f('sh')] };
-}
-
-// --fake final_gate: the agent's tool work as one exec step: the case's two docs written where its example says
-function fakeDocs(env, c) {
-  const f = (k) => path.join(env.root, `fake-${c.key}-${k}.md`);
-  write(f('verdict'), c.docs.verdict);
-  write(f('verification'), c.docs.verification);
-  const { verdict_doc: v, verification_doc: w } = c.example;
-  return { exec: ['/bin/sh', '-c', `mkdir -p '${path.dirname(v)}' '${path.dirname(w)}' && cp '${f('verdict')}' '${v}' && cp '${f('verification')}' '${w}'`] };
-}
-
-// a listener on port that no run started (port_held): the app cannot bind there and tbx req refuses it
-function hold(port) {
-  const p = spawn(process.execPath, ['-e', `require('node:net').createServer((s) => s.destroy()).listen(${port}, '127.0.0.1', () => console.log('up'))`], { stdio: ['ignore', 'pipe', 'ignore'] });
-  return new Promise((resolve, reject) => {
-    p.stdout.once('data', () => resolve(p));
-    p.once('exit', (code) => reject(new Error(`port holder on ${port} exited ${code}`)));
-  });
-}
-
-// Processes left with their cwd in dir (the app a QA run started in the background, its npm or tsx): SIGKILL. lsof lists
-// every process's cwd; only ours lie in the temp worktree. → the pids
-function killIn(dir) {
-  let out = '';
-  try { out = execFileSync('/usr/sbin/lsof', ['-d', 'cwd', '-Fpn'], { encoding: 'utf8', timeout: 30_000, stdio: ['ignore', 'pipe', 'ignore'] }); } catch (e) { out = String(e.stdout ?? ''); } // exit 1: some pids unreadable
-  const hit = [];
-  let pid = 0;
-  for (const l of out.split('\n')) {
-    if (l[0] === 'p') pid = Number(l.slice(1));
-    else if (l[0] === 'n' && (l.slice(1) === dir || l.startsWith(`n${dir}${path.sep}`)) && pid !== process.pid) hit.push(pid);
-  }
-  for (const p of hit) try { process.kill(p, 'SIGKILL'); } catch { /* gone */ }
-  return hit;
-}
 
 // rec lines of the ticket's QA runs (runs/<n>.rec.jsonl whose meta line names this ticket and phase qa)
 const recsOf = (dir, id) => (fs.existsSync(path.join(dir, 'runs')) ? fs.readdirSync(path.join(dir, 'runs')) : []).filter((f) => /^\d+\.rec\.jsonl$/.test(f))
@@ -487,18 +429,6 @@ async function runCase(o, env, c) {
   return r;
 }
 
-// only our own worktree goes (review, qa: detached; final_gate: + its branch tb/<id>-eval and refs/tb/<id>/*, the
-// squash's final-pre-<n>); never main, never another ticket's
-function cleanup(wt, branch = null, id = null) {
-  const say = (what, e) => console.log(`eval: ${what}: ${String(e.stderr || e.message).trim().slice(0, 200)}`);
-  try { fs.rmSync(wt, { recursive: true, force: true }); } catch (e) { say(`remove ${wt}`, e); } // a clone (H2), not a linked worktree
-  if (!branch) return;
-  if (git(SANDBOX, 'branch', '--list', branch).trim()) try { git(SANDBOX, 'branch', '-D', branch); } catch (e) { say(`branch -D ${branch}`, e); }
-  for (const ref of git(SANDBOX, 'for-each-ref', '--format=%(refname)', `refs/tb/${id}/`).split('\n').filter(Boolean)) {
-    try { git(SANDBOX, 'update-ref', '-d', ref); } catch (e) { say(`update-ref -d ${ref}`, e); }
-  }
-}
-
 // ---- report + blind packet ----------------------------------------------------------------------------------------
 const MERMAID = {
   review: ['```mermaid', 'flowchart LR',
@@ -596,42 +526,27 @@ function transcript(evs) {
 }
 
 // D-0069 blind input: ticket + plan + diff (+ round 2: the earlier review and the delta) + the review and its run, under
-// shuffled neutral labels; no case names, expectations, scripted checks or model. → {E<n>: label}
+// shuffled neutral labels (harness.js blindPacket: anon, then the leak scan); no case names, expectations, scripted checks
+// or model. → {E<n>: label}
 function writePacket(dir, env, results) {
-  const labels = {};
-  const order = results.map((r) => [crypto.randomInt(2 ** 32), r.key]).sort((a, b) => a[0] - b[0]).map((x) => x[1]); // shuffled
-  const anon = (s) => String(s).replaceAll(env.root, '<tmp>').replaceAll(os.homedir(), '~');
-  order.forEach((key, i) => {
-    const r = results.find((x) => x.key === key);
-    const c = loadCase(key);
-    const label = `review-${String.fromCharCode(97 + i)}`;
-    labels[key] = label;
-    const d = path.join(dir, label);
-    const runs = arr(r.runs);
-    write(path.join(d, 'ticket.md'), `# Ticket\n\n${r.text}\n`);
-    write(path.join(d, 'plan.json'), c.plan);
-    write(path.join(d, 'change.diff'), r.diff ?? '');
-    if (c.prior) {
-      write(path.join(d, 'earlier-review.json'), c.prior.review);
-      write(path.join(d, 'since-earlier-review.diff'), r.delta ?? '');
-    }
-    write(path.join(d, 'review.json'), r.result ?? { none: 'no result' });
-    write(path.join(d, 'transcript.md'), anon(runs.map((x) => `# run ${x.n}\n\n${transcript(x.evs)}`).join('\n\n')) + '\n');
-  });
-  write(path.join(dir, 'README.md'), [`# Review packet (${env.date})`, '',
+  return blindPacket(dir, results.map((r) => {
+    const c = loadCase(r.key);
+    return { key: r.key, files: {
+      'ticket.md': `# Ticket\n\n${r.text}\n`, 'plan.json': c.plan, 'change.diff': r.diff ?? '',
+      ...(c.prior && { 'earlier-review.json': c.prior.review, 'since-earlier-review.diff': r.delta ?? '' }),
+      'review.json': r.result ?? { none: 'no result' },
+      'transcript.md': arr(r.runs).map((x) => `# run ${x.n}\n\n${transcript(x.evs)}`).join('\n\n') + '\n',
+    } };
+  }), { base: env.base, root: env.root, prefix: 'review', archive: '~/Documents/tb-sandbox', intro: [
     'Each folder holds one code review made by an automated reviewer: the ticket, its plan, the change (`change.diff`),',
-    'the review result (`review.json`: verdict, findings, closed, notes, declined) and the reviewer\'s session (`transcript.md`).',
-    'A folder with `earlier-review.json` is a second-round review: `since-earlier-review.diff` is what changed after the earlier review.', '',
-    `Target repo: \`~/Documents/tb-sandbox\` at commit \`${env.base}\` (\`git -C ~/Documents/tb-sandbox show ${env.base.slice(0, 12)}:<path>\`).`, '',
-    'Score each review 1-5 (5 = a senior reviewer would sign it as is), from the ticket, plan, diff and repo only, through these lenses:',
-    'correctness, security, performance, API and data, code, tests, honesty (no invented or missed problems, severity fits the harm).',
-    'Write per folder: score, the findings you agree with, any you think are wrong or missing, one line why.', '',
-    '```mermaid', 'flowchart LR', '  T[ticket + plan] --> D[change.diff]', '  D --> R[review.json + transcript.md]', '  R --> S[your 1-5 score]', '```', ''].join('\n'));
-  return labels;
+    'the review result (`review.json`: findings, closed, notes, declined) and the reviewer\'s session (`transcript.md`).',
+    'A folder with `earlier-review.json` is a second-round review: `since-earlier-review.diff` is what changed after the earlier review.',
+    `A file at that commit: \`git -C ~/Documents/tb-sandbox show ${env.base.slice(0, 12)}:<path>\`.`,
+    'Write per folder, beside the score: the findings you agree with, any you think are wrong or missing.'].join('\n') });
 }
 
 // ---- main ---------------------------------------------------------------------------------------------------------
-const USAGE = `usage: node scripts/eval-phase.js (--fake | --real) [--phase ${PHASES.join('|')}] [--cases ${CASES.join(',')}] [--model <m> [--effort <e>]] [--prompt <md>] [--claude <bin>] [--keep] [--out <md>] [--packet <dir>] [--no-ram-wait]`;
+const USAGE = `usage: node scripts/eval-phase.js (--fake | --real) [--phase ${PHASES.join('|')}] [--cases ${CASES.join(',')} (review: ${CASES_OF.review.join(',')})] [--model <m> [--effort <e>]] [--prompt <md>] [--claude <bin>] [--keep] [--out <md>] [--packet <dir>] [--no-ram-wait]`;
 function parse(argv) {
   const o = { fake: null, phase: 'review', cases: CASES, noRamWait: false, model: null, effort: null, prompt: null, claude: null, keep: false, out: null, packet: null };
   for (let i = 0; i < argv.length; i++) {
@@ -647,7 +562,7 @@ function parse(argv) {
   if (o.fake === null) throw new Error(`pick --fake (fake claude) or --real (costs usage)\n${USAGE}`);
   if (!PHASES.includes(o.phase)) throw new Error(`--phase: pick from ${PHASES.join(',')}`);
   if (o.packet && o.phase !== 'review') throw new Error('--packet: the review evals only (D-0069 blind score)');
-  if (!o.cases.length || o.cases.some((k) => !CASES.includes(k))) throw new Error(`--cases: pick from ${CASES.join(',')}`);
+  if (!o.cases.length || o.cases.some((k) => !CASES_OF[o.phase].includes(k))) throw new Error(`--cases: pick from ${CASES_OF[o.phase].join(',')}`);
   if (o.effort && !o.model) throw new Error('--effort needs --model');
   if (o.noRamWait && o.fake) throw new Error('--no-ram-wait: --real only (--fake never waits)');
   if (o.model) o.effort ??= 'high';
@@ -727,7 +642,7 @@ async function main() {
   process.exitCode = ok ? 0 : 1;
 }
 
-module.exports = { CASES, loadCase, caseOf, parseWhere, score, scoreQa, scoreFinal, parse };
+module.exports = { CASES, CASES_OF, loadCase, caseOf, parseWhere, score, scoreQa, scoreFinal, parse, writePacket };
 
 if (require.main === module) {
   main().catch((e) => {

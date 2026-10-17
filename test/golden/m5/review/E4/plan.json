@@ -1,0 +1,43 @@
+{
+  "kind": "plan",
+  "summary": "GET /orders/:id returns one order of the caller. The caller is the X-User-Id header (the shop's auth stub until login lands): no or a bad header answers 401, an unknown order id 404.",
+  "acceptance": [
+    { "id": "A1", "text": "GET /orders/:id with the X-User-Id of the order's owner answers 200 with the order", "type": "new" },
+    { "id": "A2", "text": "GET /orders/:id without X-User-Id, or with one that is not a positive integer, answers 401", "type": "new" },
+    { "id": "A3", "text": "GET /orders/:id for an unknown order id answers 404", "type": "new" },
+    { "id": "A4", "text": "GET /orders?userId= and POST /orders answer as before", "type": "preserve" }
+  ],
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "GET /orders/:id for the caller",
+      "files": ["src/common/caller.guard.ts", "src/orders/orders.controller.ts", "src/orders/orders.service.ts", "test/orders.e2e-spec.ts", "README.md"],
+      "modules": ["src/common", "src/orders", "test"],
+      "blocked_by": [],
+      "acceptance": ["A1", "A2", "A3", "A4"],
+      "type": "new",
+      "test_cmd": "npm run test:e2e -- orders",
+      "steps": [
+        "In test/orders.e2e-spec.ts add \"GET /orders/:id returns the caller's order\", \"GET /orders/:id needs a caller\" and \"GET /orders/:id answers 404 for an unknown order\". They fail now: the route does not exist",
+        "Run npm run test:e2e -- orders: red",
+        "Add src/common/caller.guard.ts: CallerGuard reads X-User-Id (a positive integer) into req.callerId, else 401",
+        "Add GET /orders/:id to OrdersController behind CallerGuard and OrdersService.get (404 when unknown)",
+        "Add the GET /orders/:id row to README.md",
+        "Run npm run test:e2e -- orders: green"
+      ]
+    }
+  ],
+  "allowed_schema_changes": [],
+  "allowed_api_changes": ["GET /orders/:id: new route, header X-User-Id"],
+  "skills": [],
+  "ui": null,
+  "children": [],
+  "facts": [
+    "The shop has no login yet: no route reads a caller today",
+    "src/orders/orders.service.ts: OrdersService.list filters by the query userId",
+    "src/users/users.controller.ts: GET /users/:id parses the id with ParseIntPipe"
+  ],
+  "decisions": [
+    { "id": "D1", "text": "The caller is the X-User-Id header, a positive integer; missing or bad answers 401 (the auth stub until login lands)", "source": "planner" }
+  ]
+}

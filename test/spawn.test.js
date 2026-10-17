@@ -346,3 +346,17 @@ test('M5 C11 G9 finalModel: configured final model kept when it is not review\'s
   assert.deepEqual(spawn.modelFor(cfg({ model: 'opus' }, { model: 'opus', effort: 'xhigh' }), 'final_gate'), { model: 'fable', effort: 'xhigh', fable: true });
   assert.equal(spawn.modelFor(cfg({ model: 'opus' }, { model: 'opus' }), 'final_gate', true).model, 'opus', 'a Fable refusal\'s opus re-run stays opus (U7)');
 });
+
+// start()'s flags that belong to one run, not to its isolation (session, prompts, dirs, model, caps, output): every
+// other flag start() emits must come from isolationArgv too. A list, not derived: start()'s argv marks no flag as
+// isolation (AN1: it stays as is), so a new start() flag fails the test below until it goes in isolationArgv or here.
+const PER_RUN_FLAGS = ['-p', '--session-id', '--resume', '--append-system-prompt-file', '--add-dir', '--model', '--effort', '--fallback-model',
+  '--max-turns', '--json-schema', '--output-format', '--verbose', '--include-partial-messages'];
+test('isolationArgv (golden-working --blind) drifts from start() never: every pair it returns is in start()\'s argv, and every isolation flag start() emits is in it', async () => {
+  const { d } = await run();
+  const iso = spawn.isolationArgv({ settings: d.opts['--settings'], mcp: d.opts['--mcp-config'], tools: d.opts['--tools'].split(',') });
+  const pairs = iso.flatMap((x, i) => (!x.startsWith('--') ? [] : [iso[i + 1]?.startsWith('--') === false ? [x, iso[i + 1]] : [x]]));
+  assert.deepEqual(pairs.map((p) => p[0]), ['--setting-sources', '--settings', '--strict-mcp-config', '--mcp-config', '--tools', '--permission-mode', '--permission-prompts'], 'phase allows Agent: no --disallowedTools');
+  assert.deepEqual(pairs.filter((p) => !d.argv.some((x, i) => x === p[0] && (p.length === 1 || d.argv[i + 1] === p[1]))), []);
+  assert.deepEqual(d.argv.filter((x) => x.startsWith('-') && !PER_RUN_FLAGS.includes(x) && !iso.includes(x)), [], 'start() isolation flag missing from isolationArgv');
+});

@@ -1,0 +1,25 @@
+{
+  "title": "E4 IDOR (any caller reads any order by id): a blocking HIGH or CRIT at the missing owner check, label recorded (D-0110)",
+  "ticket": "Customers need to open one of their own orders: add GET /orders/:id. Until login lands, the caller is the X-User-Id header.",
+  "plan": "plan.json",
+  "commits": ["change.patch"],
+  "expect": {
+    "verdict": "block",
+    "findings": [{
+      "severity": ["HIGH", "CRIT"], "confidence": "high",
+      "where": [{ "path": "src/orders/orders.service.ts", "lines": [19, 23] }, { "path": "src/orders/orders.controller.ts", "lines": [18, 24] }]
+    }]
+  },
+  "example": {
+    "verdict": "block",
+    "findings": [{
+      "id": "F1", "severity": "CRIT", "confidence": "high", "where": "src/orders/orders.controller.ts:22-23",
+      "problem": "GET /orders/:id returns any order to any caller: OrdersController.get passes only the id to OrdersService.get, which loads the order by id and never compares order.userId with req.callerId. CallerGuard authenticates, nothing authorizes (IDOR, OWASP A01).",
+      "failure_scenario": "Caller X-User-Id: 3 sends GET /orders/16, an order of user 4: 200 with user 4's order. Walking ids 1..250 reads every customer's orders.",
+      "fix": "Pass req.callerId to OrdersService.get and load with where {id, userId: callerId} (findFirst), 404 when not found; add an e2e test: another user's order answers 404."
+    }],
+    "closed": [],
+    "notes": ["CallerGuard answers 401 for a missing or non-numeric X-User-Id; the e2e tests cover 200, 401 and 404 for the owner only."],
+    "declined": []
+  }
+}
