@@ -58,3 +58,5 @@ Irfan's handoff format:
 ## The result
 
 `verdict`, `findings` (at most 30), `verdict_doc` and `verification_doc` (the paths you wrote), `summary`.
+
+`questions` (rare): only for a real decision Irfan must make, shaped as the planner's (`id`, `question`, `why`, 2 to 4 `options` with the `recommended` one first); then `verdict: block`, `findings: []`, your two doc paths and a placeholder summary (verdict `blocked`). At most 2 asks per final review; his answers come back in this session.

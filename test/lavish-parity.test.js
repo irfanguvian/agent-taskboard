@@ -25,7 +25,7 @@ const QUESTIONS = {
     { id: 'Q3', question: 'Cursor field?', why: 'clients read it', options: ['x', 'y'], recommended: 'x', topic: 'Paging' }],
 };
 
-test('tb lavish / POST lavish: a planning clarify reopens its page (cli row, tbd opens the url; lavish always NO_OPEN); a working-origin clarify is 409; tb lavish on a non-clarify ticket fails', async (t) => {
+test('tb lavish / POST lavish: a planning clarify reopens its page (cli row, tbd opens the url; lavish always NO_OPEN); a working-origin scope clarify is 409; tb lavish on a non-clarify ticket fails', async (t) => {
   const scn = fs.mkdtempSync(path.join(ROOT, 'scn-'));
   fs.writeFileSync(path.join(scn, '1.json'), JSON.stringify({ steps: [{ result: { structured_output: QUESTIONS } }] }));
   for (const n of [2, 3, 4]) fs.writeFileSync(path.join(scn, `${n}.json`), JSON.stringify({ steps: [{ hang: true }] }));
@@ -37,7 +37,8 @@ test('tb lavish / POST lavish: a planning clarify reopens its page (cli row, tbd
   const tbd = await startTbd({
     root: fs.mkdtempSync(path.join(ROOT, 'tbd-')),
     files: { 'config.json': cfg,      'tickets/t_int001/ticket.json': ticket('t_int001', {}),
-      'tickets/t_work01/ticket.json': ticket('t_work01', { state: 'clarify', clarify_origin: { phase: 'working', task: 'T1', why: 'q', class: 'NEEDS_CONTEXT' } }),
+      // full-access-runs Phase 5 (contract change; was class NEEDS_CONTEXT): a text ask now has a page; a scope ask still has none
+      'tickets/t_work01/ticket.json': ticket('t_work01', { state: 'clarify', clarify_origin: { phase: 'working', task: 'T1', why: 'q', class: 'scope' } }),
       'tickets/t_back01/ticket.json': ticket('t_back01', { state: 'backlog' }) },
     env: { TB_PHASES_DIR: PHASES, NODE_OPTIONS: `${RUN_SPY} ${OPENER}`, TEST_REAL_HANDLERS: '1', FAKE_CLAUDE_SCENARIO_DIR: scn },
   });

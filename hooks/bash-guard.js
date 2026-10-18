@@ -31,7 +31,8 @@ const { run, deny } = require('./io');
 const { MUTATING } = require('../lib/verbs');
 
 const VERBS = MUTATING.join('|');
-const SSH = /(^|[^\w.-])(\.ssh(?![\w-])|(ssh|scp|sftp|ssh-add|ssh-agent|ssh-keygen)(?=[\s:]|$))|git_ssh|sshcommand/i; // ssh: (ssh://)
+// the ssh tools only as a command word (segment start, quote, VAR=x, or after a wrapper / xargs): `grep -rn ssh` passes
+const SSH = /(^|[^\w.-])\.ssh(?![\w-])|git_ssh|sshcommand|\bssh:\/\/|(^|[;&|(\n`'"]|\b(env|command|exec|nohup|timeout|nice|time|xargs|rtk)\s(\S+\s+)*?)\s*(\w+=\S*\s+)*(ssh|scp|sftp|ssh-add|ssh-agent|ssh-keygen)(?=[\s:'"`)]|$)/i;
 const SSH_WHY = 'board runs never use ssh, scp or ssh keys (Irfan); work through the files in your worktree';
 const ENV_WHY = 'board runs read no .env file outside this worktree (Irfan); use only the env files the tag copied in';
 // a word naming a .env file outside the run's dir (cwd: the hook input's)

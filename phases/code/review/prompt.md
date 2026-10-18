@@ -54,3 +54,4 @@ Never drop one silently: tbd refuses the result. Review the delta in `## Since t
 - `closed`: earlier findings now fixed, at most 30; `[]` in round 1.
 - `notes`: short lines for the next reader: what you checked, what looked risky but holds.
 - `declined`: what you looked at and decided is not a finding, each with why in a few words, so a later round does not raise it again.
+- `questions` (rare): only for a real decision Irfan must make, shaped as the planner's (`id`, `question`, `why`, 2 to 4 `options` with the `recommended` one first); then `verdict: block` and empty lists. At most 2 asks per review; his answers come back in this session.

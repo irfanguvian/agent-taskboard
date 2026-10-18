@@ -1329,7 +1329,9 @@ function askPanel(id, k, a) {
       post(id, 'answer', { text: d.comment.trim() }, 'work-answer').then(err => { if (err == null) ui.drafts.delete(key); });
     };
     acts = [el('div', { class: 'field' }, el('label', { for: 'wa' }, 'Your Answer'), box, d.errs.text && el('p', { class: 'err', id: 'wa-err' }, d.errs.text)),
-      el('div', { class: 'acts' }, armBtn(id, 'work-answer', 'work-answer', send, { cls: BTN1 }), replanBtn(id))];
+      el('div', { class: 'acts' }, armBtn(id, 'work-answer', 'work-answer', send, { cls: BTN1 }), replanBtn(id),
+        !k.lane_of && actBtn(id, 'lavish', () => post(id, 'lavish', {}), { sent: 'lavish' })), // Phase 5: a text ask has a lavish page too (a lane: none)
+      errLine(id, 'lavish')];
   }
   return el('section', { class: 'part ask', 'aria-labelledby': 'ak-h' },
     el('h3', { id: 'ak-h' }, ASKS[kind] || 'Question', o.task && el('span', { class: 'count' }, 'task ', vis(o.task))),

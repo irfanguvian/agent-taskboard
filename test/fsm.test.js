@@ -36,6 +36,13 @@ const SPEC = {
   'plan_approval>planning:you': '*',
   'working>clarify:runner': '*',
   'clarify>working:you': '*',
+  // full-access-runs Phase 5 (contract change): review, qa and final_gate ask; the answer resumes the asking session
+  'review>clarify:runner': '*',
+  'qa>clarify:runner': 'qa',
+  'final_gate>clarify:runner': '*',
+  'clarify>review:you': '*',
+  'clarify>qa:you': 'qa',
+  'clarify>final_gate:you': '*',
   'working>review:runner': '*',
   'review>qa:runner': 'qa',
   'review>final_gate:runner': 'bs',
@@ -221,4 +228,20 @@ test('A10 + M5 C4 resume from blocked resets rework and fixes to 0 and clears bl
   await fsm.transition(store, t.id, 'blocked', 'runner');
   assert.equal('review' in (await fsm.transition(store, t.id, 'planning', 'you')), false, 'a replan starts its review rounds afresh');
   await store.releasePid();
+});
+
+// full-access-runs Phase 5: t.asks counts per phase visit; t.continue (the answers for the asking session) lives through
+// clarify → its phase and a Blocked between, never into another phase
+test('Phase 5 move: asks kept into clarify, gone when the phase is left; t.continue kept to its phase and Blocked, dropped elsewhere', () => {
+  const g = { questions: () => true, no_blocking: () => true, answer_added: () => true };
+  const t = ticket('review', 'code', { asks: { review: 2, qa: 1 } });
+  assert.deepEqual(fsm.move(t, 'clarify', 'runner', g).asks, { review: 2, qa: 1 });
+  assert.deepEqual(fsm.move(t, 'qa', 'runner', g).asks, { qa: 1 });
+  const cont = { phase: 'review', session: 's', prompt: 'Irfan answered:\nQ1 x → y', round: 2, gen: 3 };
+  const c = ticket('clarify', 'code', { continue: cont });
+  assert.deepEqual(fsm.move(c, 'review', 'you', g).continue, cont);
+  assert.deepEqual(fsm.move({ ...c, state: 'review' }, 'blocked', 'runner').continue, cont);
+  assert.deepEqual(fsm.move({ ...c, state: 'blocked', blocked_from: 'review' }, 'review', 'you', fsm.GUARDS).continue, cont);
+  assert.equal(fsm.move({ ...c, state: 'review' }, 'qa', 'runner', g).continue, undefined);
+  assert.equal(fsm.move({ ...c, state: 'blocked', blocked_from: 'review' }, 'working', 'you', fsm.GUARDS).continue, undefined, 'a Resume to an earlier phase drops it');
 });

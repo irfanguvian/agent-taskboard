@@ -151,12 +151,13 @@ test('bash-guard full-access-runs: tb verb list pinned from the CLI registry; ss
   /** @type {[string, RegExp][]} */
   const bumps = [['ssh git@github.com', /ssh/], ['cat ~/.ssh/id_ed25519', /ssh/], ['GIT_SSH_COMMAND="ssh -i k" git fetch', /ssh/],
     ['git -c core.sshCommand="ssh -i k" fetch', /ssh/], ['git clone ssh://git@github.com/x/y', /ssh/],
+    ['timeout 5 ssh host', /ssh/], ['ls | xargs scp', /ssh/], ["sh -c 'ssh host'", /ssh/], ['cd x && FOO=1 sftp host', /ssh/],
     ['cat ~/code/other/.env', /\.env file outside/], ['cat /Users/x/app/.env.local', /\.env file outside/], ['cat ../other/.env', /\.env file outside/], ['source $HOME/.env', /\.env file outside/]];
   for (const [cmd, why] of bumps) {
     assert.match(guard(cmd, full, '/wt')?.deny ?? 'allowed', why, cmd);
     assert.equal(guard(cmd, {}, '/wt'), null, `sandbox mode leaves it to the seatbelt: ${cmd}`);
   }
-  for (const cmd of ['cat .env.test', 'node --env-file=.env.test app.js', 'cat /wt/.env.test', 'grep -r sshd docs']) assert.equal(guard(cmd, full, '/wt'), null, cmd);
+  for (const cmd of ['cat .env.test', 'node --env-file=.env.test app.js', 'cat /wt/.env.test', 'grep -r sshd docs', 'grep -rn ssh docs', 'echo "use ssh keys"']) assert.equal(guard(cmd, full, '/wt'), null, cmd);
   assert.match(guard('rtk git log --output=/tmp/x', { TB_PHASE: 'review' })?.deny ?? 'allowed', /review only reads/);
   assert.equal(guard('rtk git log -3', { TB_PHASE: 'review' }), null);
 });

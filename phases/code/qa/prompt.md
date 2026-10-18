@@ -42,5 +42,6 @@ Write `docs/verification/<date>-<ticket id>-qa.md` (the path in `## App`): a mer
 - `verdict`: `pass` only when every case is `PASS`; else `fail` (a `FAIL` with cause `code` and no case `BLOCKED`) or `blocked`.
 - `cases`: 2 to 40, fields as the schema says.
 - `report`: its path; `findings`: short lines a human should know (risks, cases not run).
+- `questions` (rare): only for a real decision Irfan must make, shaped as the planner's (`id`, `question`, `why`, 2 to 4 `options` with the `recommended` one first); then `verdict: blocked`, `cases: []`, the report path. At most 2 asks per QA; his answers come back in this session.
 
 tbd checks in code and refuses a result where: HEAD moved or a tracked file changed; a `FAIL` or `BLOCKED` has no cause; no positive or no negative case; a source is neither changed nor an acceptance id; a `new` acceptance has no case; a backend or mixed `PASS` or `FAIL` has no recs, a rec not from this QA, or `observed.status` unlike its last rec; the report lacks a mermaid block or `**Verdict:**` line; a screenshot is not a real PNG; the verdict disagrees with the cases.

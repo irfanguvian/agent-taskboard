@@ -305,7 +305,9 @@ test('F8 (+) questions after a working replan are a planning clarify: clarify_or
   assert.deepEqual(rows(tbd, id), [['cli', 'answer']]);
 });
 
-test('working-origin (−) a working task\'s NEEDS_CONTEXT clarify never opens lavish (N2)', async (t) => {
+// A code ticket approved for real (fake gates green) whose T1 run returns `out` (a working ask) → clarify; run 2 hangs.
+// lavish: fake-lavish steps. → {tbd, id, dump(n): run n's argv + prompt}
+async function workAsk(t, out, lavish = undefined) {
   const git = (cwd, ...a) => execFileSync('/usr/bin/git', ['-C', cwd, ...a], { encoding: 'utf8', env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } }).trim();
   const dir = fs.mkdtempSync(path.join(ROOT, 'repo-'));
   git(dir, 'init', '-q', '-b', 'main');
@@ -319,7 +321,9 @@ test('working-origin (−) a working task\'s NEEDS_CONTEXT clarify never opens l
   const wt = path.join(fs.mkdtempSync(path.join(ROOT, 'wt-')), 'w');
   git(dir, 'worktree', 'add', '-q', '--detach', wt, base);
   const scn = fs.mkdtempSync(path.join(ROOT, 'scn-'));
-  fs.writeFileSync(path.join(scn, '1.json'), JSON.stringify({ steps: [{ result: { structured_output: { status: 'NEEDS_CONTEXT', question: 'Page size 20 or 50?', commit: null, tests_added: [], notes: '' } } }] }));
+  fs.writeFileSync(path.join(scn, '1.json'), JSON.stringify({ steps: [{ result: { structured_output: { commit: null, tests_added: [], notes: '', ...out } } }] }));
+  fs.writeFileSync(path.join(scn, '2.json'), JSON.stringify({ steps: [{ hang: true }] }));
+  const dumps = fs.mkdtempSync(path.join(ROOT, 'dump-'));
   const id = 't_work01';
   const plan = { kind: 'plan', summary: 'users work', acceptance: [{ id: 'A1', text: 'users still work', type: 'preserve' }],
     tasks: [{ id: 'T1', title: 'task T1', files: ['src/users.js'], modules: ['src'], blocked_by: [], acceptance: ['A1'], type: 'preserve', test_cmd: 'npm test', steps: ['do it'] }],
@@ -328,16 +332,42 @@ test('working-origin (−) a working task\'s NEEDS_CONTEXT clarify never opens l
     root: fs.mkdtempSync(path.join(ROOT, 'tbd-')),
     files: { 'config.json': cfg(), 'tags.json': { acme: {}, 'acme/api': { type: 'git', path: dir, base: 'main' } },
       [`tickets/${id}/ticket.json`]: ticket(id, { state: 'plan_approval', tag: 'acme/api', title: 'users work', base_sha: base, worktree: wt, round: 3 }),
-      [`tickets/${id}/rounds/01-plan.json`]: plan, [`fake-gates/${id}.json`]: {} },
-    env: { TB_PHASES_DIR: PHASES, NODE_OPTIONS: `${RUN_SPY} ${FAKE_GATES}`, TEST_REAL_HANDLERS: '1', FAKE_CLAUDE_SCENARIO_DIR: scn },
+      [`tickets/${id}/rounds/01-plan.json`]: plan, [`fake-gates/${id}.json`]: {}, ...(lavish && { 'lavish/fake-lavish.json': lavish }) },
+    env: { TB_PHASES_DIR: PHASES, NODE_OPTIONS: `${RUN_SPY} ${FAKE_GATES} ${OPENER}`, TEST_REAL_HANDLERS: '1', FAKE_CLAUDE_SCENARIO_DIR: scn, FAKE_CLAUDE_DUMP_DIR: dumps },
   });
   t.after(async () => { reap(pidsOf(tbd)); await tbd.stop().catch(() => {}); });
   assert.equal((await tbd.api('POST', `/api/tickets/${id}/approve`, {})).status, 202);
   await stateIs(tbd, id, 'clarify');
-  assert.equal((await view(tbd, id)).clarify_origin.phase, 'working');
+  return { tbd, id, dump: (n) => { const f = path.join(dumps, `${n}.json`); return fs.existsSync(f) && JSON.parse(fs.readFileSync(f, 'utf8')); } };
+}
+
+// full-access-runs Phase 5 (contract change; was: a NEEDS_CONTEXT working clarify never opens lavish, N2): a working ask
+// that takes a text answer opens a one-question free-text page; its send → working.answer with actor lavish (same session)
+test('working-origin (+) a NEEDS_CONTEXT clarify opens a one-question text page (round = the ticket round); its send → working.answer actor lavish → the same session goes on with the text', async (t) => {
+  const text = 'Use 50, as the API docs say';
+  const data = { question: 'Q1', kind: 'text', value: text, nonce: '{{NONCE}}', round: 5 }; // plan_approval round 3 → working 4 → clarify 5
+  const send = ['session:', '  file: x', '  status: feedback', 'prompts[1]{uid,prompt,selector,tag,text}:',
+    `  "1",${JSON.stringify(`Q1: ${text}\n\nContext data:\n${JSON.stringify(data, null, 2)}`)},"html > body > form:nth-of-type(1)",tb-answer,${JSON.stringify(`Q1: ${text}`)}`].join('\n') + '\n';
+  const { tbd, id, dump } = await workAsk(t, { status: 'NEEDS_CONTEXT', question: 'Page size 20 or 50?' }, { poll: [{ out: send, delay_ms: 3000 }] });
+  const file = path.join(tbd.tbHome, 'interview', `${id}-r05`, 'page.html'); // read while the round is open: leaving clarify removes it
+  const page = (await until(() => fs.existsSync(file) && fs.readFileSync(file, 'utf8'), 15_000, 'page')).match(/<form[\s\S]*<\/form>/)?.[0] ?? '';
+  await until(async () => (await view(tbd, id))?.state === 'working', 30_000, 'answered from the page');
+  assert.deepEqual(rows(tbd, id), [['lavish', 'answer']]);
+  assert.match(page, /Q1\. Page size 20 or 50\?/);
+  assert.equal(/type="radio"/.test(page), false, 'free text only: no options, no You Decide');
+  assert.equal(opened(tbd.tbHome).length, 1, 'tbd opened the page once');
+  const run2 = await until(() => dump(2), 30_000, 'run 2');
+  assert.equal(run2.opts['--resume'], dump(1).opts['--session-id'], 'the same session goes on');
+  assert.match(run2.prompt, new RegExp(`^Irfan answered:\n\n${text}\n`));
+});
+
+test('working-origin (−) a scope ask (no text answer) opens no lavish page; POST lavish → 409', async (t) => {
+  const { tbd, id } = await workAsk(t, { status: 'NEEDS_SCOPE', needs_scope: { files: ['src/other.js'], reason: 'needs the other module' } });
+  assert.deepEqual([(await view(tbd, id)).clarify_origin.phase, (await view(tbd, id)).clarify_origin.class], ['working', 'scope']);
   await new Promise((r) => setTimeout(r, 1500)); // an open would have run by now (setImmediate after the move)
   assert.deepEqual(calls(tbd.tbHome), []);
   assert.equal((await view(tbd, id)).interview, undefined);
+  assert.equal((await tbd.api('POST', `/api/tickets/${id}/lavish`, {})).status, 409);
 });
 
 test('F5 (−/+) the lavish port held by a foreign listener → no open, 1 alert; held by our own lavish server (its argv) → the open goes ahead', async (t) => {

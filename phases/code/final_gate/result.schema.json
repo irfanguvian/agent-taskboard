@@ -144,6 +144,47 @@
           ]
         }
       }
+    },
+    "questions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "question",
+          "why",
+          "options",
+          "recommended"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "question": {
+            "type": "string"
+          },
+          "why": {
+            "type": "string",
+            "minLength": 1
+          },
+          "options": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 4,
+            "items": {
+              "type": "string"
+            }
+          },
+          "recommended": {
+            "type": "string"
+          },
+          "topic": {
+            "type": "string",
+            "maxLength": 60
+          }
+        }
+      }
     }
   }
 }

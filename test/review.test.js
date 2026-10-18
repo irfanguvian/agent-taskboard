@@ -205,3 +205,58 @@ test('R7 a planning run of a code ticket: runs/1.system.md = its prompt + phases
   assert.equal(fs.readFileSync(tk(tbd, id, 'runs', '1.system.md'), 'utf8'), `# planning fixture\n\n\n${RULES}`);
   assert.equal(l.rules, crypto.createHash('sha256').update(RULES).digest('hex').slice(0, 12));
 });
+
+// full-access-runs Phase 5: a review may end with questions (planner shape) → clarify; the answer resumes the asking session
+const Q1 = { id: 'Q1', question: 'Keep the old endpoint?', why: 'clients still call it', options: ['keep', 'drop'], recommended: 'keep' };
+const askRun = (questions = [Q1]) => reviewRun({ verdict: 'block', questions });
+
+test('Phase 5 ask + resume (+): questions → clarify (origin review, round file); answer → review + t.continue; a resumed start refused as planted keeps it; Resume → --resume the asking session with the answers; t.continue gone at its first output line, before its result', async (t) => {
+  const w = await reviewed(t, { sessions: [askRun(), { steps: [{ sleep_ms: 3000 }, { result: { structured_output: { verdict: 'pass', findings: [], closed: [], notes: ['kept the old endpoint'], declined: [] } } }] }] });
+  const { tbd, id, k } = w;
+  await until(() => k().state === 'clarify', 60_000, 'review asks');
+  const session = w.dumps()[1].opts['--session-id'];
+  assert.deepEqual([k().clarify_origin, k().asks], [{ phase: 'review', class: 'questions', session }, { review: 1 }]);
+  const round = json(tk(tbd, id, 'rounds', '02-questions.json'));
+  assert.deepEqual([round.kind, round.phase, round.questions], ['questions', 'review', [Q1]]);
+  fs.writeFileSync(path.join(w.wt, 'CLAUDE.md'), 'planted\n'); // agent-planted config: the resumed start is refused before any output
+  const a = await tbd.api('POST', `/api/tickets/${id}/answer`, { answers: { Q1: { pick: 'drop' } } });
+  assert.equal(a.status, 200, JSON.stringify(a.json));
+  await until(async () => { const m = (await tbd.api('GET', `/api/tickets/${id}`)).json?.ticket; return m?.state === 'blocked' && m.lease?.exit; }, 30_000, 'planted start → Blocked');
+  const prompt = 'Irfan answered:\nQ1 Keep the old endpoint? → drop\n\nGo on with these answers and return your result.';
+  assert.deepEqual([k().continue?.phase, k().continue?.session, k().continue?.prompt], ['review', session, prompt], 'the answers survive a start that never spoke');
+  assert.equal(w.dumps().length, 2, 'the refused start spawned nothing');
+  fs.rmSync(path.join(w.wt, 'CLAUDE.md'));
+  assert.equal((await tbd.api('POST', `/api/tickets/${id}/resume`, {})).status, 202);
+  await until(() => k().state === 'review' && k().lease?.pid && !k().continue, 30_000, 'resumed run spoke: t.continue cleared while it still runs');
+  await until(() => k().state === 'qa', 60_000, 'resumed review → qa');
+  const d = w.dumps();
+  assert.equal(d.length, 3);
+  assert.equal(d[2].opts['--resume'], session, 'the asking session goes on, never a fresh one');
+  assert.equal(d[2].prompt, prompt);
+  assert.deepEqual(k().answers.map((x) => [x.id, x.answer]), [['R2Q1', { pick: 'drop' }]]);
+  assert.equal(k().asks?.review, undefined, 'the review visit ended');
+  assert.deepEqual(lines(tk(tbd, id, 'interventions.jsonl')).map((l) => [l.actor, l.verb]), [['cli', 'answer'], ['cli', 'resume']]);
+});
+
+test('Phase 5 cap (−): a 3rd ask in one review visit → refused "decide yourself", resumed with why; its result without questions → qa; no round file', async (t) => {
+  const w = await reviewed(t, { ticketOver: { asks: { review: 2 } }, sessions: [askRun(), reviewRun({})] });
+  const { tbd, id, k } = w;
+  await until(() => k().state === 'qa', 60_000, 'review → qa');
+  const d = w.dumps();
+  assert.equal(d.length, 3);
+  assert.equal(d[2].opts['--resume'], d[1].opts['--session-id']);
+  assert.match(d[2].prompt, /you asked 2 times in this review visit already: decide yourself/);
+  assert.equal(fs.existsSync(tk(tbd, id, 'rounds', '02-questions.json')), false);
+  assert.equal(k().asks?.review, undefined);
+});
+
+test('Phase 5 ask (−): a question without an id → schema refusal, resumed once, refused again → Blocked; never clarify, no round file', async (t) => {
+  const noId = { ...Q1 };
+  delete noId.id;
+  const w = await reviewed(t, { sessions: [askRun([noId]), askRun([noId])] });
+  const { tbd, id, k } = w;
+  await until(() => k().state === 'blocked', 60_000, 'blocked');
+  assert.match(w.dumps()[2].prompt, /\/questions\/0: missing "id"/);
+  assert.equal(fs.existsSync(tk(tbd, id, 'rounds', '02-questions.json')), false);
+  assert.equal(lines(tk(tbd, id, 'events.jsonl')).some((e) => e.to === 'clarify'), false);
+});

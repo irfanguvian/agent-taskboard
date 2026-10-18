@@ -485,6 +485,17 @@ test('local copies: CLAUDE.local.md + .claude/settings.local.json copied fresh i
   const locked = await attempt({ resume: false, ticket: { ...t, sandbox: true }, tag: { path: f.tag }, env: { HOME: f.home } });
   assert.equal(locked.err, undefined);
   assert.deepEqual([fs.existsSync(path.join(wt, 'CLAUDE.local.md')), fs.existsSync(path.join(wt, '.claude', 'settings.local.json'))], [false, false]);
+  // review LOW: a tag file deleted since the last full-access run leaves no stale copy for the planted check to refuse
+  assert.equal((await attempt({ resume: false, ticket: t, tag: { path: f.tag }, env: { HOME: f.home } })).err, undefined);
+  fs.rmSync(path.join(f.tag, 'CLAUDE.local.md'));
+  assert.equal((await attempt({ resume: false, ticket: t, tag: { path: f.tag }, env: { HOME: f.home } })).err, undefined);
+  assert.deepEqual([fs.existsSync(path.join(wt, 'CLAUDE.local.md')), fs.existsSync(path.join(wt, '.claude', 'settings.local.json'))], [false, true]);
+  // review LOW: a dir planted where a copy goes is refused as planted (Blocked at once), not a generic start error
+  fs.mkdirSync(path.join(wt, '.claude', 'settings.local.json.d'));
+  fs.rmSync(path.join(wt, '.claude', 'settings.local.json'));
+  fs.renameSync(path.join(wt, '.claude', 'settings.local.json.d'), path.join(wt, '.claude', 'settings.local.json'));
+  const dir = await attempt({ resume: false, ticket: t, tag: { path: f.tag }, env: { HOME: f.home } });
+  assert.deepEqual([dir.err?.code, /settings\.local\.json is not a file/.test(dir.err?.message ?? '')], ['PLANTED', true]);
 });
 
 // ---- full-access-runs Phase 4: Skill + Agent, the subagent cap, the final_distinct knob -------------------------------

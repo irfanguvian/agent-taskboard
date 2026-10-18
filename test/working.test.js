@@ -224,6 +224,8 @@ test('N6 continue + M12: NEEDS_CONTEXT → clarify (why, class); tb answer → t
   await until(() => k().state === 'clarify', 30_000, 'clarify');
   assert.deepEqual(k().clarify_origin, { phase: 'working', task: 'T1', why: 'Page size 20 or 50?', class: 'NEEDS_CONTEXT' });
   assert.deepEqual([(await w.rpc('answer', { text: '  ' })).status, (await w.rpc('scope', { allow: true })).status, (await w.rpc('answer', { text: '50' }, 'web')).status], [400, 409, 400]);
+  // full-access-runs Phase 5: the lavish page answers text asks only; a replan stays Irfan's own (cli | ui)
+  assert.equal((await w.rpc('answer', { replan: true }, 'lavish')).status, 400);
   assert.equal(k().state, 'clarify');
   assert.equal((await w.rpc('answer', { text: '50' })).ok, true);
   await until(() => k().state === 'review', 30_000, 'review');
