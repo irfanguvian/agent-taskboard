@@ -53,7 +53,7 @@ class Node {
 }
 function sandbox(qs = {}) { // qs: selector → the node $() answers with (the rest get a fresh stub)
   const document = {
-    createElement: (t) => new Node(t), querySelector: (s) => qs[s] ?? new Node('stub'), querySelectorAll: () => [], body: new Node('body'),
+    createElement: (t) => new Node(t), createElementNS: (_ns, t) => Object.assign(new Node(t), { ns: true }), querySelector: (s) => qs[s] ?? new Node('stub'), querySelectorAll: () => [], body: new Node('body'),
     documentElement: new Node('html'), addEventListener() {}, write() { throw new Error('document.write used'); }, activeElement: null, visibilityState: 'hidden',
   };
   const ctx = {
@@ -65,11 +65,12 @@ function sandbox(qs = {}) { // qs: selector → the node $() answers with (the r
   vm.runInContext(SRC, ctx, { filename: 'app.js' });
   return ctx;
 }
-// every string in the tree, and where it sits: text (a child) or attr
+// every string in the tree, and where it sits: text (a child) or attr. Tags leave out icon() SVG (createElementNS, fixed
+// path data from app.js's ICONS): an 'svg' tag in the list still means one made from markup.
 function walk(n, out = { text: [], attrs: [], tags: [] }) {
   if (typeof n === 'string' || typeof n === 'number') { out.text.push(String(n)); return out; }
   if (!(n instanceof Object) || !Array.isArray(n.kids)) return out;
-  out.tags.push(n.tag);
+  if (!n.ns) out.tags.push(n.tag);
   for (const [k, v] of Object.entries(n.attrs)) out.attrs.push(`${k}=${v}`);
   for (const k of n.kids) walk(k, out);
   return out;
@@ -161,7 +162,7 @@ test('M5.2 C9: waiting qa_lock reads qa:<tag> on the card and in the drawer fact
   /** @type {any} */ (ctx.document).querySelector = (s) => (s === '#drawer' ? drawer : new Node('stub'));
   const f = { id: 't_xss001', title: 't', kind: 'code', tag: 'self/tb', state: 'qa', waiting: { reason: 'qa_lock', since: '2026-10-13T01:02:03.000Z' } };
   run(`state = { reminders: [], flows: [${JSON.stringify(f)}], system: {}, calendar: {} }; ui.open = "t_xss001";`);
-  assert.ok(walk(run(`flowCard(${JSON.stringify(f)})`)).text.includes('waiting: qa:self/tb'));
+  assert.ok(walk(run(`flowRow(${JSON.stringify(f)})`)).text.includes('waiting: qa:self/tb'));
   run(`drawerBody(${JSON.stringify(f)}, ${JSON.stringify({ ...f, qa: { n: 1, head: 'a' } })})`);
   const t = walk(drawer).text;
   assert.equal(t[t.indexOf('Waiting') + 1], 'qa:self/tb');
@@ -306,10 +307,10 @@ test('UX1: the Health view shows the 10 targets from the fixture with x / y and 
     tags: { 'acme/api': { type: 'git', path: `/code/${P}` }, group: {} } };
   const tree = run(`healthView(${JSON.stringify(hl)})`);
   // expected from the fixture's rules (m7-build.md §12): result word, "x / y", goal
-  const EXPECT = {
-    recovered: ['FAIL', '2 / 4', '≥ 95%'], resume_restart: ['FAIL', '2 / 10', '≤ 5%'], infra: ['FAIL', '2 / 4', '≤ 5%'], false_stall: ['PASS', '1 / 5', '≤ 20%'],
-    rework: ['PASS', '4 / 5', '≥ 70%'], hands_off: ['FAIL', '2 / 4', '≥ 60%'], fix_of: ['FAIL', '2 / 5', '≤ 10%'], golden: ['PASS', '2 / 2', 'all'],
-    rss: ['PASS', '61.2 / 80 MB', '≤ 80 MB'], planner_call: ['n/a', '4 / 9', 'watch'],
+  const EXPECT = { // result words are status pills in Title Case (DESIGN.md §8); tb health prints PASS / FAIL
+    recovered: ['Fail', '2 / 4', '≥ 95%'], resume_restart: ['Fail', '2 / 10', '≤ 5%'], infra: ['Fail', '2 / 4', '≤ 5%'], false_stall: ['Pass', '1 / 5', '≤ 20%'],
+    rework: ['Pass', '4 / 5', '≥ 70%'], hands_off: ['Fail', '2 / 4', '≥ 60%'], fix_of: ['Fail', '2 / 5', '≤ 10%'], golden: ['Pass', '2 / 2', 'all'],
+    rss: ['Pass', '61.2 / 80 MB', '≤ 80 MB'], planner_call: ['n/a', '4 / 9', 'watch'],
   };
   const rows = find(tree, (x) => x.tag === 'tr' && x.attrs['data-key']);
   assert.deepEqual(rows.map((r) => r.attrs['data-key']), Object.keys(EXPECT), '10 targets in the frozen order');
@@ -483,7 +484,7 @@ test('UX4: Follow on + a run event of the open ticket reads the log after the la
   // the button: a button with aria-pressed
   run('ui.follow = { id: "t_f1", on: true };');
   const box = walk(run('el("div", null, ...runBox("t_f1", { state: "working", lease: { log: "runs/7.jsonl", phase: "working" } }))'));
-  assert.ok(box.attrs.includes('aria-pressed=true') && box.text.includes('Follow'));
+  assert.ok(box.attrs.includes('aria-pressed=true') && box.text.includes('Following'));
 });
 
 test('UX5: Older at review / QA / final n=2 asks n=1; at n=1 Older has disabled; a 404 for the older one disables it', async () => {
@@ -517,16 +518,18 @@ test('UX5: Older at review / QA / final n=2 asks n=1; at n=1 Older has disabled;
 });
 
 test('UX6: the flow sheet with title + fix-of posts {text, title, kind, tag, fix_of} once; fix-of "None" leaves the key out; an empty goal posts nothing', async () => {
-  const sheet = new Node('form'), scrim = new Node('div'), at = (props) => Object.assign(new Node('x'), props);
-  const ctx = sandbox({ '#sheet .sheet': sheet, '#sheet': scrim, '#composer .seg [aria-pressed="true"]': at({ value: 'flow' }), '#newTitle': at({ value: 'Make the list sortable' }), '#flowKind': at({ value: 'code' }), '#flowTag': at({ value: 'acme/api' }) });
+  const sheet = new Node('form'), scrim = new Node('div');
+  const ctx = sandbox({ '#sheet .sheet': sheet, '#sheet': scrim });
   const run = (code) => vm.runInContext(code, ctx);
   const n = trust(ctx);
   run(`state = { reminders: [], flows: [{ id: "t_a1", title: "Earlier flow", state: "done" }], system: {}, calendar: {} }; ui.tags = ["acme/api"];`);
-  run('moreSheet()');
+  run('openNew("flow")'); // calm UI: the New sheet (N / New) replaced the composer line and its More… sheet
   assert.deepEqual(find(sheet, (x) => x.tag === 'label').map((l) => txt(l)), ['Goal for the agent', 'Short title', 'Kind', 'Tag', 'Fix of']);
   const ids = find(sheet, (x) => x.tag === 'label').map((l) => l.attrs.for);
   assert.deepEqual(ids.map((id) => find(sheet, (x) => x.attrs.id === id).length), [1, 1, 1, 1, 1], 'each label points at one control');
   assert.deepEqual(find(byName(sheet, 'fix_of'), (x) => x.tag === 'option').map((o) => o.attrs.value), ['', 't_a1']);
+  byName(sheet, 'text').value = 'Make the list sortable';
+  byName(sheet, 'tag').value = 'acme/api';
   byName(sheet, 'title').value = 'Sortable list';
   byName(sheet, 'fix_of').value = 't_a1';
   await sheet.onsubmit({ preventDefault() {} });
@@ -545,29 +548,78 @@ test('UX6: the flow sheet with title + fix-of posts {text, title, kind, tag, fix
   assert.ok(txt(sheet).includes('Write the goal first.'));
 });
 
-test('UX7: the reminder sheet with column + due + project posts {title, status, due, project}; the composer line still posts what it did; the id line shows done_at for done only', async () => {
-  const sheet = new Node('form'), composer = new Node('form'), title = Object.assign(new Node('input'), { value: '  Pay rent ' });
-  const ctx = sandbox({ '#sheet .sheet': sheet, '#sheet': new Node('div'), '#composer': composer, '#composer .seg [aria-pressed="true"]': Object.assign(new Node('x'), { value: 'reminder' }), '#newTitle': title });
+test('UX7: the reminder sheet with column + due + project posts {title, status, due, project}; a title-only add still posts what the composer line did; the id line shows done_at for done only', async () => {
+  const sheet = new Node('form');
+  const ctx = sandbox({ '#sheet .sheet': sheet, '#sheet': new Node('div') });
   const run = (code) => vm.runInContext(code, ctx);
   const n = trust(ctx);
   run('state = { reminders: [], flows: [], system: {}, calendar: {} };');
-  run('moreSheet()');
-  assert.deepEqual(find(sheet, (x) => x.tag === 'label').map((l) => txt(l)), ['Title', 'Column', 'Due', 'Project']);
+  run('openNew("reminder")'); // calm UI: the New sheet replaced the composer line and its More… sheet; note and tag joined the add (D-0149 fields)
+  assert.deepEqual(find(sheet, (x) => x.tag === 'label').map((l) => txt(l)), ['Title', 'Column', 'Due', 'Project', 'Note', 'Tag']);
   assert.deepEqual(find(byName(sheet, 'status'), (x) => x.tag === 'option').map((o) => o.attrs.value), ['inbox', 'now', 'next', 'later'], 'no Done column in an add');
+  byName(sheet, 'title').value = '  Pay rent ';
   byName(sheet, 'status').value = 'next';
   byName(sheet, 'due').value = '2026-11-01';
   byName(sheet, 'project').value = 'Acme';
   await sheet.onsubmit({ preventDefault() {} });
   assert.deepEqual(n.calls.filter((c) => c.method === 'POST').map((c) => [c.url, c.body]), [['/api/reminders', { title: 'Pay rent', status: 'next', due: '2026-11-01', project: 'Acme' }]]);
 
-  // the composer line: title only, the body of today
-  title.value = ' Buy milk ';
-  await composer.handlers.submit[0]({ preventDefault() {}, target: new Node('form') });
+  // a title-only add: the body of the old composer line (top of Inbox)
+  run('openNew("reminder")');
+  byName(sheet, 'title').value = ' Buy milk ';
+  await sheet.onsubmit({ preventDefault() {} });
   assert.deepEqual(n.calls.filter((c) => c.method === 'POST').at(-1), { url: '/api/reminders', method: 'POST', body: { title: 'Buy milk', status: 'inbox', pos: 'top' } });
 
   const text = (t) => txt(run(`detailLine(${JSON.stringify(t)})`));
   assert.equal(text({ id: 't_1', created: '2026-10-01', status: 'done', done_at: '2026-10-05' }), 'Id t_1 · Created 2026-10-01 · Done 2026-10-05');
   assert.equal(text({ id: 't_2', created: '2026-10-01', status: 'next' }), 'Id t_2 · Created 2026-10-01', 'an open item: no done date');
+});
+
+test('calm UI: the New sheet refuses a blank title and a malformed tag inline (no request); note and tag go in the add', async () => {
+  const sheet = new Node('form');
+  const ctx = sandbox({ '#sheet .sheet': sheet, '#sheet': new Node('div') });
+  const run = (code) => vm.runInContext(code, ctx);
+  const n = trust(ctx);
+  const posts = () => n.calls.filter((c) => c.method === 'POST');
+  run('state = { reminders: [], flows: [], system: {}, calendar: {} };');
+  run('openNew("reminder")');
+  await sheet.onsubmit({ preventDefault() {} });
+  assert.ok(txt(sheet).includes('Type a title first.'));
+  byName(sheet, 'title').value = 'Pay rent';
+  byName(sheet, 'tag').value = 'Bad Tag';
+  await sheet.onsubmit({ preventDefault() {} });
+  assert.deepEqual(posts(), [], 'blank title, then a malformed tag: nothing posted');
+  assert.ok(txt(sheet).includes('Use lowercase letters, digits and -; a/b for a child.'));
+  byName(sheet, 'tag').value = 'home';
+  byName(sheet, 'note').value = 'Before Friday';
+  await sheet.onsubmit({ preventDefault() {} });
+  assert.deepEqual(posts().map((c) => c.body), [{ title: 'Pay rent', status: 'inbox', pos: 'top', note: 'Before Friday', tag: 'home' }]);
+});
+
+test('calm UI: the Overdue highlight filters Reminders to open reminders due before today (never a done one); a search narrows it; the chip clears it', () => {
+  const board = new Node('div'), chips = new Node('div');
+  const ctx = sandbox({ '#board': board, '#rfilters': chips });
+  const run = (code) => vm.runInContext(code, ctx);
+  const rs = [
+    { id: 't_o1', type: 'reminder', title: 'Pay rent', status: 'next', due: '2020-01-01' },
+    { id: 't_o2', type: 'reminder', title: 'Call bank', status: 'inbox', due: '2020-01-02' },
+    { id: 't_d1', type: 'reminder', title: 'Old done', status: 'done', due: '2020-01-01', done_at: '2020-01-01' },
+    { id: 't_f1', type: 'reminder', title: 'Later thing', status: 'next', due: '2999-01-01' },
+    { id: 't_n1', type: 'reminder', title: 'No date', status: 'now' },
+  ];
+  run(`state = { reminders: ${JSON.stringify(rs)}, flows: [], system: {}, calendar: {} };`);
+  run('filterReminders("overdue")');
+  let w = walk(board).text;
+  assert.ok(w.includes('Pay rent') && w.includes('Call bank'), 'the two open late ones');
+  assert.ok(!w.includes('Old done') && !w.includes('Later thing') && !w.includes('No date'), 'not done, not later, not undated');
+  assert.ok(walk(chips).text.includes('Overdue · 2'));
+  run('ui.q = "rent"; renderReminders()');
+  w = walk(board).text;
+  assert.ok(w.includes('Pay rent') && !w.includes('Call bank'), 'filter and search combine');
+  run('ui.q = ""');
+  byRole(chips, 'rfilter').handlers.click[0]();
+  assert.equal(run('ui.rfilter'), null);
+  assert.ok(walk(board).text.includes('No date'), 'cleared: every column is back');
 });
 
 // ---- D-0172 copy-command forms: expected commands from the usage text in lib/cli.js (HELP), never from running the builder ----

@@ -1,421 +1,706 @@
 <!doctype html>
-<html lang="en" data-theme="auto">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Overview · Till</title>
-<script>try { const t = localStorage.getItem('till-theme'); if (t) document.documentElement.dataset.theme = t; } catch {}</script>
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource-variable/inter@5/opsz.css">
+<title>Overview · Tali</title>
+<script>try { const t = localStorage.getItem('tali-theme'); if (t && t !== 'auto') document.documentElement.dataset.theme = t; } catch {}</script>
 <link rel="stylesheet" href="foundation.css">
 <style>
-/* Page layout only. Tokens, type and components come from foundation.css. */
-[hidden] { display: none !important; }
-.app { display: grid; grid-template-columns: 240px minmax(0, 1fr); min-height: 100vh; font-size: 14px; line-height: 1.42859; letter-spacing: -0.016em; }
-.muted, .label { color: var(--text-2); }
-.label { font-size: 12px; line-height: 1.33337; letter-spacing: -0.01em; }
-.sec-title { font-size: 17px; line-height: 1.29412; font-weight: 600; letter-spacing: -0.022em; }
-.ic { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+/* App UI reference. Layout only: every color, size, radius and shadow comes from foundation.css tokens and parts. */
+:root { --pad: 24px; --gap: 16px; --side: 248px; }
+@media (min-width: 1440px) { :root { --pad: 32px; --gap: 20px; } }
+@media (min-width: 1024px) and (max-width: 1279px) { :root { --side: 72px; } }
+@media (max-width: 1023px) { :root { --side: 0px; } }
+@media (max-width: 743px) { :root { --pad: 16px; } }
 
-/* Sidebar */
+.muted { color: var(--fg-muted); }
+.subtle { color: var(--fg-subtle); }
+.cur { margin-right: 4px; color: var(--fg-muted); font: 400 var(--subheadline) var(--font); }
+.unit.pre { margin: 0 4px 0 0; }
+
+/* ---------- shell: sidebar 248 / rail 72 / tab bar ---------- */
+.shell { display: grid; grid-template-columns: var(--side) minmax(0, 1fr); min-height: 100dvh; }
 .side {
-  position: sticky; top: 0; height: 100vh; display: flex; flex-direction: column; gap: 4px; padding: 0 12px 16px;
-  background: var(--bg-alt); border-right: 1px solid var(--separator);
+  position: sticky; top: 0; z-index: 30; display: flex; flex-direction: column; height: 100dvh; padding: 0 12px 12px;
+  border-right: var(--hairline) solid var(--line); background: var(--surface);
 }
-.shop { display: flex; flex-direction: column; justify-content: center; height: 64px; padding: 0 8px; }
-.nav-item {
-  display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 8px; border-radius: var(--radius-sm);
-  color: var(--text); transition: background-color var(--dur-fast) linear;
+.brand { padding: 20px 12px 12px; font: 600 var(--headline) var(--font-display); letter-spacing: -0.01em; }
+.nav-h { margin: 24px 0 4px; padding: 0 12px; color: var(--fg-subtle); font: 400 var(--footnote) var(--font); }
+.nav a {
+  position: relative; display: flex; align-items: center; gap: 12px; height: var(--row); padding: 0 12px; border-radius: var(--r-sm);
+  color: var(--fg-muted); font: 500 var(--label) var(--font); transition: background-color 100ms linear, color 100ms linear;
 }
-.nav-item:hover { background: var(--hover); text-decoration: none; }
-.nav-item .ic { color: var(--text-2); }
-.nav-item[aria-current="page"] { background: color-mix(in srgb, var(--text) 7%, transparent); font-weight: 600; }
-.nav-item[aria-current="page"] .ic { color: var(--link); }
-.side .nav-item:last-child { margin-top: auto; }
-
-/* Toolbar: translucent from --bg, so dark mode shows no gray strip */
-.bar {
-  position: sticky; top: 0; z-index: 5; display: flex; align-items: center; gap: 12px; height: 64px; padding: 0 40px;
-  background: color-mix(in srgb, var(--bg) 80%, transparent); border-bottom: 1px solid var(--separator-soft);
-  -webkit-backdrop-filter: saturate(180%) blur(20px); backdrop-filter: saturate(180%) blur(20px);
+.nav a:hover { background: var(--hover); color: var(--fg); text-decoration: none; }
+.nav a[aria-current="page"] { background: var(--accent-soft); color: var(--accent-text); }
+.nav .icon { width: 18px; height: 18px; }
+.nav .count { margin-left: auto; color: var(--fg-subtle); font: 400 var(--footnote) var(--font); font-variant-numeric: tabular-nums; }
+.user {
+  display: flex; align-items: center; gap: 12px; width: 100%; margin-top: auto; padding: 8px 12px; border: 0; border-radius: var(--r-sm);
+  background: transparent; text-align: left; cursor: pointer; transition: background-color 100ms linear;
 }
-.bar h1 { margin-right: auto; font-family: var(--font-display); font-size: 28px; line-height: 1.14286; letter-spacing: 0; }
-.search { position: relative; display: flex; align-items: center; }
-.search .ic { position: absolute; left: 10px; color: var(--text-2); pointer-events: none; }
-.search input { width: 200px; height: 32px; padding: 0 12px 0 32px; border: 0; border-radius: var(--radius-pill); background: var(--fill); }
-.search input::placeholder { color: var(--text-2); }
-.icon-btn { display: none; place-items: center; width: 32px; height: 32px; color: var(--text-2); }
-.icon-btn .ic { width: 22px; height: 22px; stroke-width: 1.1; }
-/* Each view shows only the toolbar controls that act on it. */
-main:not([data-view="overview"]) .bar .seg,
-main:is([data-view="invoices"], [data-view="settings"]) .bar :is(.search, .btn) { display: none; }
+.user:hover { background: var(--hover); }
+.user .who { display: grid; min-width: 0; }
+.user .who b { font: 500 var(--label) var(--font); }
+.user .who span { color: var(--fg-subtle); font: 400 var(--footnote) var(--font); }
+.user .icon { margin-left: auto; color: var(--fg-subtle); }
 
-.view { max-width: 1080px; padding: 32px 40px 64px; }
-
-/* Summary: one hero number, the rest 21px. No cards, no icons. */
-.summary { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 32px 64px; }
-.hero-num { margin: 4px 0; font-family: var(--font-display); font-size: 48px; line-height: 1.08349; font-weight: 600; letter-spacing: -0.003em; }
-.up { color: var(--green); }
-.down { color: var(--red); }
-.stats { display: flex; gap: 48px; padding-bottom: 20px; }
-.stats dd { margin-top: 4px; font-family: var(--font-display); font-size: 21px; line-height: 1.19048; font-weight: 600; letter-spacing: 0; }
-
-/* Chart: one accent series, y labels on the right */
-.chart { position: relative; margin-top: 48px; }
-.chart-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 24px; }
-.plot { position: relative; height: 240px; margin-right: 56px; }
-.gl { position: absolute; left: 0; right: 0; border-top: 1px solid var(--separator-soft); }
-.gl span { position: absolute; left: calc(100% + 8px); transform: translateY(-50%); }
-.cols, .xl { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); }
-.cols { position: absolute; inset: 0; }
-.col { position: relative; display: flex; justify-content: center; align-items: flex-end; border-radius: 4px; }
-.bar-v { width: min(24px, 60%); border-radius: 4px 4px 0 0; background: var(--accent); transition: background-color var(--dur-fast) linear; }
-.bar-v.open { background: color-mix(in srgb, var(--accent), var(--bg) 45%); }
-.col:hover .bar-v:not(.open), .col:focus-visible .bar-v:not(.open) { background: var(--accent-hover); }
-.col:is(:hover, :focus) .peak { visibility: hidden; } /* the tooltip says it */
-.peak { position: absolute; left: 50%; margin-bottom: 4px; padding: 0 4px; transform: translateX(-50%); background: var(--bg); color: var(--text); font-weight: 600; white-space: nowrap; }
-.xl { margin: 8px 56px 0 0; text-align: center; }
-.tip {
-  position: absolute; z-index: 2; padding: 8px 12px; border-radius: var(--radius-sm); pointer-events: none; white-space: nowrap;
-  transform: translate(-50%, calc(-100% - 8px)); background: var(--bg-elevated); box-shadow: var(--shadow-float);
+.avatar {
+  --s: 32px; display: inline-grid; place-items: center; flex: none; width: var(--s); height: var(--s); border-radius: 50%;
+  background: var(--fill); color: var(--fg-muted); font: 500 var(--label) var(--font); letter-spacing: 0; text-transform: none;
 }
-.tip b { display: block; color: var(--text); font-size: 14px; letter-spacing: -0.016em; }
+.avatar.sm { --s: 24px; font: 500 var(--caption) var(--font); }
+.avatar.lg { --s: 48px; font: 500 var(--headline) var(--font); }
 
-/* Payments */
-.view .label + .table { margin-top: 16px; }
-
-/* Settings */
-.group { max-width: 640px; }
-.group + .group { margin-top: 40px; }
-.group .sec-title { margin-bottom: 12px; }
-.fields { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-.rows li { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 56px; padding: 8px 0; border-bottom: 1px solid var(--separator-soft); }
-.rows label, .rows li > span { flex: 1; cursor: pointer; }
-.rows .label { display: block; }
-
-/* Empty state: title, one line, one button */
-.empty { display: flex; flex-direction: column; align-items: center; gap: 4px; max-width: none; padding-top: 120px; text-align: center; }
-.empty .btn { margin-top: 16px; }
-
-/* Visible at once on open so the field can take focus; still fades out on close. */
-.scrim.open { transition-duration: var(--dur), 0s; }
-.sheet-fields { display: grid; gap: 12px; margin: 24px 0; }
-.tabs { display: none; }
-
-/* Phones get an app layout: tab bar, two-line rows, bottom sheet, settings in the top bar */
-@media (max-width: 734px) {
-  .app { grid-template-columns: minmax(0, 1fr); }
-  .side { display: none; }
-  .bar { flex-wrap: wrap; height: auto; min-height: 56px; padding: 12px 16px; }
-  .bar .seg { display: flex; order: 1; flex: 1 0 100%; }
-  .bar .seg button { flex: 1; }
-  .search { order: 1; flex: 1 0 100%; }
-  .search input { width: 100%; }
-  main[data-view="overview"] .bar .search { display: none; }
-  .icon-btn { display: grid; }
-  .view { padding: 24px 16px calc(80px + env(safe-area-inset-bottom)); }
-  .stats { gap: 32px; padding: 0; }
-  .plot { height: 200px; margin-right: 48px; }
-  .xl { margin-right: 48px; }
-  .xl.dense span:nth-child(even) { visibility: hidden; }
-  .fields { grid-template-columns: 1fr; }
-  .pay thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
-  .pay tr { display: grid; grid-template-columns: auto auto 1fr auto; gap: 4px 8px; padding: 12px 0; border-bottom: 1px solid var(--separator-soft); }
-  .pay td { height: auto; padding: 0; border: 0; }
-  .pay td:nth-child(2) { grid-area: 1 / 1 / 2 / 4; }
-  .pay td.num { grid-area: 1 / 4; }
-  .pay td:is(:nth-child(1), :nth-child(3), :nth-child(4)) { grid-row: 2; color: var(--text-2); font-size: 12px; }
-  .pay td:nth-child(4) { grid-column: 4; justify-self: end; color: var(--text); }
-  .tabs {
-    position: fixed; inset: auto 0 0; z-index: 5; display: grid; grid-auto-flow: column; grid-auto-columns: 1fr;
-    padding-bottom: env(safe-area-inset-bottom); border-top: 1px solid var(--separator-soft);
-    background: color-mix(in srgb, var(--bg) 80%, transparent);
-    -webkit-backdrop-filter: saturate(180%) blur(20px); backdrop-filter: saturate(180%) blur(20px);
+/* icon rail 1024-1279: labels go, tooltips come */
+@media (min-width: 1024px) and (max-width: 1279px) {
+  .brand { padding: 20px 0 12px; text-align: center; }
+  .nav-h { height: 0; margin: 12px 0; padding: 0; overflow: hidden; }
+  .nav a { justify-content: center; padding: 0; }
+  .nav a > span, .user .who, .user > .icon { display: none; }
+  .user { justify-content: center; padding: 8px 0; }
+  .nav a:hover::after {
+    content: attr(data-label); position: absolute; z-index: 50; left: calc(100% + 8px); padding: 6px 10px; border-radius: var(--r-sm);
+    background: var(--tooltip); color: #fff; font: 400 var(--caption) var(--font); white-space: nowrap; pointer-events: none;
   }
-  .tabs a { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; height: 48px; color: var(--text-2); font-size: 10px; line-height: 1.2; letter-spacing: 0; }
-  .tabs a:hover { text-decoration: none; }
-  .tabs a[aria-current="page"] { color: var(--link); }
-  .tabs .ic { width: 22px; height: 22px; stroke-width: 1.1; }
 }
+@media (max-width: 1023px) { .side { display: none; } .shell { grid-template-columns: minmax(0, 1fr); } }
+
+.tabbar { display: none; }
+@media (max-width: 1023px) {
+  .tabbar {
+    position: fixed; inset: auto 0 0; z-index: 40; display: grid; grid-auto-flow: column; grid-auto-columns: 1fr;
+    padding-bottom: env(safe-area-inset-bottom); border-top: var(--hairline) solid var(--line);
+  }
+  .tabbar a {
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; height: 56px;
+    color: var(--fg-muted); font: 400 var(--caption) var(--font);
+  }
+  .tabbar a:hover { text-decoration: none; }
+  .tabbar a[aria-current="page"] { color: var(--accent-text); }
+  .tabbar .icon { width: 24px; height: 24px; }
+  .main { padding-bottom: calc(56px + env(safe-area-inset-bottom)); }
+}
+
+/* ---------- toolbar: 64, transparent at the top, material once content scrolls under it ---------- */
+.toolbar {
+  position: sticky; top: 0; z-index: 20; display: flex; align-items: center; gap: 8px; height: 64px; padding: 0 var(--pad);
+  border-bottom: var(--hairline) solid transparent; transition: border-color 100ms linear;
+}
+.toolbar.scrolled { border-bottom-color: var(--line); }
+.tb-title { min-width: 0; margin-right: auto; }
+.tb-title h1 { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tb-title p { color: var(--fg-subtle); white-space: nowrap; }
+.toolbar .search { width: 240px; margin-right: 4px; }
+.toolbar [data-tip]:hover::after, .toolbar [data-tip]:focus-visible::after { left: auto; right: 0; top: calc(100% + 8px); transform: none; }
+.icon-btn .badge { position: absolute; top: 2px; right: 0; }
+.btn .add-label { display: inline; }
+@media (max-width: 743px) {
+  .toolbar { gap: 4px; }
+  .toolbar .search, .toolbar .hide-phone { display: none; }
+  .tb-title p { display: none; }
+  .toolbar.scrolled .t-large-title { font: 600 var(--headline) var(--font); }
+  .btn.add { padding: 0; }
+  .btn.add .add-label { display: none; }
+}
+
+/* ---------- page grid: 12 columns ---------- */
+.page { max-width: 1440px; margin: 0 auto; padding: 8px var(--pad) 64px; }
+.grid { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: var(--gap); }
+.c-12 { grid-column: span 12; } .c-8 { grid-column: span 8; } .c-6 { grid-column: span 6; } .c-4 { grid-column: span 4; }
+@media (max-width: 1023px) { .c-8, .c-4 { grid-column: span 12; } .hl { grid-column: span 4; } }
+@media (max-width: 743px) { .c-6, .hl { grid-column: span 12; } }
+
+/* hero metric + area chart */
+.hero .card-head { align-items: flex-start; }
+.hero .meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
+.hero { display: flex; flex-direction: column; }
+.chart { flex: 1; display: grid; grid-template-columns: 24px minmax(0, 1fr); grid-template-rows: minmax(220px, 1fr) auto; column-gap: 12px; }
+.yl { position: relative; grid-area: 1 / 1; }
+.yl span { position: absolute; right: 0; transform: translateY(-50%); color: var(--fg-subtle); font: 400 var(--caption) var(--font); font-variant-numeric: tabular-nums; }
+.plot { position: relative; grid-area: 1 / 2; outline: none; touch-action: pan-y; }
+.plot:focus-visible { border-radius: var(--r-sm); }
+.plot svg { width: 100%; height: 100%; overflow: visible; }
+.plot .grid-l { fill: none; stroke: var(--line); stroke-width: 1; stroke-dasharray: 4 4; vector-effect: non-scaling-stroke; }
+.plot .line { fill: none; stroke: var(--accent); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
+.rule { position: absolute; top: 0; bottom: 0; width: 0; border-left: 1px solid var(--field-border); pointer-events: none; }
+.pt { position: absolute; box-sizing: content-box; width: 5px; height: 5px; margin: -4.5px 0 0 -4.5px; border: 2px solid var(--accent); border-radius: 50%; background: var(--surface); pointer-events: none; }
+.tip {
+  position: absolute; z-index: 2; padding: 10px 12px; border-radius: var(--r-md); background: var(--surface-raised); box-shadow: var(--shadow-popover);
+  white-space: nowrap; pointer-events: none; transform: translate(-50%, calc(-100% - 12px));
+}
+.tip .t-caption { color: var(--fg-subtle); }
+.tip b { display: block; font: 600 var(--label) var(--font); font-variant-numeric: tabular-nums; }
+.xl { grid-area: 2 / 2; display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); margin-top: 8px; color: var(--fg-subtle); font: 400 var(--caption) var(--font); text-align: center; }
+@media (max-width: 743px) { .xl span:nth-child(even) { visibility: hidden; } }
+
+/* composition donut + legend */
+.donut { position: relative; width: 160px; margin: 0 auto 16px; }
+.donut-c { position: absolute; inset: 0; display: grid; place-content: center; text-align: center; }
+.arc { fill: var(--h); stroke: var(--h); stroke-width: 8; stroke-linejoin: round; }
+.legend li { display: grid; grid-template-columns: auto minmax(0, 1fr) auto 40px; align-items: center; gap: 8px; height: 28px; }
+.legend .num { text-align: right; }
+
+/* highlight cards */
+button.hl-card { display: grid; }
+.hl-card .foot { color: var(--fg-subtle); font: 400 var(--footnote) var(--font); }
+.spark { width: 100%; height: 32px; fill: none; stroke: var(--h); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
+
+/* ---------- table card ---------- */
+.tt { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 16px 20px; }
+.tt .grow { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-left: auto; }
+.tt .search { width: 240px; }
+.tscroll { overflow-x: auto; border-top: var(--hairline) solid var(--line); }
+.table.rich { min-width: 720px; }
+.table.rich td { height: 56px; }
+.table.rich thead th { border-bottom-color: var(--line); }
+.table :is(th, td).gap { width: 20px; padding: 0; border-bottom-color: transparent; }
+.table th.gap { border-bottom-color: var(--line); }
+.table :is(th, td).sel { width: 36px; padding: 0 12px 0 0; }
+.who2 { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.who2 .t { display: grid; min-width: 0; }
+.who2 .cell-sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.own { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
+.eng { display: flex; align-items: center; gap: 8px; }
+.eng .num { width: 24px; text-align: right; }
+.eng .bar { position: relative; width: 64px; height: 4px; border-radius: var(--r-full); background: var(--fill); overflow: hidden; }
+.eng .bar i { position: absolute; inset: 0 auto 0 0; border-radius: var(--r-full); background: var(--mint); }
+.eng .bar i.mid { background: var(--butter); }
+.eng .bar i.low { background: var(--peach); }
+.table .when { color: var(--fg-muted); white-space: nowrap; }
+.table .more { opacity: 0; }
+.table tbody tr:hover .more, .table tbody tr:focus-within .more, .table tbody tr[aria-selected="true"] .more { opacity: 1; }
+@media (pointer: coarse) { .table .more { opacity: 1; } }
+.tf { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 20px; border-top: var(--hairline) solid var(--line); }
+.pg { display: flex; gap: 4px; }
+.pg button, .pg span {
+  display: inline-grid; place-items: center; min-width: 32px; height: 32px; padding: 0 4px; border: 0; border-radius: var(--r-sm);
+  background: transparent; color: var(--fg-muted); font: 500 var(--label) var(--font); font-variant-numeric: tabular-nums; cursor: pointer;
+  transition: background-color 100ms linear;
+}
+.pg button:hover { background: var(--hover); }
+.pg button[aria-current="page"] { background: var(--ink); color: var(--on-ink); }
+.pg span { cursor: default; }
+@media (max-width: 1439px) { .col-owner, .col-last { display: none; } }
+
+/* phone: the table becomes a list: name, status pill, trailing value */
+@media (max-width: 743px) {
+  .tt .grow, .tt .search { width: 100%; margin-left: 0; }
+  .tt > .seg { width: 100%; overflow-x: auto; }
+  .table.rich { min-width: 0; }
+  .table.rich thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  .table.rich tbody tr { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px 12px; padding: 12px 16px; border-bottom: var(--hairline) solid var(--line); }
+  .table.rich tbody tr:last-child { border-bottom: 0; }
+  .table.rich td { display: none; height: auto; padding: 0; border: 0; }
+  .table.rich td.c-name { display: block; grid-column: 1; grid-row: 1; }
+  .table.rich td.c-status { display: block; grid-column: 1; grid-row: 2; padding-left: 44px; }
+  .table.rich td.c-value { display: block; grid-column: 2; grid-row: 1; align-self: start; }
+  .tf { padding: 12px 16px; }
+  .pg .hide-phone { display: none; }
+}
+
+/* ---------- parts ---------- */
+.parts-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px 16px; margin: 48px 0 16px; }
+.parts-head p { margin-top: 4px; color: var(--fg-muted); }
+.spec { display: grid; grid-template-columns: 96px minmax(0, 1fr); align-items: center; gap: 12px; padding: 12px 0; }
+.spec + .spec { border-top: var(--hairline) solid var(--line); }
+.spec > .t-footnote { color: var(--fg-subtle); }
+.stack { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.stack .field { width: 100%; }
+.switch-row { display: inline-flex; align-items: center; gap: 8px; }
+.is-focus { border-color: var(--accent) !important; box-shadow: var(--focus); }
+.is-invalid { border-color: var(--danger) !important; }
+.btn .spin { border-color: currentColor; border-right-color: transparent; }
+@media (max-width: 743px) { .spec { grid-template-columns: minmax(0, 1fr); gap: 8px; } }
+
+.card .glist-head, .card .glist-foot { padding: 0; }
+.glist.on-card { background: transparent; }
+.glist.on-card > * { padding-left: 0; padding-right: 0; }
+.glist.on-card > * + *::before { left: 0; }
+.glist > button { width: 100%; border: 0; background: transparent; text-align: left; cursor: pointer; }
+.glist .grow { flex: 1; min-width: 0; }
+.glist .trail { margin-left: auto; color: var(--fg-muted); }
+.glist .row-ic { color: var(--fg-muted); }
+.glist .row-ic.chev { color: var(--fg-subtle); }
+.glist input.bare { flex: 1; min-width: 0; border: 0; background: transparent; outline: none; text-align: right; font: inherit; }
+.glist input.bare::placeholder { color: var(--fg-subtle); opacity: 1; }
+.glist .accent { color: var(--accent-text); }
+
+.stage { display: grid; align-content: center; min-height: 560px; padding: 24px; border-radius: var(--r-xl); background: var(--scrim); }
+.stage.end { justify-items: end; }
+.stage.mid { justify-items: center; }
+.drawer.is-static { position: relative; inset: auto; width: min(440px, 100%); height: auto; margin: 0; overflow: visible; animation: none; border-radius: var(--r-xl); }
+.sheet.is-static { width: min(520px, 100%); max-height: none; padding: 20px; border-radius: var(--r-xl); transform: none; }
+.toast-cap.is-static { position: static; transform: none; animation: none; }
+.dr-head { display: flex; align-items: center; gap: 12px; padding: 20px 20px 16px; }
+.dr-head .t { display: grid; gap: 4px; min-width: 0; margin-right: auto; }
+.dr-head .t p { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; color: var(--fg-muted); }
+.dr-body { display: grid; gap: 16px; padding: 0 20px 20px; }
+.dr-body .seg { display: flex; }
+.kv { display: flex; justify-content: space-between; gap: 16px; padding: 12px 0; }
+.kv > :first-child { color: var(--fg-muted); }
+.kv > :last-child { text-align: right; overflow-wrap: anywhere; }
+.timeline li { position: relative; display: grid; grid-template-columns: 8px minmax(0, 1fr); gap: 12px; padding-bottom: 16px; }
+.timeline li::before { content: ""; position: absolute; top: 16px; bottom: 0; left: 3.5px; border-left: 1px solid var(--line); }
+.timeline li:last-child { padding-bottom: 0; }
+.timeline li:last-child::before { display: none; }
+.timeline .dot { margin-top: 6px; background: var(--h); }
+.timeline .t-caption { display: block; color: var(--fg-subtle); }
+.alert-btns { display: flex; gap: 8px; margin-top: 8px; }
+.alert-btns .btn { flex: 1; }
+.alert-title { font: 600 var(--headline) var(--font); }
+.alert p:not(.alert-title) { color: var(--fg-muted); }
+.skel-row { display: flex; align-items: center; gap: 12px; padding: 12px 0; }
+.skel-row .skel:first-child { width: 32px; height: 32px; border-radius: 50%; }
+.skel-row .lines { display: grid; flex: 1; gap: 8px; }
+.skel-row .lines .skel { height: 10px; }
+.sheet .glist { background: var(--surface); }
+.sheet-fields { display: grid; gap: 4px; }
 </style>
 </head>
-<body>
+<body class="app">
 
-<svg hidden>
-  <symbol id="i-overview" viewBox="0 0 16 16"><rect x="2" y="2" width="5" height="5" rx="1.25"/><rect x="9" y="2" width="5" height="5" rx="1.25"/><rect x="2" y="9" width="5" height="5" rx="1.25"/><rect x="9" y="9" width="5" height="5" rx="1.25"/></symbol>
-  <symbol id="i-payments" viewBox="0 0 16 16"><rect x="1.75" y="3.25" width="12.5" height="9.5" rx="2"/><path d="M1.75 6.5h12.5M4.5 10h2"/></symbol>
-  <symbol id="i-invoices" viewBox="0 0 16 16"><path d="M9.5 1.75H4.25a1 1 0 0 0-1 1v10.5a1 1 0 0 0 1 1h7.5a1 1 0 0 0 1-1V4.75z"/><path d="M9.5 1.75v3h3M5.75 8.5h4.5M5.75 11h3"/></symbol>
-  <symbol id="i-settings" viewBox="0 0 16 16"><path d="M2 4.5h6.5M11.5 4.5H14M2 11.5h2.5M7.5 11.5H14"/><circle cx="10" cy="4.5" r="1.5"/><circle cx="6" cy="11.5" r="1.5"/></symbol>
-  <symbol id="i-search" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5"/><path d="m10.5 10.5 3 3"/></symbol>
+<svg hidden aria-hidden="true">
+  <symbol id="i-overview" viewBox="0 0 24 24"><rect width="7" height="9" x="3" y="3" rx="1"/><rect width="7" height="5" x="14" y="3" rx="1"/><rect width="7" height="9" x="14" y="12" rx="1"/><rect width="7" height="5" x="3" y="16" rx="1"/></symbol>
+  <symbol id="i-users" viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></symbol>
+  <symbol id="i-deals" viewBox="0 0 24 24"><path d="M16 20V4a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/><rect width="20" height="14" x="2" y="6" rx="2"/></symbol>
+  <symbol id="i-calendar" viewBox="0 0 24 24"><path d="M8 2v4"/><path d="M16 2v4"/><rect width="18" height="18" x="3" y="4" rx="2"/><path d="M3 10h18"/></symbol>
+  <symbol id="i-reports" viewBox="0 0 24 24"><path d="M3 3v16a2 2 0 0 0 2 2h16"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/></symbol>
+  <symbol id="i-settings" viewBox="0 0 24 24"><line x1="21" x2="14" y1="4" y2="4"/><line x1="10" x2="3" y1="4" y2="4"/><line x1="21" x2="12" y1="12" y2="12"/><line x1="8" x2="3" y1="12" y2="12"/><line x1="21" x2="16" y1="20" y2="20"/><line x1="12" x2="3" y1="20" y2="20"/><line x1="14" x2="14" y1="2" y2="6"/><line x1="8" x2="8" y1="10" y2="14"/><line x1="16" x2="16" y1="18" y2="22"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></symbol>
+  <symbol id="i-bell" viewBox="0 0 24 24"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></symbol>
+  <symbol id="i-theme" viewBox="0 0 24 24"><path d="M12 8a2.83 2.83 0 0 0 4 4 4 4 0 1 1-4-4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.9 4.9 1.4 1.4"/><path d="m17.7 17.7 1.4 1.4"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.3 17.7-1.4 1.4"/><path d="m19.1 4.9-1.4 1.4"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M5 12h14"/><path d="M12 5v14"/></symbol>
+  <symbol id="i-down" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+  <symbol id="i-right" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></symbol>
+  <symbol id="i-left" viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></symbol>
+  <symbol id="i-more" viewBox="0 0 24 24"><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
+  <symbol id="i-download" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></symbol>
+  <symbol id="i-mail" viewBox="0 0 24 24"><rect width="20" height="16" x="2" y="4" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></symbol>
+  <symbol id="i-trend" viewBox="0 0 24 24"><polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/><polyline points="16 7 22 7 22 13"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></symbol>
+  <symbol id="i-alert" viewBox="0 0 24 24"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/></symbol>
+  <symbol id="i-user-plus" viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="19" x2="19" y1="8" y2="14"/><line x1="22" x2="16" y1="11" y2="11"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></symbol>
+  <symbol id="i-filter" viewBox="0 0 24 24"><path d="M3 6h18"/><path d="M7 12h10"/><path d="M10 18h4"/></symbol>
+  <symbol id="i-user" viewBox="0 0 24 24"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></symbol>
 </svg>
 
-<div class="app">
-  <nav class="side" aria-label="Sections">
-    <p class="shop"><b>Kopi Rejeki</b><span class="label">Jl. Kaliurang, Yogyakarta</span></p>
-    <a class="nav-item" href="#overview"><svg class="ic" aria-hidden="true"><use href="#i-overview"/></svg>Overview</a>
-    <a class="nav-item" href="#payments"><svg class="ic" aria-hidden="true"><use href="#i-payments"/></svg>Payments</a>
-    <a class="nav-item" href="#invoices"><svg class="ic" aria-hidden="true"><use href="#i-invoices"/></svg>Invoices</a>
-    <a class="nav-item" href="#settings"><svg class="ic" aria-hidden="true"><use href="#i-settings"/></svg>Settings</a>
-  </nav>
+<div class="shell">
+  <!-- Sidebar 248, icon rail at 1024-1279, tab bar below 1024 -->
+  <aside class="side" aria-label="Main">
+    <p class="brand">Tali</p>
+    <nav class="nav" aria-label="Sections">
+      <a href="#overview" aria-current="page" data-label="Overview"><svg class="icon" aria-hidden="true"><use href="#i-overview"/></svg><span>Overview</span></a>
+      <a href="#clients" data-label="Clients"><svg class="icon" aria-hidden="true"><use href="#i-users"/></svg><span>Clients</span><span class="count">248</span></a>
+      <a href="#deals" data-label="Deals"><svg class="icon" aria-hidden="true"><use href="#i-deals"/></svg><span>Deals</span><span class="count">36</span></a>
+      <a href="#meetings" data-label="Meetings"><svg class="icon" aria-hidden="true"><use href="#i-calendar"/></svg><span>Meetings</span></a>
+      <p class="nav-h">Insights</p>
+      <a href="#reports" data-label="Reports"><svg class="icon" aria-hidden="true"><use href="#i-reports"/></svg><span>Reports</span></a>
+      <p class="nav-h">Account</p>
+      <a href="#settings" data-label="Settings"><svg class="icon" aria-hidden="true"><use href="#i-settings"/></svg><span>Settings</span></a>
+    </nav>
+    <button class="user" type="button" aria-label="Account menu">
+      <span class="avatar" aria-hidden="true">BP</span>
+      <span class="who"><b>Bagas Pratama</b><span>Sales Lead</span></span>
+      <svg class="icon" aria-hidden="true"><use href="#i-down"/></svg>
+    </button>
+  </aside>
 
-  <main id="main" data-view="overview">
-    <header class="bar">
-      <h1 id="title">Overview</h1>
-      <a class="icon-btn" href="#settings" aria-label="Settings"><svg class="ic" aria-hidden="true"><use href="#i-settings"/></svg></a>
-      <div class="seg" id="period" role="group" aria-label="Period">
-        <button type="button" value="today" aria-pressed="true">Today</button><button type="button" value="week" aria-pressed="false">Week</button><button type="button" value="month" aria-pressed="false">Month</button>
+  <div class="main">
+    <header class="toolbar" id="toolbar">
+      <div class="tb-title">
+        <h1 class="t-large-title">Overview</h1>
+        <p class="t-footnote">Friday 16 October · 248 clients</p>
       </div>
-      <label class="search"><svg class="ic" aria-hidden="true"><use href="#i-search"/></svg><input id="q" type="search" placeholder="Search payments" aria-label="Search payments"></label>
-      <button class="btn btn-sm" type="button" data-sheet="sale">New sale</button>
+      <div class="search" role="search">
+        <svg class="icon" aria-hidden="true"><use href="#i-search"/></svg>
+        <input type="search" placeholder="Search" aria-label="Search">
+        <kbd>⌘K</kbd>
+        <button class="icon-btn clear" type="button" aria-label="Clear search"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button>
+      </div>
+      <button class="icon-btn" type="button" aria-label="Notifications, 3 unread" data-tip="Notifications">
+        <svg class="icon" aria-hidden="true"><use href="#i-bell"/></svg><span class="badge" aria-hidden="true">3</span>
+      </button>
+      <button class="icon-btn hide-phone" type="button" aria-label="Calendar" data-tip="Calendar"><svg class="icon" aria-hidden="true"><use href="#i-calendar"/></svg></button>
+      <button class="icon-btn hide-phone" type="button" id="theme-cycle" aria-label="Appearance: Auto" data-tip="Appearance"><svg class="icon" aria-hidden="true"><use href="#i-theme"/></svg></button>
+      <button class="btn add" type="button" aria-label="New Client"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg><span class="add-label">New Client</span></button>
     </header>
 
-    <section class="view" id="view-overview" aria-labelledby="title">
-      <div class="summary">
-        <div>
-          <p class="label" id="hero-label">Takings today</p>
-          <p class="hero-num" id="hero-num">Rp 4.820.500</p>
-          <p class="muted"><span id="hero-delta" class="up">+12%</span> <span id="hero-vs">vs this time last Friday</span></p>
-        </div>
-        <dl class="stats">
-          <div><dt class="label">Payments</dt><dd id="s-count">138</dd></div>
-          <div><dt class="label">Average sale</dt><dd id="s-avg">Rp 34.931</dd></div>
-          <div><dt class="label">Refunds</dt><dd id="s-refunds">Rp 86.000</dd></div>
-        </dl>
-      </div>
-      <figure class="chart" id="chart">
-        <figcaption class="chart-head"><span class="sec-title" id="chart-title">Takings by hour</span><span class="label" id="chart-sub">Friday 16 October</span></figcaption>
-        <div class="plot label" id="plot"></div>
-        <div class="xl label" id="xl" aria-hidden="true"></div>
-        <div class="tip label" id="tip" hidden></div>
-        <table class="sr-only"><caption id="sr-caption"></caption><thead><tr><th scope="col">Period</th><th scope="col">Takings</th></tr></thead><tbody id="sr-rows"></tbody></table>
-      </figure>
-    </section>
-
-    <section class="view" id="view-payments" aria-labelledby="title" hidden>
-      <p class="label">Friday 16 October · 138 payments</p>
-      <table class="table pay">
-        <thead><tr><th scope="col">Time</th><th scope="col">Item</th><th scope="col">Method</th><th scope="col">Status</th><th scope="col" class="num">Amount</th></tr></thead>
-        <tbody id="pay-rows">
-          <tr><td>14:18</td><td>Es kopi susu ×2, roti bakar cokelat</td><td>QRIS</td><td><span class="status ok">Paid</span></td><td class="num">Rp 61.000</td></tr>
-          <tr><td>14:11</td><td>Kopi tubruk</td><td>Card</td><td><span class="status ok">Paid</span></td><td class="num">Rp 12.000</td></tr>
-          <tr><td>14:05</td><td>Nasi goreng kampung ×3</td><td>Bank transfer</td><td><span class="status wait">Pending</span></td><td class="num">Rp 105.000</td></tr>
-          <tr><td>13:58</td><td>Es teh manis ×4</td><td>QRIS</td><td><span class="status ok">Paid</span></td><td class="num">Rp 32.000</td></tr>
-          <tr><td>13:47</td><td>Catering, 10 boxes</td><td>Card</td><td><span class="status bad">Declined</span></td><td class="num">Rp 450.000</td></tr>
-          <tr><td>13:40</td><td>Kopi susu gula aren</td><td>QRIS</td><td><span class="status ok">Paid</span></td><td class="num">Rp 22.000</td></tr>
-          <tr><td>13:22</td><td>Pisang goreng ×2</td><td>Card</td><td><span class="status">Refunded</span></td><td class="num">Rp 24.000</td></tr>
-          <tr><td>13:15</td><td>Es kopi susu, croissant</td><td>QRIS</td><td><span class="status ok">Paid</span></td><td class="num">Rp 46.000</td></tr>
-        </tbody>
-      </table>
-    </section>
-
-    <section class="view empty" id="view-invoices" aria-labelledby="empty-title" hidden>
-      <h2 class="sec-title" id="empty-title">No invoices yet</h2>
-      <p class="muted">Send an invoice and get paid by bank transfer.</p>
-      <button class="btn btn-sm" type="button">Create invoice</button>
-    </section>
-
-    <section class="view" id="view-settings" aria-labelledby="title" hidden>
-      <div class="group">
-        <h2 class="sec-title">Shop</h2>
-        <div class="fields">
-          <div class="field"><input id="shop-name" value="Kopi Rejeki" placeholder=" " autocomplete="organization"><label for="shop-name">Shop name</label></div>
-          <div class="field"><input id="shop-wa" type="tel" value="+62 812-3456-0417" placeholder=" " autocomplete="tel"><label for="shop-wa">WhatsApp number</label></div>
-        </div>
-      </div>
-      <div class="group">
-        <h2 class="sec-title">Payments</h2>
-        <ul class="rows">
-          <li><label for="sw-qris">QRIS<span class="label">0,7% per payment</span></label><input class="switch" type="checkbox" id="sw-qris" checked></li>
-          <li><label for="sw-card">Cards<span class="label">1,8% per payment</span></label><input class="switch" type="checkbox" id="sw-card" checked></li>
-          <li><label for="sw-transfer">Bank transfer<span class="label">Rp 2.500 per payment</span></label><input class="switch" type="checkbox" id="sw-transfer"></li>
-          <li><label for="sw-receipt">Receipts on WhatsApp<span class="label">Sent to the customer after each payment</span></label><input class="switch" type="checkbox" id="sw-receipt" checked></li>
-        </ul>
-      </div>
-      <div class="group">
-        <h2 class="sec-title">Payouts</h2>
-        <ul class="rows"><li><span>BCA ••• 4821<span class="label">Every day by 09:00</span></span><button class="btn btn-gray btn-sm" type="button">Change</button></li></ul>
-      </div>
-      <div class="group">
-        <h2 class="sec-title" id="appearance">Appearance</h2>
-        <ul class="rows"><li><span>Theme</span>
-          <div class="seg" id="theme" role="group" aria-labelledby="appearance">
-            <button type="button" value="auto" aria-pressed="true">Auto</button><button type="button" value="light" aria-pressed="false">Light</button><button type="button" value="dark" aria-pressed="false">Dark</button>
+    <main class="page" id="overview">
+      <!-- §10 summary: one hero metric, one composition, up to three highlights, then the list -->
+      <div class="grid">
+        <section class="card hero c-8" aria-labelledby="hero-l">
+          <div class="card-head">
+            <div>
+              <p class="t-footnote muted" id="hero-l">Pipeline Value</p>
+              <p class="metric num"><span class="unit pre">Rp</span>4,82<span class="unit">miliar</span></p>
+              <p class="meta"><span class="delta up">▲ 12,4%</span><span class="t-footnote subtle">vs last quarter</span></p>
+            </div>
+            <div class="seg" role="group" aria-label="Period"><button type="button" aria-pressed="false">30D</button><button type="button" aria-pressed="true">90D</button><button type="button" aria-pressed="false">12M</button></div>
           </div>
-        </li></ul>
+          <div class="chart">
+            <div class="yl" aria-hidden="true"><span style="top:9.09%">5</span><span style="top:34.86%">4</span><span style="top:60.6%">3</span><span style="top:86.36%">2</span></div>
+            <div class="plot" id="plot" tabindex="0" role="img" aria-label="Pipeline value by month, Rp miliar. Rises from 2,9 in November to 4,82 in October. Use the arrow keys to read each month.">
+              <svg viewBox="0 0 600 220" preserveAspectRatio="none" aria-hidden="true">
+                <defs><linearGradient id="fade" x1="0" y1="0" x2="0" y2="1"><stop offset="0" style="stop-color:var(--accent);stop-opacity:.18"/><stop offset="1" style="stop-color:var(--accent);stop-opacity:0"/></linearGradient></defs>
+                <path class="grid-l" d="M0 20H600M0 76.7H600M0 133.3H600M0 190H600"/>
+                <path d="M25 139 C41.7 135.2 58.3 127.7 75 127.7 C91.7 127.7 108.3 133.3 125 133.3 C141.7 133.3 158.3 110.7 175 110.7 C191.7 110.7 208.3 116.3 225 116.3 C241.7 116.3 258.3 88 275 88 C291.7 88 308.3 93.7 325 93.7 C341.7 93.7 358.3 82.4 375 76.7 C391.7 71 408.3 59.7 425 59.7 C441.7 59.7 458.3 71 475 71 C491.7 71 508.3 55 525 48.3 C541.7 41.6 558.3 36.2 575 30.2 L575 220 L25 220 Z" fill="url(#fade)"/>
+                <path class="line" d="M25 139 C41.7 135.2 58.3 127.7 75 127.7 C91.7 127.7 108.3 133.3 125 133.3 C141.7 133.3 158.3 110.7 175 110.7 C191.7 110.7 208.3 116.3 225 116.3 C241.7 116.3 258.3 88 275 88 C291.7 88 308.3 93.7 325 93.7 C341.7 93.7 358.3 82.4 375 76.7 C391.7 71 408.3 59.7 425 59.7 C441.7 59.7 458.3 71 475 71 C491.7 71 508.3 55 525 48.3 C541.7 41.6 558.3 36.2 575 30.2"/>
+              </svg>
+              <i class="rule" hidden></i><i class="pt" hidden></i>
+              <div class="tip" hidden><span class="t-caption"></span><b></b></div>
+            </div>
+            <div class="xl" aria-hidden="true"><span>Nov</span><span>Dec</span><span>Jan</span><span>Feb</span><span>Mar</span><span>Apr</span><span>May</span><span>Jun</span><span>Jul</span><span>Aug</span><span>Sep</span><span>Oct</span></div>
+          </div>
+        </section>
+
+        <section class="card c-4" aria-labelledby="comp-l">
+          <div class="card-head"><h2 class="card-title" id="comp-l">Clients by Status</h2><span class="t-footnote subtle">All time</span></div>
+          <div class="donut">
+            <svg viewBox="0 0 120 120" role="img" aria-label="248 clients: 92 Active, 48 In Negotiation, 41 New Lead, 27 Needs Follow-Up, 19 At Risk, 21 Inactive.">
+              <path class="arc hue-mint" d="M65.22 8.26A52 52 0 0 1 101.09 91.86L95.02 87.16A44.32 44.32 0 0 0 64.45 15.90Z"/>
+              <path class="arc hue-lavender" d="M93.90 99.43A52 52 0 0 1 44.39 109.60L46.70 102.28A44.32 44.32 0 0 0 88.90 93.60Z"/>
+              <path class="arc hue-sky" d="M34.80 105.49A52 52 0 0 1 9.34 71.71L16.82 69.98A44.32 44.32 0 0 0 38.52 98.77Z"/>
+              <path class="arc hue-butter" d="M8.02 61.36A52 52 0 0 1 13.33 37.06L20.23 40.45A44.32 44.32 0 0 0 15.70 61.16Z"/>
+              <path class="arc hue-peach" d="M18.85 28.20A52 52 0 0 1 29.26 18.06L33.80 24.26A44.32 44.32 0 0 0 24.93 32.90Z"/>
+              <path class="arc hue-gray" d="M38.25 12.77A52 52 0 0 1 54.78 8.26L55.55 15.90A44.32 44.32 0 0 0 41.46 19.74Z"/>
+            </svg>
+            <div class="donut-c"><p class="metric-2 num">248</p><p class="t-caption subtle">Clients</p></div>
+          </div>
+          <ul class="legend t-body">
+            <li class="hue-mint"><span class="dot"></span><span>Active</span><span class="num">92</span><span class="num subtle">37%</span></li>
+            <li class="hue-lavender"><span class="dot"></span><span>In Negotiation</span><span class="num">48</span><span class="num subtle">19%</span></li>
+            <li class="hue-sky"><span class="dot"></span><span>New Lead</span><span class="num">41</span><span class="num subtle">17%</span></li>
+            <li class="hue-butter"><span class="dot"></span><span>Needs Follow-Up</span><span class="num">27</span><span class="num subtle">11%</span></li>
+            <li class="hue-peach"><span class="dot"></span><span>At Risk</span><span class="num">19</span><span class="num subtle">8%</span></li>
+            <li class="hue-gray"><span class="dot"></span><span>Inactive</span><span class="num">21</span><span class="num subtle">8%</span></li>
+          </ul>
+        </section>
+
+        <button class="card hl-card hl hue-butter c-4" type="button">
+          <span class="hl-top"><svg class="icon" aria-hidden="true"><use href="#i-clock"/></svg>Follow-Ups Due<span class="hl-period">This Week</span></span>
+          <span class="metric-2 num">14<span class="unit">clients</span></span>
+          <span class="foot">9 are overdue by 3 days or more.</span>
+        </button>
+        <button class="card hl-card hl hue-mint c-4" type="button">
+          <span class="hl-top"><svg class="icon" aria-hidden="true"><use href="#i-trend"/></svg>Deals Won<span class="hl-period">30D</span></span>
+          <span class="metric-2 num"><span class="unit pre">Rp</span>612,5<span class="unit">juta</span></span>
+          <svg class="spark" viewBox="0 0 120 32" preserveAspectRatio="none" aria-hidden="true"><polyline points="0,26 14,22 28,24 42,16 56,18 70,10 84,14 98,8 120,4"/></svg>
+        </button>
+        <button class="card hl-card hl hue-peach c-4" type="button">
+          <span class="hl-top"><svg class="icon" aria-hidden="true"><use href="#i-alert"/></svg>At Risk<span class="hl-period">Now</span></span>
+          <span class="metric-2 num">19<span class="unit">clients</span></span>
+          <span class="foot">Rp 1,28 miliar in open deals.</span>
+        </button>
+
+        <!-- §8 table -->
+        <section class="card card-flush c-12" id="clients" aria-labelledby="clients-l">
+          <h2 class="sr-only" id="clients-l">Clients</h2>
+          <div class="tt">
+            <div class="seg" role="group" aria-label="View">
+              <button type="button" aria-pressed="true">All<span class="n">248</span></button><button type="button" aria-pressed="false">Active<span class="n">92</span></button><button type="button" aria-pressed="false">At Risk<span class="n">19</span></button><button type="button" aria-pressed="false">New<span class="n">41</span></button>
+            </div>
+            <div class="grow">
+              <div class="search"><svg class="icon" aria-hidden="true"><use href="#i-search"/></svg><input type="search" placeholder="Search clients" aria-label="Search clients"><button class="icon-btn clear" type="button" aria-label="Clear search"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button></div>
+              <button class="filter-chip" type="button" aria-pressed="true">Owner · 3<svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button>
+              <button class="filter-chip" type="button" aria-pressed="false">Last Contact<svg class="icon" aria-hidden="true"><use href="#i-down"/></svg></button>
+              <button class="btn btn-plain btn-sm" type="button">Clear All</button>
+              <button class="btn btn-gray" type="button">Export…</button>
+            </div>
+          </div>
+          <div class="tscroll">
+            <table class="table rich">
+              <thead><tr>
+                <th class="gap" aria-hidden="true"></th><th class="sel"><input class="check" type="checkbox" aria-label="Select all"></th>
+                <th scope="col">Client</th><th scope="col">Status</th><th scope="col" class="col-owner">Owner</th><th scope="col">Engagement</th><th scope="col" class="col-last">Last Contact</th><th scope="col" class="num">Deal Value</th><th class="more-h" aria-hidden="true"></th><th class="gap" aria-hidden="true"></th>
+              </tr></thead>
+              <tbody>
+                <tr class="go"><td class="gap"></td><td class="sel"><input class="check" type="checkbox" aria-label="Select Dewi Anggraini"></td>
+                  <td class="c-name"><div class="who2"><span class="avatar">DA</span><span class="t"><span class="cell-title">Dewi Anggraini</span><span class="cell-sub">dewi@kopikalijaga.co.id</span></span></div></td>
+                  <td class="c-status"><span class="pill hue-mint">Active</span></td>
+                  <td class="col-owner"><span class="own"><span class="avatar sm">BP</span>Bagas Pratama</span></td>
+                  <td><div class="eng"><span class="num">86</span><span class="bar"><i style="width:86%"></i></span></div></td>
+                  <td class="col-last when">2d ago</td><td class="num c-value"><span class="cur">Rp</span>13.500.000</td>
+                  <td><button class="icon-btn more" type="button" aria-label="Actions for Dewi Anggraini"><svg class="icon" aria-hidden="true"><use href="#i-more"/></svg></button></td><td class="gap"></td></tr>
+                <tr class="go" aria-selected="true"><td class="gap"></td><td class="sel"><input class="check" type="checkbox" aria-label="Select Rahmat Hidayat"></td>
+                  <td class="c-name"><div class="who2"><span class="avatar">RH</span><span class="t"><span class="cell-title">Rahmat Hidayat</span><span class="cell-sub">rahmat@sinarbaja.co.id</span></span></div></td>
+                  <td class="c-status"><span class="pill hue-lavender">In Negotiation</span></td>
+                  <td class="col-owner"><span class="own"><span class="avatar sm">SW</span>Sekar Wulandari</span></td>
+                  <td><div class="eng"><span class="num">72</span><span class="bar"><i style="width:72%"></i></span></div></td>
+                  <td class="col-last when">Today</td><td class="num c-value"><span class="cur">Rp</span>248.000.000</td>
+                  <td><button class="icon-btn more" type="button" aria-label="Actions for Rahmat Hidayat"><svg class="icon" aria-hidden="true"><use href="#i-more"/></svg></button></td><td class="gap"></td></tr>
+                <tr class="go"><td class="gap"></td><td class="sel"><input class="check" type="checkbox" aria-label="Select Maya Kusumawardhani"></td>
+                  <td class="c-name"><div class="who2"><span class="avatar">MK</span><span class="t"><span class="cell-title">Maya Kusumawardhani</span><span class="cell-sub">maya@lenteraedu.id</span></span></div></td>
+                  <td class="c-status"><span class="pill hue-sky">New Lead</span></td>
+                  <td class="col-owner"><span class="own"><span class="avatar sm">BP</span>Bagas Pratama</span></td>
+                  <td><div class="eng"><span class="num">34</span><span class="bar"><i class="low" style="width:34%"></i></span></div></td>
+                  <td class="col-last when">5d ago</td><td class="num c-value"><span class="cur">Rp</span>42.750.000</td>
+                  <td><button class="icon-btn more" type="button" aria-label="Actions for Maya Kusumawardhani"><svg class="icon" aria-hidden="true"><use href="#i-more"/></svg></button></td><td class="gap"></td></tr>
+                <tr class="go"><td class="gap"></td><td class="sel"><input class="check" type="checkbox" aria-label="Select Yoga Setiawan"></td>
+                  <td class="c-name"><div class="who2"><span class="avatar">YS</span><span class="t"><span class="cell-title">Yoga Setiawan</span><span class="cell-sub">yoga@arunikalogistik.co.id</span></span></div></td>
+                  <td class="c-status"><span class="pill hue-butter">Needs Follow-Up</span></td>
+                  <td class="col-owner"><span class="own"><span class="avatar sm">SW</span>Sekar Wulandari</span></td>
+                  <td><div class="eng"><span class="num">58</span><span class="bar"><i class="mid" style="width:58%"></i></span></div></td>
+                  <td class="col-last when">9d ago</td><td class="num c-value"><span class="cur">Rp</span>96.200.000</td>
+                  <td><button class="icon-btn more" type="button" aria-label="Actions for Yoga Setiawan"><svg class="icon" aria-hidden="true"><use href="#i-more"/></svg></button></td><td class="gap"></td></tr>
+                <tr class="go"><td class="gap"></td><td class="sel"><input class="check" type="checkbox" aria-label="Select Putri Maharani"></td>
+                  <td class="c-name"><div class="who2"><span class="avatar">PM</span><span class="t"><span class="cell-title">Putri Maharani</span><span class="cell-sub">putri@batikmahkota.com</span></span></div></td>
+                  <td class="c-status"><span class="pill hue-peach">At Risk</span></td>
+                  <td class="col-owner"><span class="own"><span class="avatar sm">DA</span>Dimas Aditya</span></td>
+                  <td><div class="eng"><span class="num">31</span><span class="bar"><i class="low" style="width:31%"></i></span></div></td>
+                  <td class="col-last when">21d ago</td><td class="num c-value"><span class="cur">Rp</span>18.900.000</td>
+                  <td><button class="icon-btn more" type="button" aria-label="Actions for Putri Maharani"><svg class="icon" aria-hidden="true"><use href="#i-more"/></svg></button></td><td class="gap"></td></tr>
+                <tr class="go"><td class="gap"></td><td class="sel"><input class="check" type="checkbox" aria-label="Select Hendra Wijaya"></td>
+                  <td class="c-name"><div class="who2"><span class="avatar">HW</span><span class="t"><span class="cell-title">Hendra Wijaya</span><span class="cell-sub">hendra@tirtamas.co.id</span></span></div></td>
+                  <td class="c-status"><span class="pill hue-mint">Active</span></td>
+                  <td class="col-owner"><span class="own"><span class="avatar sm">DA</span>Dimas Aditya</span></td>
+                  <td><div class="eng"><span class="num">91</span><span class="bar"><i style="width:91%"></i></span></div></td>
+                  <td class="col-last when">1d ago</td><td class="num c-value"><span class="cur">Rp</span>515.000.000</td>
+                  <td><button class="icon-btn more" type="button" aria-label="Actions for Hendra Wijaya"><svg class="icon" aria-hidden="true"><use href="#i-more"/></svg></button></td><td class="gap"></td></tr>
+                <tr class="go"><td class="gap"></td><td class="sel"><input class="check" type="checkbox" aria-label="Select Nadia Safitri"></td>
+                  <td class="c-name"><div class="who2"><span class="avatar">NS</span><span class="t"><span class="cell-title">Nadia Safitri</span><span class="cell-sub">nadia@kliniksehat.id</span></span></div></td>
+                  <td class="c-status"><span class="pill hue-gray">Inactive</span></td>
+                  <td class="col-owner"><span class="own"><span class="avatar sm">BP</span>Bagas Pratama</span></td>
+                  <td><div class="eng"><span class="num">12</span><span class="bar"><i class="low" style="width:12%"></i></span></div></td>
+                  <td class="col-last when">64d ago</td><td class="num c-value"><span class="cur">Rp</span>7.250.000</td>
+                  <td><button class="icon-btn more" type="button" aria-label="Actions for Nadia Safitri"><svg class="icon" aria-hidden="true"><use href="#i-more"/></svg></button></td><td class="gap"></td></tr>
+                <tr class="go"><td class="gap"></td><td class="sel"><input class="check" type="checkbox" aria-label="Select Fajar Nugroho"></td>
+                  <td class="c-name"><div class="who2"><span class="avatar">FN</span><span class="t"><span class="cell-title">Fajar Nugroho</span><span class="cell-sub">fajar@gelombangmedia.co.id</span></span></div></td>
+                  <td class="c-status"><span class="pill hue-lavender">In Negotiation</span></td>
+                  <td class="col-owner"><span class="own"><span class="avatar sm">SW</span>Sekar Wulandari</span></td>
+                  <td><div class="eng"><span class="num">66</span><span class="bar"><i class="mid" style="width:66%"></i></span></div></td>
+                  <td class="col-last when">3d ago</td><td class="num c-value"><span class="cur">Rp</span>134.000.000</td>
+                  <td><button class="icon-btn more" type="button" aria-label="Actions for Fajar Nugroho"><svg class="icon" aria-hidden="true"><use href="#i-more"/></svg></button></td><td class="gap"></td></tr>
+                <tr class="go"><td class="gap"></td><td class="sel"><input class="check" type="checkbox" aria-label="Select Larasati Handayani"></td>
+                  <td class="c-name"><div class="who2"><span class="avatar">LH</span><span class="t"><span class="cell-title">Larasati Handayani</span><span class="cell-sub">lara@ladangpangan.id</span></span></div></td>
+                  <td class="c-status"><span class="pill hue-sky">New Lead</span></td>
+                  <td class="col-owner"><span class="own"><span class="avatar sm">DA</span>Dimas Aditya</span></td>
+                  <td><div class="eng"><span class="num">45</span><span class="bar"><i class="mid" style="width:45%"></i></span></div></td>
+                  <td class="col-last when">4d ago</td><td class="num c-value"><span class="cur">Rp</span>31.500.000</td>
+                  <td><button class="icon-btn more" type="button" aria-label="Actions for Larasati Handayani"><svg class="icon" aria-hidden="true"><use href="#i-more"/></svg></button></td><td class="gap"></td></tr>
+                <tr class="go"><td class="gap"></td><td class="sel"><input class="check" type="checkbox" aria-label="Select Budi Santoso"></td>
+                  <td class="c-name"><div class="who2"><span class="avatar">BS</span><span class="t"><span class="cell-title">Budi Santoso</span><span class="cell-sub">budi@mitrakaryateknik.co.id</span></span></div></td>
+                  <td class="c-status"><span class="pill hue-mint">Active</span></td>
+                  <td class="col-owner"><span class="own"><span class="avatar sm">BP</span>Bagas Pratama</span></td>
+                  <td><div class="eng"><span class="num">78</span><span class="bar"><i style="width:78%"></i></span></div></td>
+                  <td class="col-last when">6d ago</td><td class="num c-value"><span class="cur">Rp</span>67.800.000</td>
+                  <td><button class="icon-btn more" type="button" aria-label="Actions for Budi Santoso"><svg class="icon" aria-hidden="true"><use href="#i-more"/></svg></button></td><td class="gap"></td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="tf">
+            <p class="t-footnote subtle">Showing 1–10 of 248</p>
+            <nav class="pg" aria-label="Pagination">
+              <button type="button" aria-label="Previous page" disabled><svg class="icon" aria-hidden="true"><use href="#i-left"/></svg></button>
+              <button type="button" aria-current="page">1</button><button type="button">2</button><button type="button">3</button><button type="button" class="hide-phone">4</button><span class="hide-phone">…</span><button type="button" class="hide-phone">25</button>
+              <button type="button" aria-label="Next page"><svg class="icon" aria-hidden="true"><use href="#i-right"/></svg></button>
+            </nav>
+          </div>
+        </section>
       </div>
-    </section>
-  </main>
 
-  <nav class="tabs" aria-label="Sections">
-    <a href="#overview"><svg class="ic" aria-hidden="true"><use href="#i-overview"/></svg>Overview</a>
-    <a href="#payments"><svg class="ic" aria-hidden="true"><use href="#i-payments"/></svg>Payments</a>
-    <a href="#invoices"><svg class="ic" aria-hidden="true"><use href="#i-invoices"/></svg>Invoices</a>
-  </nav>
+      <!-- Parts: every shared part, rendered inline (not modal) -->
+      <div class="parts-head" id="parts">
+        <div><h2 class="t-title">Parts</h2><p class="t-subheadline">Copy the markup. Tokens and parts come from foundation.css.</p></div>
+        <div class="seg" role="group" aria-label="Appearance" data-theme-seg><button type="button" value="auto" aria-pressed="true">Auto</button><button type="button" value="light" aria-pressed="false">Light</button><button type="button" value="dark" aria-pressed="false">Dark</button></div>
+      </div>
+
+      <div class="grid">
+        <section class="card c-6" aria-labelledby="p-btn">
+          <div class="card-head"><h3 class="card-title" id="p-btn">Buttons</h3></div>
+          <div class="spec"><span class="t-footnote">Types</span><div class="stack"><button class="btn" type="button">Prominent</button><button class="btn btn-tinted" type="button">Tinted</button><button class="btn btn-gray" type="button">Gray</button><button class="btn btn-plain" type="button">Plain</button><button class="btn btn-danger" type="button">Delete Client…</button><button class="btn btn-danger-fill" type="button">Delete Client</button></div></div>
+          <div class="spec"><span class="t-footnote">Sizes</span><div class="stack"><button class="btn btn-sm" type="button">Small</button><button class="btn" type="button">Regular</button><button class="btn btn-lg" type="button">Large</button></div></div>
+          <div class="spec"><span class="t-footnote">With icon</span><div class="stack"><button class="btn" type="button"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg>New Client</button><button class="btn btn-gray" type="button"><svg class="icon" aria-hidden="true"><use href="#i-download"/></svg>Export…</button></div></div>
+          <div class="spec"><span class="t-footnote">Icon button</span><div class="stack"><button class="icon-btn" type="button" aria-label="Notifications" data-tip="Notifications"><svg class="icon" aria-hidden="true"><use href="#i-bell"/></svg></button><button class="icon-btn" type="button" aria-label="Actions" aria-pressed="true"><svg class="icon" aria-hidden="true"><use href="#i-more"/></svg></button><button class="icon-btn" type="button" aria-label="Filter"><svg class="icon" aria-hidden="true"><use href="#i-filter"/></svg></button></div></div>
+          <div class="spec"><span class="t-footnote">States</span><div class="stack"><button class="btn" type="button" disabled>Disabled</button><button class="btn" type="button" aria-busy="true" aria-label="Saving" style="min-width:96px"><span class="spin"></span></button><button class="link-btn" type="button">Show Details</button></div></div>
+        </section>
+
+        <section class="card c-6" aria-labelledby="p-ctl">
+          <div class="card-head"><h3 class="card-title" id="p-ctl">Controls</h3></div>
+          <div class="spec"><span class="t-footnote">Segmented</span><div class="stack"><div class="seg" role="group" aria-label="Range"><button type="button" aria-pressed="true">Day</button><button type="button" aria-pressed="false">Week</button><button type="button" aria-pressed="false">Month</button></div></div></div>
+          <div class="spec"><span class="t-footnote">Search</span><div class="stack"><div class="search" style="width:240px"><svg class="icon" aria-hidden="true"><use href="#i-search"/></svg><input type="search" placeholder="Search" aria-label="Search example"><kbd>⌘K</kbd><button class="icon-btn clear" type="button" aria-label="Clear search"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button></div></div></div>
+          <div class="spec"><span class="t-footnote">Filter chips</span><div class="stack"><button class="filter-chip" type="button" aria-pressed="false">Owner<svg class="icon" aria-hidden="true"><use href="#i-down"/></svg></button><button class="filter-chip" type="button" aria-pressed="true">Status · 2<svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button></div></div>
+          <div class="spec"><span class="t-footnote">Switch</span><div class="stack"><label class="switch-row t-body"><input class="switch" type="checkbox" role="switch"> Off</label><label class="switch-row t-body"><input class="switch" type="checkbox" role="switch" checked> On</label></div></div>
+          <div class="spec"><span class="t-footnote">Checkbox</span><div class="stack"><label class="switch-row t-body"><input class="check" type="checkbox"> Unchecked</label><label class="switch-row t-body"><input class="check" type="checkbox" checked> Checked</label></div></div>
+          <div class="spec"><span class="t-footnote">Status pills</span><div class="stack"><span class="pill hue-sky">New Lead</span><span class="pill hue-mint">Active</span><span class="pill hue-lavender">In Negotiation</span><span class="pill hue-butter">Needs Follow-Up</span><span class="pill hue-peach">At Risk</span><span class="pill hue-gray">Inactive</span></div></div>
+          <div class="spec"><span class="t-footnote">Delta, badge</span><div class="stack"><span class="delta up">▲ 12,4%</span><span class="delta down">▼ 3,1%</span><span class="badge" aria-label="3 unread">3</span><span class="status ok">Paid</span><span class="status wait">Pending</span><span class="status bad">Declined</span></div></div>
+        </section>
+
+        <section class="card c-6" aria-labelledby="p-fld">
+          <div class="card-head"><h3 class="card-title" id="p-fld">Fields</h3></div>
+          <div class="spec"><span class="t-footnote">Default</span><div class="field"><label for="f1">Company</label><input id="f1" type="text" placeholder="PT Kopi Kalijaga"></div></div>
+          <div class="spec"><span class="t-footnote">Focused</span><div class="field"><label for="f2">Email</label><input class="is-focus" id="f2" type="email" value="dewi@kopikalijaga.co.id"></div></div>
+          <div class="spec"><span class="t-footnote">Error</span><div class="field"><label for="f3">Deal Value</label><input class="is-invalid" id="f3" type="text" value="13.500.000 rupiah" aria-invalid="true" aria-describedby="f3e"><p class="err" id="f3e">Use digits only, like 13500000.</p></div></div>
+          <div class="spec"><span class="t-footnote">Select, hint</span><div class="field"><label for="f4">Owner</label><select id="f4"><option>Bagas Pratama</option><option>Sekar Wulandari</option><option>Dimas Aditya</option></select><p class="hint">The owner gets a reminder after 7 days without contact.</p></div></div>
+        </section>
+
+        <section class="card c-6" aria-labelledby="p-lst">
+          <div class="card-head"><h3 class="card-title" id="p-lst">Grouped list</h3></div>
+          <p class="glist-head">Notifications</p>
+          <div class="glist on-card">
+            <button type="button"><svg class="icon row-ic" aria-hidden="true"><use href="#i-mail"/></svg><span class="grow t-body">Email Digest</span><span class="trail t-body">Daily</span><svg class="icon row-ic chev" aria-hidden="true"><use href="#i-right"/></svg></button>
+            <label><svg class="icon row-ic" aria-hidden="true"><use href="#i-bell"/></svg><span class="grow t-body">Follow-Up Reminders</span><input class="switch" type="checkbox" role="switch" checked></label>
+            <label><svg class="icon row-ic" aria-hidden="true"><use href="#i-calendar"/></svg><span class="grow t-body">Meeting Alerts</span><input class="switch" type="checkbox" role="switch"></label>
+            <div><span class="grow"><span class="t-body">Sort By</span><span class="cell-sub">Recently contacted first.</span></span><svg class="icon accent" aria-hidden="true"><use href="#i-check"/></svg></div>
+          </div>
+          <p class="glist-foot">Reminders send at 09:00–17:00 on weekdays.</p>
+        </section>
+
+        <section class="card c-6" aria-labelledby="p-menu">
+          <div class="card-head"><h3 class="card-title" id="p-menu">Menu and toast</h3></div>
+          <div class="stack" style="align-items:flex-start;gap:24px">
+            <div class="popmenu" role="menu" aria-label="Client actions">
+              <button class="popmenu-item" role="menuitem" type="button"><svg class="icon" aria-hidden="true"><use href="#i-user"/></svg>Open Client<span class="trail">↵</span></button>
+              <button class="popmenu-item" role="menuitem" type="button"><svg class="icon" aria-hidden="true"><use href="#i-copy"/></svg>Copy Email<span class="trail">⌘C</span></button>
+              <button class="popmenu-item" role="menuitem" type="button"><svg class="icon" aria-hidden="true"><use href="#i-user-plus"/></svg>Change Owner…</button>
+              <div class="popmenu-sep" role="separator"></div>
+              <button class="popmenu-item danger" role="menuitem" type="button"><svg class="icon" aria-hidden="true"><use href="#i-trash"/></svg>Delete Client…</button>
+            </div>
+            <div class="stack" style="flex-direction:column;align-items:flex-start;gap:16px">
+              <div class="toast-cap is-static" role="status"><svg class="icon" aria-hidden="true"><use href="#i-check"/></svg>Link Copied</div>
+              <div class="alert" role="alertdialog" aria-labelledby="al-t" aria-describedby="al-d">
+                <p class="alert-title" id="al-t">Delete This Client?</p>
+                <p class="t-subheadline" id="al-d">You can’t undo this.</p>
+                <div class="alert-btns"><button class="btn btn-gray" type="button">Cancel</button><button class="btn btn-danger-fill" type="button">Delete Client</button></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="card c-6" aria-labelledby="p-st">
+          <div class="card-head"><h3 class="card-title" id="p-st">Empty and loading</h3></div>
+          <div class="empty-state">
+            <svg class="icon" aria-hidden="true"><use href="#i-search"/></svg>
+            <p class="empty-title">No Clients Found</p>
+            <p>Try a different name or clear the filters.</p>
+            <button class="btn btn-gray" type="button">Clear Filters</button>
+          </div>
+          <div class="rows" aria-label="Loading example" role="status">
+            <div class="skel-row"><span class="skel"></span><span class="lines"><span class="skel" style="width:40%"></span><span class="skel" style="width:64%"></span></span></div>
+            <div class="skel-row"><span class="skel"></span><span class="lines"><span class="skel" style="width:32%"></span><span class="skel" style="width:56%"></span></span></div>
+            <div class="skel-row t-footnote subtle"><span class="spin"></span>Updating clients…</div>
+          </div>
+        </section>
+
+        <section class="c-12" aria-labelledby="p-ov">
+          <h3 class="t-headline" id="p-ov" style="margin:8px 0 12px">Drawer and sheet</h3>
+          <div class="grid">
+            <div class="stage end c-6">
+              <div class="drawer is-static" role="group" aria-label="Client drawer example">
+                <div class="dr-head">
+                  <span class="avatar lg">RH</span>
+                  <div class="t"><h4 class="t-title">Rahmat Hidayat</h4><p class="t-subheadline">CV Sinar Baja Mandiri<span class="pill hue-lavender">In Negotiation</span></p></div>
+                  <button class="icon-btn" type="button" aria-label="Close"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button>
+                </div>
+                <div class="dr-body">
+                  <div class="seg" role="tablist" aria-label="Client sections"><button type="button" role="tab" aria-selected="true">Overview</button><button type="button" role="tab" aria-selected="false">Activity</button><button type="button" role="tab" aria-selected="false">Deals</button><button type="button" role="tab" aria-selected="false">Notes</button></div>
+                  <div class="rows t-body">
+                    <div class="kv"><span>Email</span><span>rahmat@sinarbaja.co.id</span></div>
+                    <div class="kv"><span>Owner</span><span>Sekar Wulandari</span></div>
+                    <div class="kv"><span>Deal Value</span><span class="num"><span class="cur">Rp</span>248.000.000</span></div>
+                    <div class="kv"><span>Last Contact</span><span>Today, 10:20</span></div>
+                  </div>
+                  <ol class="timeline t-body" aria-label="Recent activity">
+                    <li class="hue-lavender"><span class="dot"></span><span>Sent revised quote for 12 units.<span class="t-caption">Today, 10:20</span></span></li>
+                    <li class="hue-sky"><span class="dot"></span><span>Call with purchasing, 25 minutes.<span class="t-caption">Tue, 13 October</span></span></li>
+                    <li class="hue-mint"><span class="dot"></span><span>Moved to In Negotiation.<span class="t-caption">Fri, 9 October</span></span></li>
+                  </ol>
+                </div>
+              </div>
+            </div>
+            <div class="stage mid c-6">
+              <div class="sheet is-static" role="group" aria-label="New client sheet example">
+                <div><h4 class="sheet-title">New Client</h4><p class="sheet-sub">They’ll appear in Clients right away. You can change any detail later.</p></div>
+                <div class="sheet-fields">
+                  <div class="glist">
+                    <label><span class="t-body">Name</span><input class="bare" type="text" placeholder="Dewi Anggraini" aria-label="Name"></label>
+                    <label><span class="t-body">Company</span><input class="bare" type="text" placeholder="PT Kopi Kalijaga" aria-label="Company"></label>
+                    <label><span class="t-body">Deal Value</span><input class="bare num" type="text" inputmode="numeric" placeholder="Rp 13.500.000" aria-label="Deal Value"></label>
+                  </div>
+                  <p class="glist-foot">Deal Value is in rupiah, without decimals.</p>
+                </div>
+                <div class="sheet-actions"><button class="btn btn-gray" type="button">Cancel</button><button class="btn" type="button">Add Client</button></div>
+              </div>
+            </div>
+          </div>
+        </section>
+      </div>
+    </main>
+  </div>
 </div>
 
-<div class="scrim" id="sale">
-  <form class="sheet" role="dialog" aria-modal="true" aria-labelledby="sale-title" aria-describedby="sale-sub">
-    <h2 class="sheet-title" id="sale-title">New sale</h2>
-    <p class="sheet-sub" id="sale-sub">The amount shows on your Till Terminal for the customer to pay.</p>
-    <div class="sheet-fields">
-      <div class="field"><input id="sale-amount" inputmode="numeric" placeholder=" " required><label for="sale-amount">Amount (Rp)</label></div>
-      <div class="field"><input id="sale-note" placeholder=" "><label for="sale-note">Note</label></div>
-    </div>
-    <div class="sheet-actions">
-      <button class="btn btn-gray btn-sm" type="button" data-close>Cancel</button>
-      <button class="btn btn-sm" type="submit">Charge</button>
-    </div>
-  </form>
-</div>
+<nav class="tabbar material" aria-label="Tabs">
+  <a href="#overview" aria-current="page"><svg class="icon" aria-hidden="true"><use href="#i-overview"/></svg>Overview</a>
+  <a href="#clients"><svg class="icon" aria-hidden="true"><use href="#i-users"/></svg>Clients</a>
+  <a href="#deals"><svg class="icon" aria-hidden="true"><use href="#i-deals"/></svg>Deals</a>
+  <a href="#meetings"><svg class="icon" aria-hidden="true"><use href="#i-calendar"/></svg>Meetings</a>
+  <a href="#parts"><svg class="icon" aria-hidden="true"><use href="#i-settings"/></svg>Parts</a>
+</nav>
 
 <script>
-const $ = s => document.querySelector(s);
-// Builds DOM with textContent only, never innerHTML.
-function el(tag, attrs, ...kids) {
-  const e = document.createElement(tag);
-  for (const [k, v] of Object.entries(attrs || {})) {
-    if (k.startsWith('on')) e.addEventListener(k.slice(2), v);
-    else if (k === 'class') e.className = v;
-    else e.setAttribute(k, v);
-  }
-  e.append(...kids);
-  return e;
-}
+/* Reference behavior only: theme, toolbar material, segments, search clear, chart hover. Not served under the board CSP. */
+(() => {
+  const root = document.documentElement;
+  const KEY = 'tali-theme';
+  const ORDER = ['auto', 'light', 'dark'];
+  const read = () => { try { return localStorage.getItem(KEY) || 'auto'; } catch { return 'auto'; } };
+  const theme = (t) => {
+    if (t === 'auto') root.removeAttribute('data-theme'); else root.dataset.theme = t;
+    try { localStorage.setItem(KEY, t); } catch {}
+    document.querySelectorAll('[data-theme-seg] button').forEach((b) => b.setAttribute('aria-pressed', String(b.value === t)));
+    const c = document.getElementById('theme-cycle');
+    c.setAttribute('aria-label', 'Appearance: ' + t[0].toUpperCase() + t.slice(1));
+  };
+  theme(read());
+  document.querySelector('[data-theme-seg]').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) theme(b.value); });
+  document.getElementById('theme-cycle').addEventListener('click', () => theme(ORDER[(ORDER.indexOf(read()) + 1) % 3]));
 
-// One locale for every number: Rp 4.820.500, 0,7%, 912 rb, 1 jt.
-const rp = new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR', maximumFractionDigits: 0 });
-const compact = new Intl.NumberFormat('id-ID', { notation: 'compact' });
-const pct = new Intl.NumberFormat('id-ID', { style: 'percent', signDisplay: 'exceptZero' });
-const hh = h => String(h).padStart(2, '0') + ':00';
-const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+  document.querySelectorAll('.seg:not([data-theme-seg])').forEach((s) => s.addEventListener('click', (e) => {
+    const b = e.target.closest('button'); if (!b) return;
+    const on = b.hasAttribute('aria-selected') ? 'aria-selected' : 'aria-pressed';
+    s.querySelectorAll('button').forEach((x) => x.setAttribute(on, String(x === b)));
+  }));
 
-// Totals and averages are computed from the bars, so the numbers on screen always agree.
-// The last bar with a value is still open (partial data).
-const periods = {
-  today: { label: 'Takings today', title: 'Takings by hour', sub: 'Friday 16 October', vs: 'vs this time last Friday', delta: 0.12, count: 138, refunds: 86000,
-    bars: [312000, 684500, 598000, 421000, 655000, 912000, 806000, 432000].map((v, i) => ({ x: hh(7 + i), name: `${hh(7 + i)}–${hh(8 + i)}`, v })) },
-  week: { label: 'Takings this week', title: 'Takings by day', sub: '12–18 October', vs: 'vs this time last week', delta: 0.08, count: 761, refunds: 254000,
-    bars: days.map((x, i) => ({ x, name: `${x} ${12 + i} Oct`, v: [5215000, 4988500, 5402000, 6104500, 4820500][i] })) },
-  month: { label: 'Takings in October', title: 'Takings by day', sub: '1–16 October', vs: 'vs this time in September', delta: -0.03, count: 2441, refunds: 611500,
-    bars: [4512000, 5034500, 6218000, 5876500, 4190000, 4655000, 4903500, 5312000, 5587000, 6442500, 6031000, 5215000, 4988500, 5402000, 6104500, 4820500]
-      .map((v, i) => ({ x: String(i + 1), name: `${i + 1} Oct`, v })) },
-};
+  const bar = document.getElementById('toolbar');
+  const edge = () => { const y = scrollY > 0; bar.classList.toggle('material', y); bar.classList.toggle('scrolled', y); };
+  addEventListener('scroll', edge, { passive: true }); edge();
 
-// 4 gridlines whose step is 1, 2, 2,5 or 5 × 10ⁿ: 250 rb, 500 rb, 1 jt, 2 jt…
-function niceStep(peak) {
-  const m = 10 ** Math.floor(Math.log10(peak / 4));
-  return [1, 2, 2.5, 5, 10].map(s => s * m).find(s => s * 4 >= peak);
-}
-
-const chart = $('#chart'), tip = $('#tip');
-function showTip(col, b, open) {
-  tip.replaceChildren(el('b', {}, rp.format(b.v)), b.name + (open ? ', so far' : ''));
-  tip.hidden = false;
-  const c = chart.getBoundingClientRect(), r = col.firstChild.getBoundingClientRect(), w = tip.offsetWidth / 2;
-  // CSSOM, not style attributes: the board's CSP blocks inline style attributes.
-  tip.style.left = Math.min(Math.max(r.left + r.width / 2 - c.left, w), c.width - w) + 'px';
-  tip.style.top = r.top - c.top + 'px';
-}
-const hideTip = () => { tip.hidden = true; };
-
-function render(key) {
-  const p = periods[key], vals = p.bars.filter(b => b.v != null);
-  const total = vals.reduce((s, b) => s + b.v, 0), peak = Math.max(...vals.map(b => b.v)), last = vals.at(-1);
-  const step = niceStep(peak), max = step * 4;
-
-  $('#hero-label').textContent = p.label;
-  $('#hero-num').textContent = rp.format(total);
-  $('#hero-delta').textContent = pct.format(p.delta);
-  $('#hero-delta').className = p.delta < 0 ? 'down' : 'up';
-  $('#hero-vs').textContent = p.vs;
-  $('#s-count').textContent = p.count.toLocaleString('id-ID');
-  $('#s-avg').textContent = rp.format(Math.round(total / p.count));
-  $('#s-refunds').textContent = rp.format(p.refunds);
-  $('#chart-title').textContent = p.title;
-  $('#chart-sub').textContent = p.sub;
-
-  const lines = [0, 1, 2, 3, 4].map(i => {
-    const g = el('div', { class: 'gl', 'aria-hidden': 'true' }, el('span', {}, i ? compact.format(step * i) : '0'));
-    g.style.bottom = i * 25 + '%';
-    return g;
+  document.querySelectorAll('.search').forEach((s) => {
+    const i = s.querySelector('input'); const c = s.querySelector('.clear');
+    c.addEventListener('click', () => { i.value = ''; i.focus(); });
+    i.addEventListener('keydown', (e) => { if (e.key === 'Escape') i.value = ''; });
   });
-  const cols = p.bars.map(b => {
-    if (b.v == null) return el('div', { class: 'col' });
-    const open = b === last, h = b.v / max * 100;
-    const bar = el('div', { class: 'bar-v' + (open ? ' open' : '') });
-    bar.style.height = h + '%';
-    const col = el('div', {
-      class: 'col', tabindex: 0, role: 'img', 'aria-label': `${b.name}, ${rp.format(b.v)}${open ? ', so far' : ''}`,
-      onmouseenter: () => showTip(col, b, open), onfocus: () => showTip(col, b, open), onmouseleave: hideTip, onblur: hideTip,
-    }, bar);
-    if (b.v === peak) { // only the peak gets a label
-      const tag = el('span', { class: 'peak', 'aria-hidden': 'true' }, compact.format(b.v));
-      tag.style.bottom = h + '%';
-      col.append(tag);
-    }
-    return col;
+  addEventListener('keydown', (e) => { if ((e.metaKey || e.ctrlKey) && e.key === 'k') { e.preventDefault(); document.querySelector('.toolbar input').focus(); } });
+
+  /* Chart: nearest month under the pointer, a 1px rule, an active dot and the tooltip (§9). */
+  const months = ['Nov 2025', 'Dec 2025', 'Jan 2026', 'Feb 2026', 'Mar 2026', 'Apr 2026', 'May 2026', 'Jun 2026', 'Jul 2026', 'Aug 2026', 'Sep 2026', 'Oct 2026'];
+  const vals = [2.9, 3.1, 3.0, 3.4, 3.3, 3.8, 3.7, 4.0, 4.3, 4.1, 4.5, 4.82];
+  const plot = document.getElementById('plot');
+  const rule = plot.querySelector('.rule'); const pt = plot.querySelector('.pt'); const tip = plot.querySelector('.tip');
+  let at = -1;
+  const show = (i) => {
+    at = Math.max(0, Math.min(11, i));
+    const x = ((at + 0.5) / 12) * plot.clientWidth;
+    const y = (20 + (5 - vals[at]) * (170 / 3)) / 220 * plot.clientHeight;
+    rule.style.left = pt.style.left = x + 'px'; pt.style.top = y + 'px'; tip.style.top = y + 'px';
+    tip.style.left = Math.max(64, Math.min(plot.clientWidth - 64, x)) + 'px';
+    tip.firstElementChild.textContent = months[at];
+    tip.lastElementChild.textContent = 'Rp ' + String(vals[at]).replace('.', ',') + ' miliar';
+    rule.hidden = pt.hidden = tip.hidden = false;
+  };
+  const hide = () => { rule.hidden = pt.hidden = tip.hidden = true; at = -1; };
+  plot.addEventListener('pointermove', (e) => show(Math.floor(((e.clientX - plot.getBoundingClientRect().left) / plot.clientWidth) * 12)));
+  plot.addEventListener('pointerleave', hide);
+  plot.addEventListener('blur', hide);
+  plot.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') { e.preventDefault(); show(at < 0 ? 11 : at + (e.key === 'ArrowRight' ? 1 : -1)); }
+    if (e.key === 'Escape') hide();
   });
-  $('#plot').replaceChildren(...lines, el('div', { class: 'cols' }, ...cols));
-  $('#xl').replaceChildren(...p.bars.map(b => el('span', {}, b.x)));
-  $('#xl').classList.toggle('dense', p.bars.length > 7); // phones label every other bar
-  $('#sr-caption').textContent = `${p.title}, ${p.sub}`;
-  $('#sr-rows').replaceChildren(...vals.map(b => el('tr', {}, el('th', { scope: 'row' }, b.name), el('td', {}, rp.format(b.v) + (b === last ? ' so far' : '')))));
-}
-
-// Segmented control: one pressed button per group.
-function seg(group, onPick) {
-  group.addEventListener('click', e => {
-    const b = e.target.closest('button');
-    if (!b) return;
-    for (const x of group.querySelectorAll('button')) x.setAttribute('aria-pressed', x === b);
-    onPick(b.value);
-  });
-}
-seg($('#period'), render);
-const root = document.documentElement;
-seg($('#theme'), t => { root.dataset.theme = t; try { localStorage.setItem('till-theme', t); } catch {} });
-for (const b of $('#theme').children) b.setAttribute('aria-pressed', b.value === root.dataset.theme);
-
-// Views: the hash names the view; the title stays true whatever filter is picked.
-const views = { overview: 'Overview', payments: 'Payments', invoices: 'Invoices', settings: 'Settings' };
-function route() {
-  const v = location.hash.slice(1) in views ? location.hash.slice(1) : 'overview';
-  $('#main').dataset.view = v;
-  for (const s of document.querySelectorAll('.view')) s.hidden = s.id !== 'view-' + v;
-  for (const a of document.querySelectorAll('.nav-item, .tabs a')) {
-    if (a.hash === '#' + v) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
-  }
-  $('#title').textContent = views[v];
-  document.title = views[v] + ' · Till';
-  scrollTo(0, 0);
-}
-addEventListener('hashchange', route);
-route();
-render('today');
-
-$('#q').addEventListener('input', e => {
-  const q = e.target.value.trim().toLowerCase();
-  if (q && location.hash !== '#payments') location.hash = 'payments';
-  for (const tr of $('#pay-rows').rows) tr.hidden = !tr.textContent.toLowerCase().includes(q);
-});
-
-// Sheet: inert shell keeps focus inside; Esc and a scrim click close; focus returns to the opener.
-const scrim = $('#sale'), shell = $('.app');
-let opener = null;
-function openSheet() {
-  opener = document.activeElement;
-  scrim.classList.add('open');
-  shell.inert = true;
-  $('#sale-amount').focus();
-}
-function closeSheet() {
-  scrim.classList.remove('open');
-  shell.inert = false;
-  opener?.focus();
-}
-document.querySelector('[data-sheet="sale"]').addEventListener('click', openSheet);
-scrim.addEventListener('click', e => { if (e.target === scrim || e.target.closest('[data-close]')) closeSheet(); });
-scrim.addEventListener('submit', e => { e.preventDefault(); e.target.reset(); closeSheet(); });
-addEventListener('keydown', e => { if (e.key === 'Escape' && scrim.classList.contains('open')) closeSheet(); });
+})();
 </script>
 </body>
 </html>

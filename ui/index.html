@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en" data-theme="auto">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
@@ -10,29 +10,18 @@
 <link rel="stylesheet" href="/style.css">
 <link rel="stylesheet" href="/flows.css">
 </head>
-<body>
-<a class="skip" href="#main">Skip to content</a>
+<body class="app">
+<a class="skip" href="#main">Skip to Content</a>
 
-<div class="app">
+<div class="shell">
   <aside class="sidebar">
     <p class="brand">Taskboard</p>
     <nav class="nav" aria-label="Views">
-      <a href="#today" data-view="today" aria-current="page">
-        <svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><rect x="2.25" y="3" width="11.5" height="10.75" rx="2"/><path d="M2.25 6.5h11.5M5.25 1.75v2.5M10.75 1.75v2.5"/></svg>
-        <span>Today</span>
-      </a>
-      <a href="#reminders" data-view="reminders">
-        <svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><circle cx="3.5" cy="3.75" r="1.25"/><circle cx="3.5" cy="8" r="1.25"/><circle cx="3.5" cy="12.25" r="1.25"/><path d="M7 3.75h6.75M7 8h6.75M7 12.25h6.75"/></svg>
-        <span>Reminders</span>
-      </a>
-      <a href="#flows" data-view="flows">
-        <svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><circle cx="4" cy="3.5" r="1.5"/><circle cx="4" cy="12.5" r="1.5"/><circle cx="12" cy="5.5" r="1.5"/><path d="M4 5v6M12 7c0 3-8 1.5-8 4"/></svg>
-        <span>Flows</span>
-      </a>
-      <a href="#health" data-view="health">
-        <svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 8h3l2-4.5 3 9 2-4.5h3"/></svg>
-        <span>Health</span>
-      </a>
+      <a href="#today" data-view="today" data-icon="today" data-tip="Today" aria-current="page"><span class="nav-label">Today</span></a>
+      <a href="#reminders" data-view="reminders" data-icon="reminders" data-tip="Reminders"><span class="nav-label">Reminders</span></a>
+      <a href="#flows" data-view="flows" data-icon="flows" data-tip="Flows"><span class="nav-label">Flows</span></a>
+      <a href="#health" data-view="health" data-icon="health" data-tip="Health"><span class="nav-label">Health</span></a>
+      <a class="nav-sys" href="#system" data-view="system" data-icon="system" data-tip="System"><span class="nav-label">System</span></a>
     </nav>
 
     <section class="system" aria-label="System">
@@ -56,58 +45,46 @@
   </aside>
 
   <div class="content">
-    <header class="toolbar">
-      <h1 id="viewTitle">Today</h1>
-      <a class="sys-link" href="#system" data-view="system" aria-label="System and appearance">
-        <svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M2 5h12M2 11h12"/><circle cx="6" cy="5" r="1.75"/><circle cx="10.5" cy="11" r="1.75"/></svg>
-      </a>
-      <label class="search"><svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5"/><path d="m10.5 10.5 3 3"/></svg><input id="q" type="search" autocomplete="off" aria-label="Search reminders" placeholder="Search"></label>
-      <form id="composer" class="composer" aria-label="New item">
-        <div class="seg" role="group" aria-label="Item type">
-          <button type="button" value="reminder" aria-pressed="true">Reminder</button>
-          <button type="button" value="flow" aria-pressed="false">Flow</button>
-        </div>
-        <input id="newTitle" type="text" autocomplete="off" aria-label="New item" required pattern=".*\S.*" title="Type a title first." placeholder="Add a reminder. It lands in Inbox.">
-        <select id="flowKind" aria-label="Flow kind" hidden></select>
-        <select id="flowTag" aria-label="Flow tag" hidden></select>
-        <button class="btn btn-sm btn-gray" type="button" id="more" aria-haspopup="dialog">More…</button>
-        <button class="btn btn-sm btn-gray" type="submit">Add</button>
-      </form>
+    <header class="toolbar" id="toolbar">
+      <div class="tb-title">
+        <h1 id="viewTitle" class="t-large-title">Today</h1>
+        <p id="viewSub" class="tb-sub"></p>
+      </div>
+      <label class="search tb-search" data-icon="search">
+        <input id="q" type="search" autocomplete="off" aria-label="Search reminders" aria-keyshortcuts="Meta+K Control+K" placeholder="Search">
+        <kbd aria-hidden="true">⌘K</kbd>
+        <button class="icon-btn clear" type="button" id="qClear" data-icon="close" aria-label="Clear Search"></button>
+      </label>
+      <a class="icon-btn sys-link" href="#system" data-view="system" data-icon="system" aria-label="System and Appearance"></a>
+      <button class="btn tb-new" type="button" id="newBtn" data-icon="plus" aria-haspopup="dialog" aria-keyshortcuts="N"><span class="tb-new-label">New</span></button>
     </header>
 
-    <p id="paused" class="paused" role="status" hidden></p>
-    <p id="usage" class="paused usage" role="status" hidden>Claude usage is close to the plan limit. Runs go on; a pause until the reset may follow.</p>
+    <p id="paused" class="banner" role="status" hidden></p>
+    <p id="usage" class="banner" role="status" hidden>Claude usage is close to the plan limit. Runs go on; a pause until the reset may follow.</p>
 
     <main id="main" tabindex="-1">
-      <section class="view today" data-view="today" aria-labelledby="focus-h">
-        <div class="focus-main">
-          <h2 id="focus-h" class="focus-label">Do this now</h2>
-          <p id="focusTitle" class="focus-title t-headline">Loading</p>
-          <div id="focusMeta" class="focus-meta"></div>
-          <p id="focusNote" class="focus-note" hidden></p>
-          <button id="focusDone" class="btn btn-sm" type="button" hidden>Mark done</button>
-          <a id="focusEmpty" class="btn btn-sm btn-gray" href="#reminders" hidden>Open reminders</a>
-        </div>
-        <section id="sched" class="sched" aria-label="Calendar"></section>
+      <section class="view today" data-view="today" aria-label="Today">
+        <section id="hero" class="card hero" aria-labelledby="focus-h">
+          <h2 id="focus-h" class="eyebrow">Do This Now</h2>
+          <p class="t-title hero-title">Loading</p>
+        </section>
+        <section id="sched" class="card cal" aria-labelledby="cal-h"></section>
+        <div id="highlights" class="hls"></div>
+        <section id="nextUp" class="card card-flush next-up" aria-labelledby="next-h"></section>
       </section>
 
       <section class="view" data-view="reminders" aria-labelledby="rem-h" hidden>
         <h2 id="rem-h" class="sr">Reminders</h2>
-        <p class="hint" id="kbd-hint">Drag to reorder, or focus a reminder and press Alt with the arrow keys. E edits.</p>
+        <div class="rem-bar">
+          <p class="hint" id="kbd-hint">Drag to reorder, or focus a reminder and press Alt with the arrow keys. E edits.</p>
+          <div id="rfilters" class="rfilters"></div>
+        </div>
         <div id="board" class="bays" aria-describedby="kbd-hint"></div>
       </section>
 
       <section class="view" data-view="flows" aria-labelledby="fl-h" hidden>
         <h2 id="fl-h" class="sr">Flows</h2>
-        <div id="flows-empty" class="empty-state">
-          <p class="empty-title">No flows yet.</p>
-          <p>Flows go to agents. None are built yet, so new ones are refused for now.</p>
-        </div>
-        <div id="rail" class="rail"></div>
-        <details id="cancelled" class="cancelled" hidden>
-          <summary></summary>
-          <ul id="cancelledList" class="flist"></ul>
-        </details>
+        <div id="flowsView"></div>
       </section>
 
       <section class="view" data-view="health" aria-labelledby="hl-h" hidden>
