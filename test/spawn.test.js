@@ -572,7 +572,7 @@ test('full-access wall on: seatbelt on (fail closed), ~/.ssh + .env* + ~/.config
   git('init', '-q');
   git('-c', 'user.name=t', '-c', 'user.email=t@example.invalid', 'commit', '-q', '--allow-empty', '-m', 'base');
   const ticket = { worktree: wt, base_sha: git('rev-parse', 'HEAD') };
-  const tag = { path: f.tag, env_files: ['.env.test'] };
+  const tag = { path: f.tag, env_files: ['.env.test'], qa_ports: [3000, 5432] };
   const on = await run({ resume: false, config: { ...CONFIG, full_access_wall: true }, ticket, tag, env: { HOME: f.home } });
   const s = settingsOf(on.ticketDir);
   const fsb = s.sandbox.filesystem;
@@ -590,11 +590,15 @@ test('full-access wall on: seatbelt on (fail closed), ~/.ssh + .env* + ~/.config
   const tbc = path.join(__dirname, '..', 'bin', 'tb-chrome');
   assert.deepEqual(s.sandbox.excludedCommands, [`${tbc} *`]);
   assert.equal(on.d.env.TB_CHROME_SB, path.join(on.ticketDir, 'runs/2.chrome.sb'));
+  const [bport, cport] = on.d.env.TB_CHROME_PORTS.split(' ').map(Number);
+  assert.deepEqual([cport - bport, bport >= 20000 && bport < 30000, on.d.env.TB_CHROME_NODE], [1, true, process.execPath]);
   const sb = fs.readFileSync(path.join(on.ticketDir, 'runs/2.chrome.sb'), 'utf8');
   const line = (start) => sb.split('\n').find((l) => l.startsWith(start)) ?? '';
   const real = (p) => JSON.stringify(fs.realpathSync(p)); // the seatbelt sees /private/var, not /var
   assert.ok(line('(deny file-read* ').includes(`(subpath ${JSON.stringify(path.join(f.home, '.ssh'))})`) && line('(deny file-read* ').includes(`(subpath ${real(path.dirname(path.dirname(on.ticketDir)))})`), sb.slice(0, 400));
   assert.ok(line('(allow file-read* ').includes(`(subpath ${real(wt)})`) && sb.includes(JSON.stringify(`${fs.realpathSync(wt)}/.env.test`)));
+  // loopback: the ticket's two ports + the tag's qa ports, never Postgres (as the recorder)
+  assert.equal(line('(allow network-outbound (remote ip '), `(allow network-outbound (remote ip "localhost:${bport}") (remote ip "localhost:${cport}") (remote ip "localhost:3000"))`);
   assert.ok(fs.readFileSync(path.join(on.ticketDir, 'runs/2.system.md'), 'utf8').includes(`\nbrowser checks: \`${tbc} <chrome-devtools-axi command>\``));
   const plan = await run({ phase: 'planning', resume: false, config: { ...CONFIG, full_access_wall: true, max_turns: { ...CONFIG.max_turns, planning: 5 }, liveness: { wall_min: { ...CONFIG.liveness.wall_min, planning: 30 } }, models: { ...CONFIG.models, planning: { model: 'opus' } } }, ticket, tag, env: { HOME: f.home } });
   assert.deepEqual(['excludedCommands' in settingsOf(plan.ticketDir).sandbox, fs.existsSync(path.join(plan.ticketDir, 'runs/2.chrome.sb')), plan.d.env.TB_CHROME_SB], [false, false, undefined]);

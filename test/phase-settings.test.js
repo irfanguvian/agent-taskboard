@@ -301,26 +301,43 @@ test('phase-settings: TB_EVAL_DENY_READ denies a path in sandbox + Read for a de
 });
 
 // full-access-runs, Chrome in runs: tb-chrome runs outside claude's seatbelt under a profile built from the run's own
-// wall. Real sandbox-exec, fake HOME: the worktree and a copied env file read, a temp write works; ssh keys, another
-// .env, TB_HOME's token, Claude config in the worktree and HOME writes are refused, as in the wall.
-test('chromeProfile: the run wall as a seatbelt profile (real sandbox-exec): worktree + copied env file + temp ok; ssh, other .env, token, CLAUDE.md, HOME writes refused', () => {
-  const { execFileSync } = require('node:child_process');
+// wall (security review 2026-10-19: as tight as the wall). Real sandbox-exec, fake HOME, probes in node (the only program
+// the profile lets run besides Chrome and the shell): worktree + copied env file read, worktree + temp write, the
+// listed loopback port; refused: ssh keys, another .env, TB_HOME, Claude config, HOME writes, a node_modules package
+// (char-class glob), other programs, other loopback ports, unix sockets, code mapped from a writable dir.
+test('chromeProfile: the run wall as a seatbelt profile (real sandbox-exec): allowed files, port and node only; secrets, config, programs, other ports, sockets refused', async () => {
+  const net = require('node:net');
+  const { execFile } = require('node:child_process');
   const { fullAccess, chromeProfile } = require('../lib/phase-settings');
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'chromesb-')));
   const home = path.join(root, 'home');
   const tbh = path.join(home, '.taskboard');
   const wt = path.join(tbh, 'worktrees', 't_c1');
-  for (const d of [path.join(home, '.ssh'), wt, path.join(tbh, 'tickets', 't_c1')]) fs.mkdirSync(d, { recursive: true });
+  for (const d of [path.join(home, '.ssh'), path.join(wt, 'node_modules', 'react'), path.join(tbh, 'tickets', 't_c1')]) fs.mkdirSync(d, { recursive: true });
   for (const [f, c] of [[path.join(home, '.ssh', 'id_ed25519'), 'KEY'], [path.join(tbh, 'token'), 'TOK'], [path.join(wt, 'index.html'), 'page'],
     [path.join(wt, '.env'), 'S=1'], [path.join(wt, '.env.test'), 'T=1']]) fs.writeFileSync(f, c);
   const ctx = { ...CTX, WORKTREE: wt, TICKET_DIR: path.join(tbh, 'tickets', 't_c1'), OUT_DIR: path.join(tbh, 'tickets', 't_c1', 'out'), TB_HOME: tbh,
     SKILLS_DIR: path.join(tbh, 'tickets', 't_c1', 'skills'), TAG_GIT: undefined, ENV_FILES: ['.env.test'] };
   const s = fullAccess(render('code', 'working', ctx), { phase: 'working', learning: null, wall: true, worktree: wt, envFiles: ['.env.test'] });
+  const servers = await Promise.all([0, 0].map(() => new Promise((r) => { const v = net.createServer((c) => c.end()).listen(0, '127.0.0.1', () => r(v)); })));
+  const sock = path.join(root, 'u.sock'); // a unix socket the profile does not name (as Docker's, an editor's IPC)
+  servers.push(await new Promise((r) => { const v = net.createServer((c) => c.end()).listen(sock, () => r(v)); }));
+  const [open, shut] = servers.map((v) => v.address().port);
   const sb = path.join(root, 'run.sb');
-  fs.writeFileSync(sb, chromeProfile(s.sandbox, { home, cwd: wt }));
-  const ok = (cmd) => { try { execFileSync('/usr/bin/sandbox-exec', ['-f', sb, '/bin/sh', '-c', cmd], { stdio: 'ignore' }); return true; } catch { return false; } };
-  assert.deepEqual([ok(`cat ${wt}/index.html`), ok(`cat ${wt}/.env.test`), ok(`touch ${wt}/shot.png`), ok(`touch ${os.tmpdir()}/chromesb-ok && rm ${os.tmpdir()}/chromesb-ok`)],
-    [true, true, true, true]);
-  assert.deepEqual([ok(`cat ${home}/.ssh/id_ed25519`), ok(`cat ${wt}/.env`), ok(`cat ${tbh}/token`), ok(`ls ${tbh}/worktrees`), ok(`touch ${wt}/CLAUDE.md`),
-    ok(`mkdir ${wt}/.claude`), ok(`touch ${home}/.zshrc`)], [false, false, false, false, false, false, false]);
+  fs.writeFileSync(sb, chromeProfile(s.sandbox, { home, cwd: wt, node: path.dirname(path.dirname(process.execPath)), ports: [open] }));
+  const probe = (js) => new Promise((resolve) => execFile('/usr/bin/sandbox-exec', ['-f', sb, process.execPath, '-e', js], (e, out) => resolve(e ? 'fail' : out.trim())));
+  const rd = (p) => probe(`require('fs').readFileSync(${JSON.stringify(p)}); console.log('ok')`);
+  const wr = (p) => probe(`require('fs').writeFileSync(${JSON.stringify(p)}, 'x'); console.log('ok')`);
+  const tcp = (port) => probe(`require('net').connect(${port}, '127.0.0.1').on('connect', () => { console.log('ok'); process.exit(0); }).on('error', () => process.exit(1))`);
+  try {
+    assert.deepEqual(await Promise.all([rd(`${wt}/index.html`), rd(`${wt}/.env.test`), wr(`${wt}/shot.png`), wr(`${os.tmpdir()}/chromesb-${process.pid}`), tcp(open)]),
+      ['ok', 'ok', 'ok', 'ok', 'ok']);
+    assert.deepEqual(await Promise.all([rd(`${home}/.ssh/id_ed25519`), rd(`${wt}/.env`), rd(`${tbh}/token`), wr(`${wt}/CLAUDE.md`), wr(`${home}/.zshrc`),
+      wr(`${wt}/node_modules/react/index.js`), tcp(shut), probe(`require('net').connect(${JSON.stringify(sock)}).on('connect', () => { console.log('ok'); process.exit(0); }).on('error', () => process.exit(1))`),
+      probe("require('child_process').execFileSync('/bin/ls', ['/']); console.log('ok')")]),
+      ['fail', 'fail', 'fail', 'fail', 'fail', 'fail', 'fail', 'fail', 'fail']);
+  } finally {
+    servers.forEach((v) => v.close());
+    fs.rmSync(`${os.tmpdir()}/chromesb-${process.pid}`, { force: true });
+  }
 });

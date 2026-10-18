@@ -55,6 +55,13 @@ main() {
       --prefix "$LIVE/tools/lavish" >/dev/null ||
       echo "deploy: lavish install failed; Clarify works in the board + tb answer (see tb doctor)" >&2
   fi
+  # Chrome in runs: the pinned browser tools bin/tb-chrome runs (same way: lockfile, no scripts; a fail only turns runs'
+  # browser checks off, tb-chrome says how to install)
+  if [ -f "$LIVE/tools/chrome/package-lock.json" ]; then
+    PATH="$(dirname "$NODE"):$PATH" "$(dirname "$NODE")/npm" ci --ignore-scripts --no-audit --no-fund --fetch-timeout=20000 --fetch-retries=1 \
+      --prefix "$LIVE/tools/chrome" >/dev/null ||
+      echo "deploy: browser tools install failed; runs have no browser checks until npm ci --ignore-scripts --prefix $LIVE/tools/chrome" >&2
+  fi
   echo "deployed $full (was $prev)"
   [ "$prev" = none ] || echo "rollback: scripts/deploy $prev"
   [ "$restart" = 0 ] || launchctl kickstart -k "$DOMAIN/$LABEL"

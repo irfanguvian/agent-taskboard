@@ -1,0 +1,9 @@
+{
+  "name": "tb-chrome",
+  "private": true,
+  "description": "Pinned browser tools for bin/tb-chrome (board-run browser checks): no npx fetch at run time, nothing executed from npx's writable cache. Install: npm ci --ignore-scripts --prefix tools/chrome",
+  "dependencies": {
+    "chrome-devtools-axi": "0.1.35",
+    "chrome-devtools-mcp": "1.11.0"
+  }
+}

@@ -1,21 +1,29 @@
 #!/usr/bin/env bash
 # Board-run browser checks: chrome-devtools-axi outside claude's seatbelt (Chrome's singleton socket in the user temp
 # dir can't be made inside it) but under the run's own wall: TB_CHROME_SB, the profile tbd wrote from the run's sandbox
-# block (lib/phase-settings.js chromeProfile; no ssh keys, .env, credentials or other tickets). The run's settings list
-# this file's full path in sandbox.excludedCommands; claude 2.1.302 keeps any compound command (&&, ;, |, $(...),
-# redirects, VAR=x prefix) sandboxed, so only a plain `<this path> <args>` call, with tbd's env, gets here.
-# One headless, isolated browser per ticket (session tb-<ticket>); tbd stops it when the run ends.
+# block (lib/phase-settings.js chromeProfile: no ssh keys, .env, credentials or other tickets; only node, Chrome and the
+# shell may run; loopback only this ticket's two ports and the tag's qa ports). The run's settings list this file's full
+# path in sandbox.excludedCommands; claude 2.1.302 keeps any compound command (&&, ;, |, $(...), redirects, VAR=x
+# prefix) sandboxed, so only a plain `<this path> <args>` call, with tbd's env, gets here. The tools are the pinned ones
+# in tools/chrome (no npx fetch). One headless, isolated browser per ticket; tbd stops it when the run ends.
 set -uo pipefail
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
-[ -f "${TB_CHROME_SB:-}" ] || { echo "tb-chrome: board runs only, in steps that may use a browser (working, qa)" >&2; exit 2; }
+tools="$here/../tools/chrome/node_modules"
+[ -f "${TB_CHROME_SB:-}" ] && [ -x "${TB_CHROME_NODE:-}" ] || { echo "tb-chrome: board runs only, in steps that may use a browser (working, qa)" >&2; exit 2; }
+read -r bport cport <<<"${TB_CHROME_PORTS:-}"
+[[ "$bport" =~ ^[0-9]+$ && "$cport" =~ ^[0-9]+$ ]] || { echo "tb-chrome: no TB_CHROME_PORTS from the board" >&2; exit 2; }
+[ -f "$tools/chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp.js" ] || { echo "tb-chrome: browser tools not installed: npm ci --ignore-scripts --prefix $here/../tools/chrome" >&2; exit 2; }
 /usr/bin/sandbox-exec -p '(version 1)(allow default)' /usr/bin/true 2>/dev/null || {
   echo "tb-chrome: still inside the sandbox. Call it by its full path, alone in its Bash call (no &&, ;, |, \$(...), > or 2>&1): $here/tb-chrome $*" >&2
   exit 2
 }
-# the browser's mode is the board's: no attach to Irfan's Chrome, no other profile or bridge
-for k in $(compgen -e); do case "$k" in CHROME_DEVTOOLS_AXI_*|NODE_OPTIONS|NODE_PATH) unset "$k" ;; esac; done
+# the browser's mode is the board's: no attach to Irfan's Chrome, no other profile, bridge or MCP server
+for k in $(compgen -e); do case "$k" in CHROME_DEVTOOLS_*|NODE_OPTIONS|NODE_PATH) unset "$k" ;; esac; done
 export CHROME_DEVTOOLS_AXI_SESSION="tb-$(basename "$(dirname "$(dirname "$TB_CHROME_SB")")")" # <TB_HOME>/tickets/<id>/runs/<n>.chrome.sb
-export CHROME_DEVTOOLS_AXI_CHROME_ARGS=--no-sandbox # Chrome's own sandbox cannot start inside a seatbelt; the profile is the wall
-cmd=(npx -y chrome-devtools-axi)
-bin=$(command -v chrome-devtools-axi) && cmd=("$bin")
-exec /usr/bin/sandbox-exec -f "$TB_CHROME_SB" "${cmd[@]}" "$@"
+export CHROME_DEVTOOLS_AXI_PORT="$bport" # the two loopback ports the profile opens for this ticket
+# Chrome's own sandbox cannot start inside a seatbelt (the profile is the wall); the debug port fixed, not random
+export CHROME_DEVTOOLS_AXI_CHROME_ARGS="--no-sandbox --remote-debugging-port=$cport"
+export CHROME_DEVTOOLS_AXI_MCP_PATH="$tools/chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp.js"
+export CHROME_DEVTOOLS_MCP_NO_USAGE_STATISTICS=1 CHROME_DEVTOOLS_MCP_NO_UPDATE_CHECKS=1 CHROME_DEVTOOLS_MCP_NO_CONFIG_DISCOVERY=1
+export PATH="$(dirname "$TB_CHROME_NODE"):$PATH" # the bridge spawns `node`: the board's pinned one (the profile lets only it run)
+exec /usr/bin/sandbox-exec -f "$TB_CHROME_SB" "$TB_CHROME_NODE" "$tools/chrome-devtools-axi/dist/bin/chrome-devtools-axi.js" "$@"
