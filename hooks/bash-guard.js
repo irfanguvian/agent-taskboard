@@ -33,6 +33,8 @@ const { MUTATING } = require('../lib/verbs');
 const VERBS = MUTATING.join('|');
 // the ssh tools only as a command word (segment start, quote, VAR=x, or after a wrapper / xargs): `grep -rn ssh` passes
 const SSH = /(^|[^\w.-])\.ssh(?![\w-])|git_ssh|sshcommand|\bssh:\/\/|(^|[;&|(\n`'"]|\b(env|command|exec|nohup|timeout|nice|time|xargs|rtk)\s(\S+\s+)*?)\s*(\w+=\S*\s+)*(ssh|scp|sftp|ssh-add|ssh-agent|ssh-keygen)(?=[\s:'"`)]|$)/i;
+// full-access runs with a browser (TB_CHROME_SB): chrome-devtools-axi only through bin/tb-chrome (its Chrome can't start in the wall)
+const CHROME = /(^|[^\w.-])chrome-devtools-axi(?![\w-])/;
 const SSH_WHY = 'board runs never use ssh, scp or ssh keys (Irfan); work through the files in your worktree';
 const ENV_WHY = 'board runs read no .env file outside this worktree (Irfan); use only the env files the tag copied in';
 // a word naming a .env file outside the run's dir (cwd: the hook input's)
@@ -340,6 +342,7 @@ function heavyList(env) {
 function guard(command, env = process.env, cwd = '') {
   for (const [re, why] of rules(env)) if (re.test(command)) return { deny: `bash-guard: ${why}` };
   if (env.TB_FULL_ACCESS === '1' && SSH.test(command)) return { deny: `bash-guard: ${SSH_WHY}` };
+  if (env.TB_CHROME_SB && CHROME.test(command)) return { deny: `bash-guard: use ${env.TB_CODE ?? '<board>'}/bin/tb-chrome <command> by its full path, alone in its Bash call (no &&, ;, |, $(...), redirects): npx chrome-devtools-axi cannot start Chrome inside the sandbox wall` };
   if (env.TB_FULL_ACCESS === '1' && envOutside(command, cwd)) return { deny: `bash-guard: ${ENV_WHY}` };
   if (DB_PHASES.includes(env.TB_PHASE ?? '') && dbBad(command)) return { deny: `bash-guard: ${DB_WHY}` };
   // read-only phases (J16, H1): an env var set by `export GIT_PAGER=…; git log` sits outside git's own words

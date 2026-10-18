@@ -565,7 +565,7 @@ test('local copies: a path the clone tracks (CLAUDE.local.md committed) is left 
 
 // full-access wall (config full_access_wall; Phase 1b smoke full-light-v2m): the seatbelt stays on, widened for terminal
 // tools, ~/.ssh + every .env* walled in both directions, the tag's copied env files re-allowed by exact path
-test('full-access wall on: seatbelt on (fail closed), ~/.ssh + .env* + ~/.config/gh read- and write-denied, the copied env file re-allowed exactly, Postgres socket named (no allowAllUnixSockets), WebFetch through the proxy, Chrome note; wall off → seatbelt off; sandbox: true → locked', async () => {
+test('full-access wall on: seatbelt on (fail closed), ~/.ssh + .env* + ~/.config/gh read- and write-denied, the copied env file re-allowed exactly, Postgres socket named (no allowAllUnixSockets), WebFetch through the proxy, tb-chrome in working only (excludedCommands + wall profile + note); wall off → seatbelt off; sandbox: true → locked', async () => {
   const f = fullFixture();
   const wt = fs.mkdtempSync(path.join(ROOT, 'wt-'));
   const git = (...a) => execFileSync('/usr/bin/git', ['-C', wt, ...a], { env: GENV, encoding: 'utf8' }).trim();
@@ -585,11 +585,25 @@ test('full-access wall on: seatbelt on (fail closed), ~/.ssh + .env* + ~/.config
   assert.equal('allowAllUnixSockets' in s.sandbox.network, false);
   assert.equal('blockReadsOutsideWorkingDirectories' in s.permissions, false);
   assert.ok(s.permissions.allow.includes('WebFetch(domain:*)') && s.permissions.deny.includes('Read(~/.ssh/**)'));
-  assert.match(fs.readFileSync(path.join(on.ticketDir, 'runs/2.system.md'), 'utf8'), /\nbrowser checks via chrome-devtools-axi are not available in this run/);
+  // contract change (Chrome in runs, 2026-10-19; was: "browser checks ... are not available in this run"): the working run
+  // gets bin/tb-chrome by full path in excludedCommands, its wall as a seatbelt profile and the note; planning gets neither
+  const tbc = path.join(__dirname, '..', 'bin', 'tb-chrome');
+  assert.deepEqual(s.sandbox.excludedCommands, [`${tbc} *`]);
+  assert.equal(on.d.env.TB_CHROME_SB, path.join(on.ticketDir, 'runs/2.chrome.sb'));
+  const sb = fs.readFileSync(path.join(on.ticketDir, 'runs/2.chrome.sb'), 'utf8');
+  const line = (start) => sb.split('\n').find((l) => l.startsWith(start)) ?? '';
+  const real = (p) => JSON.stringify(fs.realpathSync(p)); // the seatbelt sees /private/var, not /var
+  assert.ok(line('(deny file-read* ').includes(`(subpath ${JSON.stringify(path.join(f.home, '.ssh'))})`) && line('(deny file-read* ').includes(`(subpath ${real(path.dirname(path.dirname(on.ticketDir)))})`), sb.slice(0, 400));
+  assert.ok(line('(allow file-read* ').includes(`(subpath ${real(wt)})`) && sb.includes(JSON.stringify(`${fs.realpathSync(wt)}/.env.test`)));
+  assert.ok(fs.readFileSync(path.join(on.ticketDir, 'runs/2.system.md'), 'utf8').includes(`\nbrowser checks: \`${tbc} <chrome-devtools-axi command>\``));
+  const plan = await run({ phase: 'planning', resume: false, config: { ...CONFIG, full_access_wall: true, max_turns: { ...CONFIG.max_turns, planning: 5 }, liveness: { wall_min: { ...CONFIG.liveness.wall_min, planning: 30 } }, models: { ...CONFIG.models, planning: { model: 'opus' } } }, ticket, tag, env: { HOME: f.home } });
+  assert.deepEqual(['excludedCommands' in settingsOf(plan.ticketDir).sandbox, fs.existsSync(path.join(plan.ticketDir, 'runs/2.chrome.sb')), plan.d.env.TB_CHROME_SB], [false, false, undefined]);
+  assert.match(fs.readFileSync(path.join(plan.ticketDir, 'runs/2.system.md'), 'utf8'), /\nno browser checks in this step/);
   const off = settingsOf((await run({ resume: false, config: { ...CONFIG, full_access_wall: false }, ticket, tag, env: { HOME: f.home } })).ticketDir);
-  assert.deepEqual([off.sandbox.enabled, off.permissions.blockReadsOutsideWorkingDirectories, off.permissions.allow.includes('WebFetch(domain:*)')], [false, true, false]);
+  assert.deepEqual([off.sandbox.enabled, off.permissions.blockReadsOutsideWorkingDirectories, off.permissions.allow.includes('WebFetch(domain:*)'), 'excludedCommands' in off.sandbox], [false, true, false, false]);
   const locked = await run({ resume: false, config: { ...CONFIG, full_access_wall: true }, ticket: { ...ticket, sandbox: true }, tag, env: { HOME: f.home } });
   assert.ok(LOCKED_SETTINGS(settingsOf(locked.ticketDir)));
   assert.equal(settingsOf(locked.ticketDir).sandbox.filesystem.denyRead.includes('~/.ssh'), false, 'the locked run is not widened');
   assert.equal(fs.readFileSync(path.join(locked.ticketDir, 'runs/2.system.md'), 'utf8').includes('chrome-devtools-axi'), false);
+  assert.deepEqual(['excludedCommands' in settingsOf(locked.ticketDir).sandbox, fs.existsSync(path.join(locked.ticketDir, 'runs/2.chrome.sb'))], [false, false]);
 });

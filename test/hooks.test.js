@@ -158,6 +158,13 @@ test('bash-guard full-access-runs: tb verb list pinned from the CLI registry; ss
     assert.equal(guard(cmd, {}, '/wt'), null, `sandbox mode leaves it to the seatbelt: ${cmd}`);
   }
   for (const cmd of ['cat .env.test', 'node --env-file=.env.test app.js', 'cat /wt/.env.test', 'grep -r sshd docs', 'grep -rn ssh docs', 'echo "use ssh keys"']) assert.equal(guard(cmd, full, '/wt'), null, cmd);
+  // Chrome in runs: with a browser (TB_CHROME_SB) chrome-devtools-axi goes through bin/tb-chrome; without one, left alone
+  const br = { ...full, TB_CHROME_SB: '/tb/tickets/t_x/runs/2.chrome.sb', TB_CODE: '/code' };
+  for (const cmd of ['npx -y chrome-devtools-axi open http://127.0.0.1:3000', 'chrome-devtools-axi snapshot', 'cd x && /g/bin/chrome-devtools-axi stop']) {
+    assert.match(guard(cmd, br, '/wt')?.deny ?? 'allowed', /use \/code\/bin\/tb-chrome <command> by its full path/, cmd);
+  }
+  for (const cmd of ['/code/bin/tb-chrome open http://127.0.0.1:3000', 'grep -rn chrome-devtools-axi-like docs']) assert.equal(guard(cmd, br, '/wt'), null, cmd);
+  assert.equal(guard('npx -y chrome-devtools-axi snapshot', full, '/wt'), null, 'no browser in this run: nothing to point at');
   assert.match(guard('rtk git log --output=/tmp/x', { TB_PHASE: 'review' })?.deny ?? 'allowed', /review only reads/);
   assert.equal(guard('rtk git log -3', { TB_PHASE: 'review' }), null);
 });

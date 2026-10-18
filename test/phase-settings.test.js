@@ -299,3 +299,28 @@ test('phase-settings: TB_EVAL_DENY_READ denies a path in sandbox + Read for a de
   assert.ok(!l.permissions.deny.includes('Read(//r/one/**)'));
   for (const bad of ['rel/x', '/r/../x', '/r/*', '/r/x/']) assert.throws(() => withKnob(bad, CTX), /TB_EVAL_DENY_READ/, bad);
 });
+
+// full-access-runs, Chrome in runs: tb-chrome runs outside claude's seatbelt under a profile built from the run's own
+// wall. Real sandbox-exec, fake HOME: the worktree and a copied env file read, a temp write works; ssh keys, another
+// .env, TB_HOME's token, Claude config in the worktree and HOME writes are refused, as in the wall.
+test('chromeProfile: the run wall as a seatbelt profile (real sandbox-exec): worktree + copied env file + temp ok; ssh, other .env, token, CLAUDE.md, HOME writes refused', () => {
+  const { execFileSync } = require('node:child_process');
+  const { fullAccess, chromeProfile } = require('../lib/phase-settings');
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'chromesb-')));
+  const home = path.join(root, 'home');
+  const tbh = path.join(home, '.taskboard');
+  const wt = path.join(tbh, 'worktrees', 't_c1');
+  for (const d of [path.join(home, '.ssh'), wt, path.join(tbh, 'tickets', 't_c1')]) fs.mkdirSync(d, { recursive: true });
+  for (const [f, c] of [[path.join(home, '.ssh', 'id_ed25519'), 'KEY'], [path.join(tbh, 'token'), 'TOK'], [path.join(wt, 'index.html'), 'page'],
+    [path.join(wt, '.env'), 'S=1'], [path.join(wt, '.env.test'), 'T=1']]) fs.writeFileSync(f, c);
+  const ctx = { ...CTX, WORKTREE: wt, TICKET_DIR: path.join(tbh, 'tickets', 't_c1'), OUT_DIR: path.join(tbh, 'tickets', 't_c1', 'out'), TB_HOME: tbh,
+    SKILLS_DIR: path.join(tbh, 'tickets', 't_c1', 'skills'), TAG_GIT: undefined, ENV_FILES: ['.env.test'] };
+  const s = fullAccess(render('code', 'working', ctx), { phase: 'working', learning: null, wall: true, worktree: wt, envFiles: ['.env.test'] });
+  const sb = path.join(root, 'run.sb');
+  fs.writeFileSync(sb, chromeProfile(s.sandbox, { home, cwd: wt }));
+  const ok = (cmd) => { try { execFileSync('/usr/bin/sandbox-exec', ['-f', sb, '/bin/sh', '-c', cmd], { stdio: 'ignore' }); return true; } catch { return false; } };
+  assert.deepEqual([ok(`cat ${wt}/index.html`), ok(`cat ${wt}/.env.test`), ok(`touch ${wt}/shot.png`), ok(`touch ${os.tmpdir()}/chromesb-ok && rm ${os.tmpdir()}/chromesb-ok`)],
+    [true, true, true, true]);
+  assert.deepEqual([ok(`cat ${home}/.ssh/id_ed25519`), ok(`cat ${wt}/.env`), ok(`cat ${tbh}/token`), ok(`ls ${tbh}/worktrees`), ok(`touch ${wt}/CLAUDE.md`),
+    ok(`mkdir ${wt}/.claude`), ok(`touch ${home}/.zshrc`)], [false, false, false, false, false, false, false]);
+});
