@@ -26,6 +26,14 @@ for (const ph of ['working', 'qa', 'review']) { // M5 C5: qa + review for the en
     fs.writeFileSync(path.join(PHASES, 'code', ph, file), typeof content === 'string' ? content : JSON.stringify(content));
   }
 }
+// full-access-runs Phase 3 + 4: read-only phases (no bare Bash allow), as planning / review / final_gate / context are
+for (const ph of ['context', 'planning']) {
+  for (const [file, content] of Object.entries({ 'prompt.md': `# ${ph} fixture\n`, 'result.schema.json': JSON.stringify(SCHEMA),
+    'settings.json': JSON.stringify({ permissions: { allow: ['Read', 'Glob', 'Grep', 'Bash(git log *)'] } }) })) {
+    fs.mkdirSync(path.join(PHASES, 'code', ph), { recursive: true });
+    fs.writeFileSync(path.join(PHASES, 'code', ph, file), content);
+  }
+}
 process.env.TB_PHASES_DIR = PHASES; // read by lib/phases + lib/phase-settings at load
 require('./helpers/runs').passFakeEnv(); // FAKE_CLAUDE_DUMP_DIR through the claudeEnv allowlist
 const spawn = require('../lib/spawn');
@@ -76,7 +84,7 @@ test('AC2 resume: --resume <session> and no --session-id, resume prompt verbatim
   assert.equal(d.prompt, 'Your previous run was interrupted. Check the current state and continue from your last step.');
   assert.deepEqual([d.opts['--model'], d.opts['--effort'], d.opts['--fallback-model']], ['opus', 'xhigh', undefined], 'fable_billing unknown: opus xhigh');
   assert.equal(d.argv.includes('--disallowedTools'), false, 'phase allows Agent');
-  assert.equal(d.opts['--tools'], 'Read,Glob,Grep,Edit,Write,Bash,Agent');
+  assert.equal(d.opts['--tools'], 'Read,Glob,Grep,Edit,Write,Bash,Agent,Skill,Task', 'full access: Skill + Task (2.1.302 Agent name) too (full-access-runs Phase 4 contract change)');
   assert.equal(d.opts['--mcp-config'], path.join(PHASES, 'code/working/mcp.json'));
   assert.equal(fs.existsSync(path.join(ticketDir, 'runs/2.mcp.json')), false);
   assert.deepEqual([d.opts['--max-turns'], d.opts['--json-schema']], ['80', JSON.stringify(SCHEMA)], 'working → working_task cap; schema inline');
@@ -303,7 +311,8 @@ test('M5 C2 a code run: runs/<n>.system.md (0600) = the phase prompt + \\n\\n + 
   fs.writeFileSync(path.join(wt, 'CLAUDE.md'), '# repo conventions\n');
   git('add', '-A');
   git('-c', 'user.name=t', '-c', 'user.email=t@example.invalid', 'commit', '-qm', 'base');
-  const { d, ticketDir } = await run({ resume: false, ticket: { worktree: wt, base_sha: git('rev-parse', 'HEAD') } });
+  // full-access-runs Phase 3 (contract change): the locked run (sandbox: true) keeps --setting-sources project + _rules.md
+  const { d, ticketDir } = await run({ resume: false, ticket: { worktree: wt, base_sha: git('rev-parse', 'HEAD'), sandbox: true } });
   const sys = path.join(ticketDir, 'runs/2.system.md');
   assert.equal(d.opts['--append-system-prompt-file'], sys);
   assert.equal(fs.readFileSync(sys, 'utf8'), `# working fixture\n\n\n${fs.readFileSync(path.join(__dirname, '..', 'phases', '_rules.md'), 'utf8')}`);
@@ -337,7 +346,8 @@ test('M5 C5 env files: working and qa runs deny Edit + sandbox write of the tag 
 // fable), else the first of opus, fable (billing ok), sonnet that differs; the runner's lease, the argv and t:run all ask
 // modelFor (the argv case: test/final.test.js F1)
 test('M5 C11 G9 finalModel: configured final model kept when it is not review\'s; same as review → opus, fable (billing ok), sonnet, the first that differs', () => {
-  const cfg = (review, final, billing = 'plan') => ({ fable_billing: billing, models: { review, final_gate: final } });
+  // full-access-runs Phase 4 (contract change): the rule holds only with final_distinct: true (default false)
+  const cfg = (review, final, billing = 'plan') => ({ fable_billing: billing, final_distinct: true, models: { review, final_gate: final } });
   const pick = (c) => spawn.modelFor(c, 'final_gate').model;
   assert.equal(pick(cfg({ model: 'fable' }, { model: 'opus', effort: 'xhigh' })), 'opus', 'the defaults: kept');
   assert.equal(pick(cfg({ model: 'opus' }, { model: 'opus' })), 'fable', 'review opus, billing ok → fable');
@@ -353,10 +363,222 @@ test('M5 C11 G9 finalModel: configured final model kept when it is not review\'s
 const PER_RUN_FLAGS = ['-p', '--session-id', '--resume', '--append-system-prompt-file', '--add-dir', '--model', '--effort', '--fallback-model',
   '--max-turns', '--json-schema', '--output-format', '--verbose', '--include-partial-messages'];
 test('isolationArgv (golden-working --blind) drifts from start() never: every pair it returns is in start()\'s argv, and every isolation flag start() emits is in it', async () => {
-  const { d } = await run();
+  const { d } = await run({ ticket: { sandbox: true } }); // full-access-runs Phase 3 (contract change): the locked run
   const iso = spawn.isolationArgv({ settings: d.opts['--settings'], mcp: d.opts['--mcp-config'], tools: d.opts['--tools'].split(',') });
   const pairs = iso.flatMap((x, i) => (!x.startsWith('--') ? [] : [iso[i + 1]?.startsWith('--') === false ? [x, iso[i + 1]] : [x]]));
   assert.deepEqual(pairs.map((p) => p[0]), ['--setting-sources', '--settings', '--strict-mcp-config', '--mcp-config', '--tools', '--permission-mode', '--permission-prompts'], 'phase allows Agent: no --disallowedTools');
   assert.deepEqual(pairs.filter((p) => !d.argv.some((x, i) => x === p[0] && (p.length === 1 || d.argv[i + 1] === p[1]))), []);
   assert.deepEqual(d.argv.filter((x) => x.startsWith('-') && !PER_RUN_FLAGS.includes(x) && !iso.includes(x)), [], 'start() isolation flag missing from isolationArgv');
+});
+
+// ---- full-access-runs Phase 3: full access by default, the Sandbox toggle = the locked run ---------------------------
+const RO_CONFIG = { ...CONFIG, models: { ...CONFIG.models, context: { model: 'opus', effort: 'xhigh' } }, max_turns: { ...CONFIG.max_turns, context: 40 },
+  liveness: { wall_min: { ...CONFIG.liveness.wall_min, context: 30 } } };
+// A tag main checkout (with .learning/ and the two local files) and a HOME with the live global rules + user skills
+function fullFixture() {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(ROOT, 'full-')));
+  const tag = path.join(root, 'tag');
+  const home = path.join(root, 'home');
+  for (const d of [path.join(tag, '.learning'), path.join(tag, '.claude'), path.join(home, '.claude', 'skills')]) fs.mkdirSync(d, { recursive: true });
+  fs.writeFileSync(path.join(tag, 'CLAUDE.local.md'), 'canary-local\n');
+  fs.writeFileSync(path.join(tag, '.claude', 'settings.local.json'), '{"hooks":{}}\n');
+  fs.writeFileSync(path.join(home, '.claude', 'CLAUDE.md'), '# global rules\n');
+  return { tag, home, learning: path.join(tag, '.learning') };
+}
+const settingsOf = (ticketDir) => JSON.parse(fs.readFileSync(path.join(ticketDir, 'runs/2.settings.json'), 'utf8'));
+const LOCKED_SETTINGS = (s) => s.sandbox.enabled === true && s.sandbox.failIfUnavailable === true && !('enabledPlugins' in s);
+
+test('full access (default): user + project + local sources, no --strict-mcp-config, seatbelt off, OMC off, ssh + .env read denies, learning DB (dir, env, Edit in working), board note, global sha; path-guard roots recomputed', async () => {
+  const f = fullFixture();
+  const { d, ticketDir } = await run({ resume: false, tag: { path: f.tag, skills: ['extra-skill'], skills_off: ['caveman'] }, env: { HOME: f.home } });
+  assert.equal(d.opts['--setting-sources'], 'user,project,local');
+  assert.equal(d.argv.includes('--strict-mcp-config'), false);
+  assert.equal(d.opts['--mcp-config'], path.join(PHASES, 'code/working/mcp.json'), 'a phase with its own mcp.json keeps it');
+  assert.deepEqual(d.opts['--add-dir'], [path.join(ticketDir, 'skills'), f.learning, path.join(f.home, '.claude', 'skills')]);
+  assert.deepEqual([d.env.LEARNING_DIR, d.env.DISABLE_OMC, d.env.GIT_CONFIG_GLOBAL, d.env.GIT_CONFIG_NOSYSTEM, d.env.TB_FULL_ACCESS], [f.learning, '1', '/dev/null', '1', '1']);
+  assert.deepEqual([d.env.SSH_AUTH_SOCK, d.env.CAVEMAN_DEFAULT_MODE], ['', 'caveman'], 'no ssh agent in the run env; caveman normal level');
+  const s = settingsOf(ticketDir);
+  assert.equal(s.sandbox.enabled, false);
+  assert.equal('failIfUnavailable' in s.sandbox, false);
+  assert.deepEqual(s.enabledPlugins, { 'oh-my-claudecode@omc': false });
+  for (const r of ['Read(~/.ssh/**)', 'Read(~/**/.env*)', 'Read(**/.env*)', 'Read(//**/.env*)', 'Edit(~/.claude/**)', 'Bash(git push *)']) assert.ok(s.permissions.deny.includes(r), r);
+  assert.equal(s.agentsMd, 'claude-md-and-agents-md');
+  assert.ok(s.permissions.allow.includes(`Edit(/${f.learning}/**)`), 'working may save /learning');
+  assert.equal(s.env.CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS, '3');
+  const sys = fs.readFileSync(path.join(ticketDir, 'runs/2.system.md'), 'utf8');
+  // Phase 4: the effective list (board defaults + tag adds − tag removes) and the removals as "do not use"
+  const skills = 'learning, grilling, lavish, test-engineer-irfan, tdd, codebase-design, postgres-irfan-axi, chrome-devtools-axi, ponytail, frontend-design, extra-skill';
+  assert.equal(sys, `# working fixture\n\n\n${fs.readFileSync(path.join(__dirname, '..', 'phases', '_board.md'), 'utf8')}\n\ndefault skills for this board: ${skills}\ndo not use: caveman\n`);
+  // path-guard with the roots the run got: the main DB writable, Claude config under it not
+  const { check } = require('../hooks/path-guard');
+  const edit = (p) => check({ cwd: d.cwd, tool_name: 'Write', tool_input: { file_path: p } }, s.env);
+  assert.equal(edit(path.join(f.learning, 'SESSIONS.md')), null);
+  assert.equal(edit(path.join(f.learning, '.claude', 'x'))?.permissionDecision, 'deny');
+});
+
+test('full access, read-only phase: rtk git reads + learn find allowed, the user allow list\'s bash / node / npx denied, no Edit on the DB; no global rules → _rules.md', async () => {
+  const f = fullFixture();
+  fs.rmSync(path.join(f.home, '.claude', 'CLAUDE.md'));
+  const { d, ticketDir } = await run({ phase: 'context', config: RO_CONFIG, resume: false, tag: { path: f.tag }, env: { HOME: f.home } });
+  const s = settingsOf(ticketDir);
+  for (const r of ['Bash(rtk git log *)', 'Bash(rtk git show *)', 'Bash(rtk git diff *)', 'Bash(rtk git status *)', 'Bash(learn find *)']) assert.ok(s.permissions.allow.includes(r), r);
+  for (const r of ['Bash(bash:*)', 'Bash(node:*)', 'Bash(npx:*)', `Edit(/${f.learning}/**)`]) assert.ok(s.permissions.deny.includes(r), r);
+  assert.equal(s.permissions.allow.some((r) => r.startsWith('Edit')), false);
+  assert.equal(d.opts['--tools'], 'Read,Glob,Grep,Bash,Skill', 'Skill in every code phase; context is no agent phase: no Agent');
+  const defaults = 'learning, grilling, lavish, test-engineer-irfan, tdd, codebase-design, postgres-irfan-axi, chrome-devtools-axi, caveman, ponytail, frontend-design';
+  assert.equal(fs.readFileSync(path.join(ticketDir, 'runs/2.system.md'), 'utf8'), `# context fixture\n\n\n${fs.readFileSync(path.join(__dirname, '..', 'phases', '_rules.md'), 'utf8')}\n\ndefault skills for this board: ${defaults}\n`);
+});
+
+test('Sandbox toggle (sandbox: true): the locked argv and settings, none of the full-access extras', async () => {
+  const f = fullFixture();
+  const { d, ticketDir } = await run({ resume: false, ticket: { sandbox: true }, tag: { path: f.tag }, env: { HOME: f.home } });
+  assert.deepEqual([d.opts['--setting-sources'], d.argv.includes('--strict-mcp-config'), d.opts['--add-dir']], ['project', true, [path.join(ticketDir, 'skills')]]);
+  for (const k of ['LEARNING_DIR', 'DISABLE_OMC', 'GIT_CONFIG_GLOBAL', 'TB_FULL_ACCESS', 'TB_LAST_TASK', 'SSH_AUTH_SOCK', 'CAVEMAN_DEFAULT_MODE']) assert.equal(k in d.env, false, k);
+  assert.equal('agentsMd' in settingsOf(ticketDir), false);
+  const s = settingsOf(ticketDir);
+  assert.ok(LOCKED_SETTINGS(s));
+  assert.equal(s.permissions.deny.includes('Read(**/.env*)'), false);
+  assert.equal(fs.readFileSync(path.join(ticketDir, 'runs/2.system.md'), 'utf8').endsWith(fs.readFileSync(path.join(__dirname, '..', 'phases', '_rules.md'), 'utf8')), true);
+});
+
+test('full access drops or changes exactly these locked pairs: --setting-sources, --strict-mcp-config, --mcp-config (none without a phase mcp.json)', async () => {
+  const f = fullFixture();
+  const both = await Promise.all([true, false].map((sandbox) => run({ phase: 'context', config: RO_CONFIG, resume: false, ticket: { sandbox }, tag: { path: f.tag }, env: { HOME: f.home } })));
+  const pairs = (/** @type {any} */ { d }) => d.argv.flatMap((x, i) => (x.startsWith('--') && !PER_RUN_FLAGS.includes(x) ? [`${x} ${d.argv[i + 1]?.startsWith('--') === false ? d.argv[i + 1].replace(/\/[^ ]*runs\//, 'runs/') : ''}`.trim()] : []));
+  const [locked, full] = both.map(pairs);
+  assert.deepEqual(locked.filter((x) => !full.includes(x)), ['--setting-sources project', '--strict-mcp-config', `--mcp-config runs/2.mcp.json`, '--tools Read,Glob,Grep,Bash']);
+  assert.deepEqual(full.filter((x) => !locked.includes(x)), ['--setting-sources user,project,local', '--tools Read,Glob,Grep,Bash,Skill'], 'Phase 4: Skill');
+  assert.equal(fs.existsSync(path.join(both[1].ticketDir, 'runs/2.mcp.json')), false, 'no empty mcp file: user + plugin servers load');
+});
+
+test('TB_LAST_TASK: working on the last pending plan task only; another task pending, a review fix task (@rv) or a sandbox run → unset', async () => {
+  const work = (task, tasks) => ({ work: { task, tasks: tasks.map(([id, status]) => ({ id, status })) } });
+  const env = async (ticket) => (await run({ resume: false, ticket })).d.env.TB_LAST_TASK;
+  assert.equal(await env(work('T2', [['T1', 'done'], ['T2', 'running']])), '1');
+  assert.equal(await env(work('T2', [['T1', 'done'], ['T2', 'running'], ['T3', 'pending']])), undefined);
+  assert.equal(await env(work('T2@rv1', [['T1', 'done'], ['T2', 'done'], ['T2@rv1', 'running']])), undefined);
+  assert.equal(await env({ ...work('T2', [['T2', 'running']]), sandbox: true }), undefined);
+});
+
+test('local copies: CLAUDE.local.md + .claude/settings.local.json copied fresh into the clone (0600, hash-pinned, git-excluded: dirtyPaths []); a changed copy or extra .claude content refused; a sandbox start removes them', async () => {
+  const f = fullFixture();
+  const { wt, t } = await tagClone();
+  const ok = await run({ resume: false, ticket: t, tag: { path: f.tag }, env: { HOME: f.home } });
+  const copies = JSON.parse(fs.readFileSync(path.join(ok.ticketDir, 'runs/2.local.json'), 'utf8'));
+  assert.deepEqual(Object.keys(copies).sort(), ['.claude/settings.local.json', 'CLAUDE.local.md']);
+  assert.equal(fs.readFileSync(path.join(wt, 'CLAUDE.local.md'), 'utf8'), 'canary-local\n');
+  assert.equal(fs.statSync(path.join(wt, '.claude', 'settings.local.json')).mode & 0o777, 0o600);
+  assert.match(fs.readFileSync(path.join(t.git_dir, 'info', 'exclude'), 'utf8'), /^# tbd local copies\n\/CLAUDE\.local\.md\n\/\.claude\/settings\.local\.json$/m);
+  assert.deepEqual(await spawn.dirtyPaths(t), []);
+  // hash pin (plantedConfig with the recorded copies): changed content, or .claude holding more than the copies
+  fs.appendFileSync(path.join(wt, 'CLAUDE.local.md'), 'planted\n');
+  assert.deepEqual(await spawn.plantedConfig(t, wt, ok.ticketDir, GENV, copies), ['CLAUDE.local.md']);
+  fs.writeFileSync(path.join(wt, 'CLAUDE.local.md'), 'canary-local\n');
+  fs.writeFileSync(path.join(wt, '.claude', 'extra.json'), '{}');
+  fs.appendFileSync(path.join(t.git_dir, 'info', 'exclude'), '/.claude/extra.json\n'); // ignored too: .claude is one ignored dir
+  assert.deepEqual(await spawn.plantedConfig(t, wt, ok.ticketDir, GENV, copies), ['.claude', '.claude/extra.json'], 'git lists the ignored dir and its files');
+  fs.rmSync(path.join(wt, '.claude', 'extra.json'));
+  fs.writeFileSync(path.join(wt, '.claude', 'settings.json'), '{}'); // untracked, not excluded
+  refused(await attempt({ resume: false, ticket: t, tag: { path: f.tag }, env: { HOME: f.home } }), /\.claude\/settings\.json: agent-planted config/);
+  fs.rmSync(path.join(wt, '.claude', 'settings.json'));
+  // the Sandbox toggle: stale copies go before the locked run's planted check
+  const locked = await attempt({ resume: false, ticket: { ...t, sandbox: true }, tag: { path: f.tag }, env: { HOME: f.home } });
+  assert.equal(locked.err, undefined);
+  assert.deepEqual([fs.existsSync(path.join(wt, 'CLAUDE.local.md')), fs.existsSync(path.join(wt, '.claude', 'settings.local.json'))], [false, false]);
+});
+
+// ---- full-access-runs Phase 4: Skill + Agent, the subagent cap, the final_distinct knob -------------------------------
+test('Phase 4 planning: full access allows Skill + Agent (+ its 2.1.302 name Task; no --disallowedTools) with the default cap 2 (env + settings env); sandbox: no Agent, Skill only once a skill was copied', async () => {
+  const { DEFAULTS } = require('../lib/store');
+  const config = { ...CONFIG, subagents: DEFAULTS.subagents, models: { planning: DEFAULTS.models.planning }, max_turns: { planning: DEFAULTS.max_turns.planning },
+    liveness: { wall_min: { planning: 30 } } };
+  const full = await run({ phase: 'planning', config, resume: false });
+  assert.deepEqual([full.d.opts['--tools'], full.d.argv.includes('--disallowedTools')], ['Read,Glob,Grep,Bash,Skill,Agent,Task', false]);
+  assert.deepEqual([full.d.env.CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS, settingsOf(full.ticketDir).env.CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS], ['2', '2']);
+  assert.deepEqual([full.d.opts['--model'], full.d.opts['--effort']], ['opus', 'xhigh'], 'decision 7: opus xhigh by default');
+  const locked = await run({ phase: 'planning', config, resume: false, ticket: { sandbox: true } });
+  assert.deepEqual([locked.d.opts['--tools'], locked.d.opts['--disallowedTools']], ['Read,Glob,Grep,Bash', 'Agent']);
+  const copied = await run({ phase: 'planning', config, resume: false, ticket: { sandbox: true }, files: { 'skills/.claude/skills/tdd/SKILL.md': '# tdd\n' } });
+  assert.deepEqual([copied.d.opts['--tools'], copied.d.opts['--disallowedTools']], ['Read,Glob,Grep,Bash,Skill', 'Agent']);
+});
+
+test('Phase 4 finalModel: final_distinct false (default) keeps the configured final model even when it is review\'s; true moves it off', () => {
+  const models = { review: { model: 'opus', effort: 'xhigh' }, final_gate: { model: 'opus', effort: 'xhigh' } };
+  assert.deepEqual(spawn.modelFor({ fable_billing: 'plan', models }, 'final_gate'), { model: 'opus', effort: 'xhigh', fable: false });
+  assert.deepEqual(spawn.modelFor({ fable_billing: 'plan', final_distinct: true, models }, 'final_gate'), { model: 'fable', effort: 'xhigh', fable: true });
+});
+
+// Phase 1 fact (2.1.302 -p skips AGENTS.md beside a CLAUDE.md): full access appends the base commit's AGENTS.md
+test('AGENTS.md beside CLAUDE.md at the base commit: a full-access run gets the base version in its system prompt (not a worktree edit); a sandbox run or a repo without CLAUDE.md does not', async () => {
+  const mk = (files) => {
+    const wt = fs.mkdtempSync(path.join(ROOT, 'wt-'));
+    const git = (...a) => execFileSync('/usr/bin/git', ['-C', wt, ...a], { env: GENV, encoding: 'utf8' }).trim();
+    git('init', '-q');
+    for (const [f, c] of Object.entries(files)) fs.writeFileSync(path.join(wt, f), c);
+    git('add', '-A');
+    git('-c', 'user.name=t', '-c', 'user.email=t@example.invalid', 'commit', '-qm', 'base');
+    return { worktree: wt, base_sha: git('rev-parse', 'HEAD') };
+  };
+  const sys = async (ticket) => fs.readFileSync(path.join((await run({ resume: false, ticket })).ticketDir, 'runs/2.system.md'), 'utf8');
+  const both = mk({ 'CLAUDE.md': '# repo\n', 'AGENTS.md': 'agents canary OSPREY\n' });
+  fs.writeFileSync(path.join(both.worktree, 'AGENTS.md'), 'planted by an earlier run\n');
+  const full = await sys(both);
+  assert.ok(full.endsWith('\n# AGENTS.md (repo root, at the base commit)\n\nagents canary OSPREY\n'), full.slice(-200));
+  assert.equal(full.includes('planted by an earlier run'), false);
+  assert.equal((await sys({ ...both, sandbox: true })).includes('# AGENTS.md'), false, 'sandbox: the locked run unchanged');
+  assert.equal((await sys(mk({ 'AGENTS.md': 'agents only\n' }))).includes('# AGENTS.md'), false, 'no CLAUDE.md: claude loads AGENTS.md itself');
+});
+
+// security review LOW: a local file the tag repo tracks is never copied (exclude can't hide it) nor removed by a sandbox run
+test('local copies: a path the clone tracks (CLAUDE.local.md committed) is left alone in full access and in sandbox mode; the untracked one is still copied', async () => {
+  const f = fullFixture();
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(ROOT, 'clone-')));
+  const repo = path.join(root, 'repo');
+  const wt = path.join(root, 'wt');
+  const git = (cwd, ...a) => execFileSync('/usr/bin/git', ['-C', cwd, ...a], { env: GENV, encoding: 'utf8' }).trim();
+  fs.mkdirSync(repo);
+  git(repo, 'init', '-q', '-b', 'main');
+  fs.writeFileSync(path.join(repo, 'CLAUDE.local.md'), 'tracked notes\n');
+  git(repo, 'add', '.');
+  git(repo, '-c', 'user.name=t', '-c', 'user.email=t@example.invalid', 'commit', '-qm', 'base');
+  const base_sha = git(repo, 'rev-parse', 'HEAD');
+  const common_dir = path.join(repo, '.git');
+  const t = { worktree: wt, base_sha, common_dir, ...(await require('../lib/util').cloneAt(common_dir, wt, base_sha)) };
+  const ok = await run({ resume: false, ticket: t, tag: { path: f.tag }, env: { HOME: f.home } });
+  assert.deepEqual(Object.keys(JSON.parse(fs.readFileSync(path.join(ok.ticketDir, 'runs/2.local.json'), 'utf8'))), ['.claude/settings.local.json']);
+  assert.equal(fs.readFileSync(path.join(wt, 'CLAUDE.local.md'), 'utf8'), 'tracked notes\n');
+  assert.deepEqual(await spawn.dirtyPaths(t), []);
+  assert.equal((await attempt({ resume: false, ticket: { ...t, sandbox: true }, tag: { path: f.tag }, env: { HOME: f.home } })).err, undefined);
+  assert.deepEqual([fs.existsSync(path.join(wt, 'CLAUDE.local.md')), fs.existsSync(path.join(wt, '.claude', 'settings.local.json'))], [true, false]);
+});
+
+// full-access wall (config full_access_wall; Phase 1b smoke full-light-v2m): the seatbelt stays on, widened for terminal
+// tools, ~/.ssh + every .env* walled in both directions, the tag's copied env files re-allowed by exact path
+test('full-access wall on: seatbelt on (fail closed), ~/.ssh + .env* + ~/.config/gh read- and write-denied, the copied env file re-allowed exactly, Postgres socket named (no allowAllUnixSockets), WebFetch through the proxy, Chrome note; wall off → seatbelt off; sandbox: true → locked', async () => {
+  const f = fullFixture();
+  const wt = fs.mkdtempSync(path.join(ROOT, 'wt-'));
+  const git = (...a) => execFileSync('/usr/bin/git', ['-C', wt, ...a], { env: GENV, encoding: 'utf8' }).trim();
+  git('init', '-q');
+  git('-c', 'user.name=t', '-c', 'user.email=t@example.invalid', 'commit', '-q', '--allow-empty', '-m', 'base');
+  const ticket = { worktree: wt, base_sha: git('rev-parse', 'HEAD') };
+  const tag = { path: f.tag, env_files: ['.env.test'] };
+  const on = await run({ resume: false, config: { ...CONFIG, full_access_wall: true }, ticket, tag, env: { HOME: f.home } });
+  const s = settingsOf(on.ticketDir);
+  const fsb = s.sandbox.filesystem;
+  assert.deepEqual([s.sandbox.enabled, s.sandbox.failIfUnavailable, s.sandbox.allowUnsandboxedCommands], [true, true, false]);
+  for (const p of ['~/.ssh', '/**/.env*', '~/.config/gh']) assert.ok(fsb.denyRead.includes(p) && fsb.denyWrite.includes(p), p);
+  for (const p of ['~/.git-credentials', '~/.netrc', '~/.aws']) assert.ok(fsb.denyRead.includes(p), p); // push credentials (review MED)
+  assert.ok(fsb.allowRead.includes(`${wt}/.env.test`));
+  assert.ok(fsb.allowWrite.includes('~/.npm') && fsb.denyWrite.includes('~/.claude*'));
+  assert.deepEqual(s.sandbox.network.allowUnixSockets, [path.join(path.dirname(path.dirname(on.ticketDir)), 'tbd.sock'), '/tmp/.s.PGSQL.5432', '/private/tmp/.s.PGSQL.5432']);
+  assert.equal('allowAllUnixSockets' in s.sandbox.network, false);
+  assert.equal('blockReadsOutsideWorkingDirectories' in s.permissions, false);
+  assert.ok(s.permissions.allow.includes('WebFetch(domain:*)') && s.permissions.deny.includes('Read(~/.ssh/**)'));
+  assert.match(fs.readFileSync(path.join(on.ticketDir, 'runs/2.system.md'), 'utf8'), /\nbrowser checks via chrome-devtools-axi are not available in this run/);
+  const off = settingsOf((await run({ resume: false, config: { ...CONFIG, full_access_wall: false }, ticket, tag, env: { HOME: f.home } })).ticketDir);
+  assert.deepEqual([off.sandbox.enabled, off.permissions.blockReadsOutsideWorkingDirectories, off.permissions.allow.includes('WebFetch(domain:*)')], [false, true, false]);
+  const locked = await run({ resume: false, config: { ...CONFIG, full_access_wall: true }, ticket: { ...ticket, sandbox: true }, tag, env: { HOME: f.home } });
+  assert.ok(LOCKED_SETTINGS(settingsOf(locked.ticketDir)));
+  assert.equal(settingsOf(locked.ticketDir).sandbox.filesystem.denyRead.includes('~/.ssh'), false, 'the locked run is not widened');
+  assert.equal(fs.readFileSync(path.join(locked.ticketDir, 'runs/2.system.md'), 'utf8').includes('chrome-devtools-axi'), false);
 });

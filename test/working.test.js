@@ -138,7 +138,8 @@ async function approved(t, { tasks, planOver = {}, gates = {}, sessions = [], ta
 test('I1 AC1 AC2 K13 RAM: a 10-task plan → one fresh session per task in order (lease.task, t:run task), each gated and accepted (pre = the last HEAD), the working gate → review; base checks seed unit_ms; ticket.json ≤ 16 KB; no lib/gates module loaded', async (t) => {
   const tasks = Array.from({ length: 10 }, (_, i) => task(`T${i + 1}`, i === 0 ? { type: 'new', acceptance: ['A1'] } : {}));
   const sessions = tasks.map((x) => done(`src/${x.id}.js`, x.id));
-  const w = await approved(t, { tasks, sessions, planOver: { acceptance: [{ id: 'A1', text: 'users still work', type: 'new' }], allowed_api_changes: ['optional UserDto.cursor'] } });
+  // full-access-runs Phase 3 + 4 (contract change): K15 / R1 below pin the locked run's tools, so the Sandbox toggle is on
+  const w = await approved(t, { tasks, sessions, ticketOver: { sandbox: true }, planOver: { acceptance: [{ id: 'A1', text: 'users still work', type: 'new' }], allowed_api_changes: ['optional UserDto.cursor'] } });
   const { tbd, id, k } = w;
   assert.deepEqual(k().base_checks, { unit: { ok: true, ms: 4321 } }, 'N3: the base checks ran at approve');
   await until(() => k().state === 'review', 90_000, 'review');
@@ -157,8 +158,10 @@ test('I1 AC1 AC2 K13 RAM: a 10-task plan → one fresh session per task in order
   assert.ok(d[0].prompt.includes(`later tasks (not yours: no work for them): ${tasks.slice(1).map((x) => `${x.id} ${x.title}`).join(', ')}`));
   assert.ok(d[9].prompt.includes('later tasks (not yours: no work for them): (none)'));
   assert.match(d[0].prompt, /## Gate\n\nchecks: unit = npm test\ntest files: .*\nprotected \(ask with NEEDS_SCOPE before changing\): package\.json, .*\ngenerated \(no scope needed\): \(none\)/);
-  // K15 no Agent (disallowed), R1 no Skill without plan skills; M1 + D34 in the rendered settings
-  assert.deepEqual([d[0].opts['--tools'], d[0].opts['--disallowedTools']], ['Read,Glob,Grep,Edit,Write,Bash', 'Agent']);
+  // K15 no Agent (disallowed); M1 + D34 in the rendered settings
+  // full-access-runs Phase 4 (contract change, table row "sandbox: old list plus Skill when skills were copied"): approve
+  // copies the board default skills too, so the locked run gets Skill; still no Agent
+  assert.deepEqual([d[0].opts['--tools'], d[0].opts['--disallowedTools']], ['Read,Glob,Grep,Edit,Write,Bash,Skill', 'Agent']);
   const st = json(tk(tbd, id, 'runs', '1.settings.json'));
   for (const rule of [`Edit(/${w.wt}/node_modules/[a-zA-Z0-9@_-]*)`, `Edit(/${w.wt}/.env.test)`]) assert.ok(st.permissions.deny.includes(rule), rule);
   for (const p of [`${w.wt}/.env.test`, `${w.wt}/node_modules/.bin`, `${w.wt}/node_modules/[a-zA-Z0-9@_-]*`]) assert.ok(st.sandbox.filesystem.denyWrite.includes(p), p);
@@ -213,7 +216,8 @@ test('N6 continue + M12: NEEDS_CONTEXT → clarify (why, class); tb answer → t
   fs.writeFileSync(rules, 'Never use offset paging.\n');
   const L1 = { id: 'R1Q1', text: 'Page size? → 50', source: 'answer:R1Q1' };
   const w = await approved(t, { tasks: [task('T1')], sessions, planOver: { skills: ['learning'] }, tag: { rules: [rules] },
-    ticketOver: { locked_decisions: [L1], reject_comment: 'keep GET /users/all' }, extra: { 'decisions.json': [L1, { id: 'D1', text: 'cursor in a header', source: 'planner' }] } });
+    // full-access-runs Phase 3 + 4 (contract change): R1 pins the locked run's Skill rule (a copied skill), so the toggle is on
+    ticketOver: { locked_decisions: [L1], reject_comment: 'keep GET /users/all', sandbox: true }, extra: { 'decisions.json': [L1, { id: 'D1', text: 'cursor in a header', source: 'planner' }] } });
   const { tbd, id, k } = w;
   fs.writeFileSync(rules, 'changed after approve\n'); // T1: the approve-time snapshot is what agents get
   assert.deepEqual((await w.rpc('answer', { text: '50' })).status, 409, 'not in clarify yet');

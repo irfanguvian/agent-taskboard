@@ -67,7 +67,8 @@ test('AC9 AC10 a run end: one t:run line (App C fields, cost in micro-USD), the 
   assert.equal(fs.statSync(path.join(tbd.tbHome, 'tbd.log')).mode & 0o777, 0o600, 'F4: tbd.log made 0600 at start');
   await until(() => read(tbd, 't_logs01').lease?.pid, 15_000, 'run live');
   const f = await runTb(['logs', 't_logs01', '-f'], tbd);
-  const shown = ['init · model fable · claude fake', 'assistant: Reading the repo', 'tool Bash: {"command":"ls"}', 'tool result: a.txt', 'result success · turns 3 · $0.12'];
+  // full-access-runs Phase 4 (contract change): default planning model fable high → opus xhigh
+  const shown = ['init · model opus · claude fake', 'assistant: Reading the repo', 'tool Bash: {"command":"ls"}', 'tool result: a.txt', 'result success · turns 3 · $0.12'];
   assert.equal(f.code, 0, f.stdout);
   assert.match(f.stdout, /^log: t_logs01 run 1 · [1-4] lines\n/, 'first read: the live log, before its result');
   assert.deepEqual(f.stdout.split('\n').filter((l) => l.startsWith('  ')), shown.map((l) => `  ${l}`), 'each line once, in order');
@@ -76,7 +77,7 @@ test('AC9 AC10 a run end: one t:run line (App C fields, cost in micro-USD), the 
   const [m] = await until(() => runLines(tbd).length && runLines(tbd), 15_000, 't:run line');
   const l = read(tbd, 't_logs01').lease;
   assert.deepEqual(m, {
-    t: 'run', ticket: 't_logs01', phase: 'planning', task: null, model: 'fable', effort: 'high', started: l.started_at, ended: l.ended_at,
+    t: 'run', ticket: 't_logs01', phase: 'planning', task: null, model: 'opus', effort: 'xhigh', started: l.started_at, ended: l.ended_at,
     exit: 'result', turns: 3, cost_delta: 123456, peak_rss_mb: m.peak_rss_mb, subagents_peak: 0, slot_wait_ms: 0, resumed: false,
   });
   assert.ok(Number.isInteger(m.peak_rss_mb) && m.peak_rss_mb > 0, `peak_rss_mb ${m.peak_rss_mb}`);

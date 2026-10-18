@@ -19,7 +19,8 @@ let tbd;
 let sock;
 let tmp;
 before(async () => {
-  tbd = await startTbd({ env: { NODE_OPTIONS: SLOT_ROOT } }); // F2: tbx run from this test process may hold the slot
+  // full-access-runs Phase 4 (contract table): the default budget is 8 now; this harness pins 3, the hook contract unchanged
+  tbd = await startTbd({ files: { 'config.json': { subagents: { concurrent: 3, per_session_total: 3, depth: 1 } } }, env: { NODE_OPTIONS: SLOT_ROOT } }); // F2: tbx run from this test process may hold the slot
   sock = path.join(tbd.tbHome, 'tbd.sock');
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'hk-'));
   fs.symlinkSync(path.join(REPO, 'bin', 'tbx'), path.join(tmp, 'tbx'));
@@ -127,6 +128,37 @@ test('D35 bash-guard deny table: every contract pattern denied with a what-to-do
     'curl localhost:77770', 'git commit -m "push fix"', 'git log --grep=push', 'kill 12345', 'echo stb add', 'npm run tb:add',
   ];
   for (const cmd of allowed) assert.equal(guard(cmd, env), null, `should allow: ${cmd}`);
+});
+
+// full-access-runs Phase 3: the tb verbs come from the CLI's registry (lib/cli.js MUTATING, critic round 3 note 1: a
+// superset of the old list, open + notify-test kept, eval added); full access (TB_FULL_ACCESS) adds the ssh / .env
+// bump; rtk is a wrapper, so the read-only git rules judge `rtk git …`
+test('bash-guard full-access-runs: tb verb list pinned from the CLI registry; ssh + outside .env denied in full access only; rtk git judged as git', () => {
+  // lib/verbs.js lists every tb command word (`tb help` prints the registry's) and requires nothing (security review:
+  // bash-guard loads it on every Bash call; a throw at load would leave Bash unguarded)
+  const { VERBS, MUTATING } = require('../lib/verbs');
+  const help = require('node:child_process').execFileSync(process.execPath, [path.join(REPO, 'bin', 'tb'), 'help'], { encoding: 'utf8', env: isolatedEnv(tbd) });
+  assert.deepEqual([...VERBS].sort(), /^commands: (.*)$/m.exec(help)?.[1].split(', ').sort());
+  assert.doesNotMatch(fs.readFileSync(path.join(REPO, 'lib', 'verbs.js'), 'utf8'), /require\(/);
+  assert.deepEqual([...fs.readFileSync(path.join(HOOKS, 'bash-guard.js'), 'utf8').matchAll(/require\('([^']+)'\)/g)].map((m) => m[1]), ['node:path', './io', '../lib/verbs']);
+  assert.deepEqual([...MUTATING].sort(), ['add', 'answer', 'approve', 'assign', 'cancel', 'close', 'doctor', 'done', 'eval', 'gc', 'lavish',
+    'move', 'new', 'notify-test', 'open', 'pass', 'promote', 'push', 'reject', 'restart', 'resume', 'rework', 'rm', 'scope', 'set', 'tag']);
+  for (const cmd of ['tb push t_x', 'tb close t_x', 'tb rework t_x --feedback y', 'tb lavish t_x', 'tb eval golden --real --yes', 'tb open --print']) {
+    assert.match(guard(cmd, {})?.deny ?? 'allowed', /not agent commands/, cmd);
+  }
+  for (const cmd of ['tb list --flows', 'tb report t_x --kind review', 'tb health']) assert.equal(guard(cmd, {}), null, cmd);
+  const full = { TB_FULL_ACCESS: '1' };
+  /** @type {[string, RegExp][]} */
+  const bumps = [['ssh git@github.com', /ssh/], ['cat ~/.ssh/id_ed25519', /ssh/], ['GIT_SSH_COMMAND="ssh -i k" git fetch', /ssh/],
+    ['git -c core.sshCommand="ssh -i k" fetch', /ssh/], ['git clone ssh://git@github.com/x/y', /ssh/],
+    ['cat ~/code/other/.env', /\.env file outside/], ['cat /Users/x/app/.env.local', /\.env file outside/], ['cat ../other/.env', /\.env file outside/], ['source $HOME/.env', /\.env file outside/]];
+  for (const [cmd, why] of bumps) {
+    assert.match(guard(cmd, full, '/wt')?.deny ?? 'allowed', why, cmd);
+    assert.equal(guard(cmd, {}, '/wt'), null, `sandbox mode leaves it to the seatbelt: ${cmd}`);
+  }
+  for (const cmd of ['cat .env.test', 'node --env-file=.env.test app.js', 'cat /wt/.env.test', 'grep -r sshd docs']) assert.equal(guard(cmd, full, '/wt'), null, cmd);
+  assert.match(guard('rtk git log --output=/tmp/x', { TB_PHASE: 'review' })?.deny ?? 'allowed', /review only reads/);
+  assert.equal(guard('rtk git log -3', { TB_PHASE: 'review' }), null);
 });
 
 test('bash-guard hook I/O: deny and rewrite JSON per hooks docs, other tool_input fields kept, bad input allowed', async () => {

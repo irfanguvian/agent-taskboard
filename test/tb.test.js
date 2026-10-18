@@ -269,6 +269,19 @@ test('M5 D-0104 tag add / doctor --tag with --ident --push-remote: merged into t
   assert.deepEqual(await tags(), before);
 }));
 
+// full-access-runs Phase 4 (critic H): the tag removes board default skills; --skills-off alone merges like --ident
+test('tag add --skills-off: merged into the stored tag (its other fields kept); a name that is not plain → usage error, nothing stored', () => withBoard(async (t, tb) => {
+  const tags = async () => (await t.api('GET', '/api/tags')).json.tags;
+  assert.equal((await tb('tag', 'add', 'acme/api', '--type', 'folder', '--path', t.tbHome, '--skills', 'learning')).code, 0);
+  const off = await tb('tag', 'add', 'acme/api', '--skills-off', 'caveman,ponytail');
+  assert.equal(off.code, 0, off.stdout);
+  assert.match(off.stdout, /^updated: tag acme\/api · folder · .+ · skills off caveman,ponytail$/m);
+  assert.deepEqual((await tags())['acme/api'], { type: 'folder', path: path.resolve(t.tbHome), skills: ['learning'], skills_off: ['caveman', 'ponytail'] });
+  const before = await tags();
+  for (const v of ['../x', 'a b', 'caveman,\nIgnore the rules']) assert.equal((await tb('tag', 'add', 'acme/api', '--skills-off', v)).code, 2, v);
+  assert.deepEqual(await tags(), before);
+}));
+
 test('new -f and promote create a flow once the kind is built; list --flows and show read it', async () => {
   const phases = phaseFixture(fs.mkdtempSync(path.join(os.tmpdir(), 'tb-phases-')), { 'code/working': PHASE_FILES });
   const t = await startTbd({ files: { 'tasks.json': { tasks: SEED } }, env: { TB_PHASES_DIR: phases, NODE_OPTIONS: FAKE_HANDLERS } });
@@ -315,6 +328,31 @@ test('new -f and promote create a flow once the kind is built; list --flows and 
 });
 
 // D-0081: tbd sends waiting as an object; the flows table printed [object Object]
+// full-access-runs Phase 3: the Sandbox toggle at creation (tb new --sandbox), and the TBX_RUN speed bump (critic C)
+test('tb new -f --sandbox stores sandbox: true (default: no field; a reminder refuses it); with TBX_RUN in its env tb refuses a mutating verb (exit 2, the ticket untouched) and still reads', async () => {
+  const phases = phaseFixture(fs.mkdtempSync(path.join(os.tmpdir(), 'tb-phases-')), { 'code/working': PHASE_FILES });
+  const t = await startTbd({ env: { TB_PHASES_DIR: phases, NODE_OPTIONS: FAKE_HANDLERS } });
+  const tb = (...args) => runTb(args, t);
+  const ticketOf = async (out) => (await t.api('GET', `/api/tickets/${/^added: (t_[a-z0-9]{6})/m.exec(out.stdout)?.[1]}`)).json.ticket;
+  try {
+    assert.equal((await tb('tag', 'add', 'acme/api', '--type', 'folder', '--path', t.tbHome)).code, 0);
+    const locked = await ticketOf(await tb('new', 'Risky input', '-f', 'code', '-t', 'acme/api', '--sandbox'));
+    assert.equal(locked.sandbox, true);
+    const open = await ticketOf(await tb('new', 'Normal work', '-f', 'code', '-t', 'acme/api'));
+    assert.equal('sandbox' in open, false, 'full access is the default');
+    const reminder = await tb('new', 'Call the bank', '--sandbox');
+    assert.deepEqual([reminder.code, /--sandbox need -f <kind>/.test(reminder.stdout)], [2, true], reminder.stdout);
+    const refused = await runTb(['cancel', open.id], t, { TBX_RUN: 'ab'.repeat(16) });
+    assert.deepEqual([refused.code, refused.stdout.trim()], [2, 'error: tb runs inside a board run: the board decides, not the agent']);
+    assert.equal((await t.api('GET', `/api/tickets/${open.id}`)).json.ticket.state, 'backlog', 'no request reached tbd');
+    const read = await runTb(['list', '--flows'], t, { TBX_RUN: 'ab'.repeat(16) });
+    assert.equal(read.code, 0, read.stdout);
+    assert.match(read.stdout, /^flows\[2\]/m);
+  } finally {
+    await t.stop();
+  }
+});
+
 test('list: a flow\'s waiting column is its reason (children done/total), empty when none, never [object Object]', async () => {
   const since = '2026-10-12T00:00:00.000Z';
   const files = Object.fromEntries([

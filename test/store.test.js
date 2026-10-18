@@ -323,12 +323,13 @@ function merged(tbHome) {
   return JSON.parse(r.stdout);
 }
 
-// M5 C10 (contract change; was no final_gate key): phase_need_gb gains final_gate 0.4
-test('D36 D-0080 fresh config.json holds only the machine key claude_bin; the 8 GB RAM defaults (planning/review/final_gate 0.4, working 1.0, qa 1.0, min_free 0.5; D-0100 was qa 1.5, min_free 1) come from code', () => {
+// M5 C10 (contract change; was no final_gate key): phase_need_gb gains final_gate 0.4. full-access-runs Phase 1 + 4
+// (contract change): planning / review / final_gate 0.4 → 0.6 (read-only + 2 subagents peak 352 MB)
+test('D36 D-0080 fresh config.json holds only the machine key claude_bin; the 8 GB RAM defaults (planning/review/final_gate 0.6, working 1.0, qa 1.0, min_free 0.5; D-0100 was qa 1.5, min_free 1) come from code', () => {
   const tbHome = path.join(root, 'd80-fresh');
   const config = merged(tbHome);
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(tbHome, 'config.json'), 'utf8')), { claude_bin: path.join(tbHome, 'bin', `claude-${DEFAULT_PIN}`) }, 'no defaults written');
-  assert.deepEqual(config.memory.phase_need_gb, { planning: 0.4, review: 0.4, working: 1.0, qa: 1.0, final_gate: 0.4 });
+  assert.deepEqual(config.memory.phase_need_gb, { planning: 0.6, review: 0.6, working: 1.0, qa: 1.0, final_gate: 0.6 });
   assert.equal(config.memory.min_free_gb, 0.5);
   assert.equal(config.claude_bin, path.join(tbHome, 'bin', `claude-${DEFAULT_PIN}`));
 });
@@ -341,18 +342,18 @@ test('D-0080 a config.json already there is never rewritten; its keys beat the c
   const config = merged(tbHome);
   assert.equal(fs.readFileSync(path.join(tbHome, 'config.json'), 'utf8'), text);
   assert.equal(config.max_concurrent, 2);
-  assert.deepEqual(config.memory.phase_need_gb, { planning: 0.4, review: 0.4, working: 1.0, qa: 1.0, final_gate: 0.4 });
+  assert.deepEqual(config.memory.phase_need_gb, { planning: 0.6, review: 0.6, working: 1.0, qa: 1.0, final_gate: 0.6 });
 });
 
 // M5 C10: a missing key would throw at spawn (models, max_turns, wall_min) or make admission compare against NaN (never ok)
-test('M5 C10 fresh config: final_gate has a RAM need (0.4 GB), a wall (30 min), a turn cap (40) and a model (opus xhigh); its admission is ok with room, memory without', () => {
+test('M5 C10 fresh config: final_gate has a RAM need (0.6 GB, full-access-runs Phase 4; was 0.4), a wall (30 min), a turn cap (40) and a model (opus xhigh); its admission is ok with room, memory without', () => {
   const config = merged(path.join(root, 'm53-final'));
   assert.deepEqual([config.memory.phase_need_gb.final_gate, config.liveness.wall_min.final_gate, config.max_turns.final_gate, config.models.final_gate],
-    [0.4, 30, 40, { model: 'opus', effort: 'xhigh' }]);
+    [0.6, 30, 40, { model: 'opus', effort: 'xhigh' }]);
   const admission = require('../lib/admission');
   const snap = (gb) => ({ pressure: 'normal', disk_free: 100 * 2 ** 30, avail: gb * 2 ** 30, docker: false });
   const admit = (gb) => admission.admit({ snap: snap(gb), runs: 0, phase: 'final_gate', config, needGb: admission.needGb('final_gate', [], config) });
-  assert.deepEqual([admit(1), admit(0.8)], [{ ok: true }, { ok: false, reason: 'memory' }]); // min_free 0.5 + 0.4
+  assert.deepEqual([admit(1.2), admit(1)], [{ ok: true }, { ok: false, reason: 'memory' }]); // min_free 0.5 + 0.6
 });
 
 test('M5 C9 fresh config: a slot lease holds up to 75 min (slots.max_hold_min, was the implicit 60), longer than a qa run\'s wall (60)', () => {

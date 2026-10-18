@@ -22,15 +22,27 @@
 // No permissionDecision on a rewrite: the phase's permission rules still judge the rewritten command.
 // Best effort, split on shell operators without parsing quotes (redirects: outside quotes, D-0093): the sandbox is the
 // real wall (D35).
+// Full-access runs (plan full-access-runs Phase 3, TB_FULL_ACCESS=1; Irfan 2026-10-18): no ssh (the command words, a
+// .ssh path, GIT_SSH*, sshCommand) and no .env path outside the run's dir (~, $HOME, an absolute path not under the
+// hook's cwd, or a `..` part). A speed bump: lib/phase-settings.js fullAccessSandbox() is the wall. tb verbs: lib/verbs.js
+// MUTATING (every verb but the reads; a leaf module: nothing heavy loads before io.run's fail-closed path).
 const path = require('node:path');
 const { run, deny } = require('./io');
+const { MUTATING } = require('../lib/verbs');
 
-const VERBS = 'new|add|set|done|move|rm|promote|assign|answer|approve|reject|scope|pass|resume|restart|cancel|tag|open|notify-test|doctor|gc';
+const VERBS = MUTATING.join('|');
+const SSH = /(^|[^\w.-])(\.ssh(?![\w-])|(ssh|scp|sftp|ssh-add|ssh-agent|ssh-keygen)(?=[\s:]|$))|git_ssh|sshcommand/i; // ssh: (ssh://)
+const SSH_WHY = 'board runs never use ssh, scp or ssh keys (Irfan); work through the files in your worktree';
+const ENV_WHY = 'board runs read no .env file outside this worktree (Irfan); use only the env files the tag copied in';
+// a word naming a .env file outside the run's dir (cwd: the hook input's)
+const envOutside = (command, cwd) => command.split(/[\s'"`;&|<>()=]+/).some((w) => /(^|\/)\.env/.test(w)
+  && (/^(~|\$\{?HOME\b)/.test(w) || w.split('/').includes('..') || (w.startsWith('/') && !(cwd && w.startsWith(`${cwd}/`)))));
 const STATUS = 'use `tbx status` for read-only system state';
 const SEP = /(&&|\|\||[;&|\n()`])/; // captured: split + join gives the command back unchanged
 const SEP_AT = new RegExp(SEP.source, 'y');
 // Words that run the next command (keywords, env/nice/timeout...), skipped with their options to find the command word.
-const WRAP = new Set(['time', 'exec', '!', '{', 'then', 'do', 'else', 'if', 'elif', 'while', 'until', 'env', 'command', 'nohup', 'timeout', 'nice']);
+// rtk: Irfan's rewrite hook runs `rtk git log …` (read-only phases allow it): the git rules judge the git behind it.
+const WRAP = new Set(['time', 'exec', '!', '{', 'then', 'do', 'else', 'if', 'elif', 'while', 'until', 'env', 'command', 'nohup', 'timeout', 'nice', 'rtk']);
 const OPT_ARG = new Set(['-u', '-k', '-s', '-n']); // wrapper options with a separate value (env -u, timeout -k/-s, nice -n)
 const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh']);
 // J8: commands that only read the files they name (no pager: LESSOPEN runs a command). git: these subcommands, with -C /
@@ -323,9 +335,11 @@ function heavyList(env) {
   return [];
 }
 
-// → {deny: reason} | {command: rewritten} | null (allow unchanged)
-function guard(command, env = process.env) {
+// → {deny: reason} | {command: rewritten} | null (allow unchanged). cwd: the hook input's (full access: .env rule)
+function guard(command, env = process.env, cwd = '') {
   for (const [re, why] of rules(env)) if (re.test(command)) return { deny: `bash-guard: ${why}` };
+  if (env.TB_FULL_ACCESS === '1' && SSH.test(command)) return { deny: `bash-guard: ${SSH_WHY}` };
+  if (env.TB_FULL_ACCESS === '1' && envOutside(command, cwd)) return { deny: `bash-guard: ${ENV_WHY}` };
   if (DB_PHASES.includes(env.TB_PHASE ?? '') && dbBad(command)) return { deny: `bash-guard: ${DB_WHY}` };
   // read-only phases (J16, H1): an env var set by `export GIT_PAGER=…; git log` sits outside git's own words
   const ro = RO.includes(env.TB_PHASE ?? '') ? env.TB_PHASE : '';
@@ -341,9 +355,9 @@ function guard(command, env = process.env) {
 }
 
 if (require.main === module) {
-  run('bash-guard', ({ tool_input: input }) => {
+  run('bash-guard', ({ tool_input: input, cwd }) => {
     if (typeof input?.command !== 'string') return null;
-    const r = guard(input.command);
+    const r = guard(input.command, process.env, typeof cwd === 'string' ? cwd : '');
     if (!r) return null;
     return r.deny ? deny(r.deny) : { updatedInput: { ...input, command: r.command } };
   }, { deadline: 3000, late: 'bash-guard: took too long; command refused' }); // S3: fail closed

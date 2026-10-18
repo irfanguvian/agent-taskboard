@@ -63,6 +63,11 @@ const qs = (over) => ({ ...QUESTIONS, questions: [{ ...Q, ...over }] });
 const dec = (d) => ({ ...PLAN, decisions: [...PLAN.decisions.slice(0, 2), d] });
 const kid = (id, blocked_by) => ({ id, title: `child ${id}`, text: 'do it', blocked_by });
 
+test('full access: a board default plugin skill (not in ~/.claude/skills) is a known skill; an unknown name is still refused', async () => {
+  assert.deepEqual(await check({ ...PLAN, skills: ['learning', 'caveman'] }, ctx()), []);
+  assert.deepEqual(await check({ ...PLAN, skills: ['no-such-skill'] }, ctx()), ['unknown skills "no-such-skill": name only installed skills']);
+});
+
 test('J16 J17 J18: a valid plan and questions result pass; every path in ONE git cat-file --batch-check (+ one package.json read); folder tag: no git', async () => {
   calls.length = 0;
   assert.deepEqual(await check(PLAN, ctx()), []);

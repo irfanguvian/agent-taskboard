@@ -196,7 +196,8 @@ test('R7 a planning run of a code ticket: runs/1.system.md = its prompt + phases
   const scn = fs.mkdtempSync(path.join(ROOT, 'scn-'));
   fs.writeFileSync(path.join(scn, '1.json'), JSON.stringify({ steps: [{ result: { structured_output: {} } }] }));
   const tbd = await startTbd({
-    files: { 'config.json': CONFIG, [`tickets/${id}/ticket.json`]: ticket(id, { state: 'planning' }) },
+    // full-access-runs Phase 3 + 4 (contract change): the locked run (sandbox: true) keeps prompt + _rules.md exactly
+    files: { 'config.json': CONFIG, [`tickets/${id}/ticket.json`]: ticket(id, { state: 'planning', sandbox: true }) },
     env: { TB_PHASES_DIR: PHASES, NODE_OPTIONS: RUN_SPY, FAKE_CLAUDE_SCENARIO_DIR: scn }, // run-spy's fixture handler: the result is only logged
   });
   t.after(async () => { reap(pidsOf(tbd)); await tbd.stop().catch(() => {}); });

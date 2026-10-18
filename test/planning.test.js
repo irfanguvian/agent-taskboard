@@ -23,6 +23,9 @@ fs.writeFileSync(path.join(PHASES, 'code', 'planning', 'prompt.md'), '# planning
 // Admission always yes: this 8 GB Mac's free RAM must not decide a test.
 const CONFIG = {
   claude_bin: FAKE, max_concurrent: 4,
+  // full-access-runs Phase 4 (contract change: the default planning model went fable high → opus xhigh): these tests pin
+  // the Fable gate (AC2, U7), so planning stays on fable here
+  models: { ...require('../lib/store').DEFAULTS.models, planning: { model: 'fable', effort: 'high' } },
   memory: { min_free_gb: 0, phase_need_gb: { planning: 0, working: 0, review: 0, qa: 0 }, docker_reserved_gb: 0, start_at_warn_when_idle: true },
   disk: { warn_gb: 0, stop_gb: 0 },
 };
@@ -264,7 +267,7 @@ test('item 8 E2E (U8 U9 J3 J12 AC3 AC4 AC8): assign → questions → tb answer 
   [Q1, P1, Q3, P2].forEach((out, i) => fs.writeFileSync(path.join(scn, `${i + 1}.json`), JSON.stringify({ steps: [result(out)] })));
   const root = newRoot();
   fs.symlinkSync('/etc/hosts', path.join(root, 'home', '.claude', 'skills', 'learning', 'hosts-link')); // never followed into the copy
-  const tbd = await boot(t, { t_e2e001: { state: 'backlog', tag: 'acme/api', title: 'Paginate GET /users!', text: 'Paginate GET /users' } }, {
+  const tbd = await boot(t, { t_e2e001: { sandbox: true, state: 'backlog', tag: 'acme/api', title: 'Paginate GET /users!', text: 'Paginate GET /users' } }, {
     files: { 'tags.json': { acme: {}, 'acme/api': { type: 'git', path: dir, base: 'main', setup, env_files: ['.env.test'] } } },
     env: { FAKE_CLAUDE_SCENARIO_DIR: scn }, root,
   });
@@ -359,6 +362,8 @@ test('item 8 E2E (U8 U9 J3 J12 AC3 AC4 AC8): assign → questions → tb answer 
   assert.deepEqual([git(wt, 'config', 'core.hooksPath'), p.clone.config], ['.husky', crypto.createHash('sha256').update(cfg).digest('hex')], 'F3: the hash after setup');
   const sk = tk(tbd, id, 'skills', '.claude', 'skills', 'learning');
   assert.deepEqual([fs.lstatSync(path.join(sk, 'SKILL.md')).isFile(), fs.readdirSync(sk)], [true, ['SKILL.md']]);
+  // Phase 4 (+/-): sandbox ticket, the board defaults hold plugin skills (caveman ...) the home lacks: no throw, only the known one copied
+  assert.deepEqual(fs.readdirSync(path.join(tk(tbd, id, 'skills', '.claude', 'skills'))), ['learning']);
   assert.match(fs.readFileSync(path.join(wt, 'node_modules', '.lease'), 'utf8'), /^\S{8,}\n$/, 'TBX_LEASE: setup ran in the heavy slot');
   // J3: children in Backlog, parent + blocked_by mapped, auto_assign; not assigned while the parent is not merged (J5).
   // C15 (D-0091) contract change: a code child always waits on its parent too (C2 named only C1: was [c1.id])
@@ -480,6 +485,7 @@ test('J5: an approval-made child is assigned by tbd once its blockers are merged
   assert.deepEqual([late.status, /setup of the approved plan is running/.test(late.json.error)], [409, true], late.json.error);
   await until(() => read(tbd, 't_race01').state === 'working', 30_000, 'race: working');
   assert.equal(fs.existsSync(path.join(wtRace, '.npmrc')), false, 'S2: the planted ignored file is gone');
+  assert.equal(fs.existsSync(tk(tbd, 't_race01', 'skills', '.claude')), false, 'Phase 4: a full-access ticket copies no skills');
   // J13: the cancelled blocker holds the auto-assign (one alert)
   await until(() => read(tbd, 't_kid004').waiting?.reason === 'blocker_cancelled', 10_000, 'blocker_cancelled');
   assert.equal(read(tbd, 't_kid004').waiting.blocker, 't_cncl01');
@@ -580,7 +586,7 @@ test('J15 J16 J17 runner: a rule broken at base_sha → resumed once with the re
   fs.writeFileSync(path.join(wtDirty, 'scenario.json'), JSON.stringify({ steps: [{ exec: ['/usr/bin/touch', 'escaped.txt'] }, result(PLAN)] }));
   fs.writeFileSync(path.join(wtDirty, 'pre.txt'), 'a failed setup left this before the round\n'); // dirty at round start: not the planner's
   const notes = fs.mkdtempSync(path.join(ROOT, 'notes-'));
-  const tags = { acme: {}, 'acme/api': { type: 'git', path: dir, base: 'main', checks: { unit: 'npm test', lint: 'npm run lint' }, context: ['docs/arch.md'], skills: ['learning'] }, 'acme/notes': { type: 'folder', path: notes } };
+  const tags = { acme: {}, 'acme/api': { type: 'git', path: dir, base: 'main', checks: { unit: 'npm test', lint: 'npm run lint' }, context: ['docs/arch.md'], skills: ['learning'], skills_off: ['tdd'] }, 'acme/notes': { type: 'folder', path: notes } };
   const FOLDER_Q = { ...QUESTIONS, facts: ['notes.md: in no repo'] };
   const tbd = await boot(t, {
     t_rule01: { tag: 'acme/api', base_sha: base, worktree: wtRule, locked_decisions: [L1] },
@@ -600,8 +606,8 @@ test('J15 J16 J17 runner: a rule broken at base_sha → resumed once with the re
   const seed = prompt('t_rule01', 1);
   // P5 (contract change; the block had no gate facts): + test scripts, protected, generated (the planner's modules rule)
   const gate = 'test scripts (test_cmd may run): ^test(:|$)\nprotected: package.json, .npmrc, tsconfig*.json, jest.config.*, vitest.config.*, babel.config.*, .swcrc, nest-cli.json, prisma.config.ts, test/utils/**, test/helpers/**\ngenerated: (none)';
-  assert.ok(seed.includes(`## Tag\n\ntag: acme/api (git, base main)\nchecks: unit = npm test, lint = npm run lint\n${gate}\ncontext files: docs/arch.md\ndefault skills: learning\ninstalled skills: learning\n\n## System now`), seed);
-  assert.ok(prompt('t_fold01', 1).includes(`## Tag\n\ntag: acme/notes (folder)\nchecks: (none)\n${gate}\ncontext files: (none)\ndefault skills: (none)\ninstalled skills: learning\n`));
+  assert.ok(seed.includes(`## Tag\n\ntag: acme/api (git, base main)\nchecks: unit = npm test, lint = npm run lint\n${gate}\ncontext files: docs/arch.md\nboard default skills: learning, grilling, lavish, test-engineer-irfan, tdd, codebase-design, postgres-irfan-axi, chrome-devtools-axi, caveman, ponytail, frontend-design\ntag adds: learning\ntag removes: tdd\ninstalled skills: learning\n\n## System now`), seed);
+  assert.ok(prompt('t_fold01', 1).includes(`## Tag\n\ntag: acme/notes (folder)\nchecks: (none)\n${gate}\ncontext files: (none)\nboard default skills: learning, grilling, lavish, test-engineer-irfan, tdd, codebase-design, postgres-irfan-axi, chrome-devtools-axi, caveman, ponytail, frontend-design\ntag adds: (none)\ntag removes: (none)\ninstalled skills: learning\n`));
   // J15 J16: the run gets TB_PHASE (bash-guard) and TB_PLAN_CTX (plan-check hook) = runs/1.plan-ctx.json, tbd's ctx
   const d = tbd.dumps().find((x) => x.prompt === seed);
   assert.deepEqual([d.env.TB_PHASE, d.env.TB_PLAN_CTX], ['planning', tk(tbd, 't_rule01', 'runs', '1.plan-ctx.json')]);

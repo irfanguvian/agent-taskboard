@@ -25,7 +25,7 @@ for (const ph of ['planning', 'working']) {
 }
 // Admission always yes (this 8 GB Mac's free RAM must not decide a test); 2 runs: a parent + one lane
 const CONFIG = {
-  claude_bin: FAKE, max_concurrent: 2,
+  claude_bin: FAKE, max_concurrent: 2, lanes: { enabled: true }, // Phase 4 contract change: lanes are their own knob (was on at max_concurrent >= 2)
   memory: { min_free_gb: 0, phase_need_gb: { planning: 0, working: 0, review: 0, qa: 0 }, docker_reserved_gb: 0, start_at_warn_when_idle: true },
   disk: { warn_gb: 0, stop_gb: 0 },
 };
@@ -177,7 +177,7 @@ test('P1 P8 P9: T1, T2 free, T3 after T1 (max 2) → T2 in a lane; it waits merg
   fs.writeFileSync(rules, 'Never use offset paging.\n');
   const w = await parent(t, {
     tasks: [task('T1'), task('T2'), task('T3', { blocked_by: ['T1'] })],
-    planOver: { skills: ['learning'] }, tag: { rules: [rules] },
+    planOver: { skills: ['learning'] }, ticketOver: { sandbox: true }, tag: { rules: [rules] },
     extra: { 'decisions.json': [{ id: 'D1', text: 'cursor in a header', source: 'planner' }], 'scope.json': { allow: { T2: [{ path: 'lib/t2.js' }] }, denied: {} } },
     sessions: {
       T1: [done('src/T1.js', 'T1', [hold(marker('p1-go'))])],
@@ -287,6 +287,7 @@ test('P3 (−) no lane: max_concurrent 1; T2\'s plan files overlap T1\'s (D-0136
   };
   const T1 = { T1: [{ steps: [{ hang: true }] }] };
   await started(await parent(t, { tasks: [task('T1'), task('T2')], sessions: T1, config: { max_concurrent: 1 } }));
+  await started(await parent(t, { tasks: [task('T1'), task('T2')], sessions: T1, config: { max_concurrent: 3, lanes: { enabled: false } } })); // Phase 4: the knob off
   await started(await parent(t, { tasks: [task('T1'), task('T2', { files: ['src/T1.js'] })], sessions: T1 }));
   await started(await parent(t, { tasks: [task('T1'), task('T2')], sessions: T1, pressure: 'warn' }));
   await started(await parent(t, { tasks: [task('T1'), task('T2')], sessions: T1,

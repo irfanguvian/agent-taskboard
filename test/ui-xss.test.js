@@ -526,9 +526,9 @@ test('UX6: the flow sheet with title + fix-of posts {text, title, kind, tag, fix
   const n = trust(ctx);
   run(`state = { reminders: [], flows: [{ id: "t_a1", title: "Earlier flow", state: "done" }], system: {}, calendar: {} }; ui.tags = ["acme/api"];`);
   run('openNew("flow")'); // calm UI: the New sheet (N / New) replaced the composer line and its More… sheet
-  assert.deepEqual(find(sheet, (x) => x.tag === 'label').map((l) => txt(l)), ['Goal for the Agent', 'Short Title', 'Kind', 'Tag', 'Fix Of']);
+  assert.deepEqual(find(sheet, (x) => x.tag === 'label').map((l) => txt(l)), ['Goal for the Agent', 'Short Title', 'Kind', 'Tag', 'Fix Of', 'Sandbox: locked run, for untrusted input (--sandbox)']);
   const ids = find(sheet, (x) => x.tag === 'label').map((l) => l.attrs.for);
-  assert.deepEqual(ids.map((id) => find(sheet, (x) => x.attrs.id === id).length), [1, 1, 1, 1, 1], 'each label points at one control');
+  assert.deepEqual(ids.map((id) => find(sheet, (x) => x.attrs.id === id).length), [1, 1, 1, 1, 1, 1], 'each label points at one control');
   assert.deepEqual(find(byName(sheet, 'fix_of'), (x) => x.tag === 'option').map((o) => o.attrs.value), ['', 't_a1']);
   byName(sheet, 'text').value = 'Make the list sortable';
   byName(sheet, 'tag').value = 'acme/api';
@@ -542,6 +542,9 @@ test('UX6: the flow sheet with title + fix-of posts {text, title, kind, tag, fix
   byName(sheet, 'title').value = '';
   await sheet.onsubmit({ preventDefault() {} });
   assert.deepEqual(n.calls.filter((c) => c.method === 'POST').at(-1).body, { text: 'Make the list sortable', kind: 'code', tag: 'acme/api' }, 'no title, no fix_of key');
+  byName(sheet, 'sandbox').checked = true; // full access is the default; the box asks for today's locked run (tb new --sandbox)
+  await sheet.onsubmit({ preventDefault() {} });
+  assert.deepEqual(n.calls.filter((c) => c.method === 'POST').at(-1).body, { text: 'Make the list sortable', kind: 'code', tag: 'acme/api', sandbox: true }, 'sandbox box → sandbox: true');
 
   byName(sheet, 'text').value = '   ';
   const before = n.calls.length;

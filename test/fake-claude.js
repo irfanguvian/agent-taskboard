@@ -22,7 +22,7 @@ const VALUE_FLAGS = new Set(['--session-id', '--resume', '--setting-sources', '-
   '--add-dir', '--mcp-config', '--tools', '--disallowedTools', '--permission-mode', '--permission-prompts', '--model',
   '--effort', '--fallback-model', '--max-turns', '--json-schema', '--output-format']);
 const BOOL_FLAGS = new Set(['-p', '--print', '--strict-mcp-config', '--verbose', '--include-partial-messages']);
-const ENV_KEEP = /^(CLAUDE_|ANTHROPIC_|GIT_|GH_|BASH_|TB_)|^(GITHUB_TOKEN|SSH_AUTH_SOCK|DISABLE_AUTOUPDATER|TBD_SOCK|TBX_RUN|PATH|NODE_OPTIONS)$/;
+const ENV_KEEP = /^(CLAUDE_|ANTHROPIC_|GIT_|GH_|BASH_|TB_)|^(GITHUB_TOKEN|SSH_AUTH_SOCK|DISABLE_AUTOUPDATER|DISABLE_OMC|LEARNING_DIR|CAVEMAN_DEFAULT_MODE|TBD_SOCK|TBX_RUN|PATH|NODE_OPTIONS)$/;
 const ENV_SECRET = /TOKEN|_KEY$|^SSH_AUTH_SOCK$/; // D31: dump presence only, never the value
 
 const warn = (msg) => fs.writeSync(2, `fake-claude: ${msg}\n`);
@@ -73,7 +73,7 @@ if (FAKE_CLAUDE_SCENARIO_DIR) {
 if (FAKE_CLAUDE_DUMP_DIR) {
   if (!n) n = claim(FAKE_CLAUDE_DUMP_DIR, (i) => `${i}.json`);
   const env = {};
-  for (const [k, v] of Object.entries(process.env)) if (ENV_KEEP.test(k)) env[k] = ENV_SECRET.test(k) ? '<redacted>' : v;
+  for (const [k, v] of Object.entries(process.env)) if (ENV_KEEP.test(k)) env[k] = ENV_SECRET.test(k) && v ? '<redacted>' : v; // an empty value is no secret (full access pins SSH_AUTH_SOCK "")
   fs.writeFileSync(path.join(FAKE_CLAUDE_DUMP_DIR, `${n}.json`),
     JSON.stringify({ argv, opts, env, cwd: process.cwd(), prompt }, null, 2));
 }

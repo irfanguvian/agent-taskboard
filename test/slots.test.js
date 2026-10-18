@@ -19,8 +19,10 @@ let tbd;
 let sock;
 let run; // the test process's run key (N2): its children acquire with it
 const nonce = 'c3'.repeat(16); // N11: releases prove the acquirer with it
+const BUDGET3 = { subagents: { concurrent: 3, per_session_total: 3, depth: 1 } };
 before(async () => {
-  tbd = await startTbd({ env: { NODE_OPTIONS: SLOT_ROOT } }); // test process = a run root: its children may hold
+  // full-access-runs Phase 4 (contract table): the default budget is 8 now; this harness pins 3, the slots contract unchanged
+  tbd = await startTbd({ files: { 'config.json': BUDGET3 }, env: { NODE_OPTIONS: SLOT_ROOT } }); // test process = a run root: its children may hold
   sock = path.join(tbd.tbHome, 'tbd.sock');
   run = tbd.runKey;
 });
@@ -146,7 +148,7 @@ test('AC5 leases and counters survive a tbd restart; dead-pid and reused-pid lea
   await died(b);
   await call(sock, { op: 'slot.release', lease: heavy.lease, nonce }); // tbd #1 frees: tbd #2 must still see it held
 
-  const tbd2 = await startTbd({ files: { 'slots.json': seed } });
+  const tbd2 = await startTbd({ files: { 'slots.json': seed, 'config.json': BUDGET3 } });
   t.after(() => tbd2.stop());
   const sock2 = path.join(tbd2.tbHome, 'tbd.sock');
   const s = await status(sock2);

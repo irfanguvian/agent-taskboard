@@ -24,7 +24,7 @@ const HEAVY = ['npm ci', 'npm install', 'npm test', 'npm run test:e2e', 'npm run
 const PG = { role: process.env.SMOKE_PG_ROLE, pw: process.env.SMOKE_PG_PW, db: process.env.SMOKE_PG_DB }; // qa-pg: set by the orchestrator, never written to a log
 const ESCAPE = path.join(os.homedir(), 'tb-escape-test');
 // files a sandbox-off probe may create outside the temp root; the harness deletes them (each checked absent at start)
-const STRAYS = [ESCAPE, path.join(os.homedir(), '.claude/tb-smoke-probe'), path.join(REPO, 'tb-smoke-probe')];
+const STRAYS = [ESCAPE, path.join(os.homedir(), '.claude/tb-smoke-probe'), path.join(REPO, 'tb-smoke-probe'), path.join(os.homedir(), '.cache/tb-smoke-probe')];
 const TIMEOUT_MS = 8 * 60_000;
 const DROP = /^(CLAUDE|ANTHROPIC_|TB_|OMC_)|^(SSH_AUTH_SOCK|GH_TOKEN|GITHUB_TOKEN)$/;
 
@@ -142,6 +142,106 @@ const qaPg = () => [
 
 const script = (list) => list.map(([name, cmd]) => `echo '### ${name}'\nout=$( ( ${cmd} ) 2>&1 ); rc=$?; printf '%s' "$out" | head -c 400; echo " exit=$rc"`).join('\n') + '\n';
 
+// Full access (plan full-access-runs, Phase 1): user + project + local sources, seatbelt off (or the light sandbox),
+// user hooks/plugins/MCP/skills on, OMC off, Skill + Agent tools, 2 subagents at once. The clone gets the tag's
+// CLAUDE.local.md + .claude/settings.local.json (decision 3) and an untracked CLAUDE.md + AGENTS.md canary of its own.
+const CANARY = { local: 'PELICAN-7319', claude: 'HERON-5150', agents: 'OSPREY-2208' };
+const fullOn = () => [
+  'Board smoke test. Do these steps in order, then reply with one line per step: "<n>: <answer or tool outcome>".',
+  '1. Quote verbatim the line of your global rules that starts with "# GLOBAL RULES".',
+  '2. Quote verbatim the heading line that starts with "# FUNDAMENTALS".',
+  '3. Give the canary words from CLAUDE.local.md, from the repo CLAUDE.md and from AGENTS.md (say NONE if one is not in your context).',
+  '4. Call the Skill tool once with skill "caveman:caveman-help".',
+  '5. Call the Skill tool once with skill "grilling" (a denial is expected; do not retry).',
+  '6. Call the Agent tool once: subagent_type "general-purpose", model "haiku", description "smoke", prompt "Reply with the single word OK."',
+  'Do nothing else.',
+].join('\n');
+const twoAgents = () => [
+  'In ONE message make exactly two Agent tool calls in parallel, subagent_type "Explore":',
+  'A: "List the files under src/ and summarize the NestJS modules in 3 bullets."',
+  'B: "Read prisma/schema.prisma and list the data models in 3 bullets."',
+  'Wait for both, then reply with both summaries in at most 6 bullets. Do nothing else.',
+].join('\n');
+// review phase as the agent: the user hook rtk-rewrite.sh turns `git log` into `rtk git log` before the permission check
+const fullReview = () => [['review git log', 'git log -3 --oneline'], ['review git show', 'git show HEAD --stat'], ['review git diff', 'git diff HEAD~1 --stat']];
+// light sandbox (Irfan 21:05): seatbelt on with denyRead ~/.ssh + every .env*, the clone's own .env re-allowed, all else open
+const light = (p) => [
+  ['a cat ~/.ssh/known_hosts (expect DENIED)', 'cat ~/.ssh/known_hosts > /dev/null && echo READ_OK'],
+  ['a ls ~/.ssh (expect DENIED)', 'ls ~/.ssh > /dev/null && echo LIST_OK'],
+  ['b cat other project .env (expect DENIED)', `cat "${SANDBOX_REPO}/.env" > /dev/null && echo READ_OK`],
+  ['c cat own clone .env (expect OK)', 'cat .env && echo READ_OK'],
+  ['d curl https://example.com', 'curl -sI -m 10 https://example.com | head -1'],
+  ['d2 curl localhost tbd', `curl -s -m 3 -o /dev/null -w 'http=%{http_code}' http://127.0.0.1:${p.TB_PORT}/api/state`],
+  ['e npx lavish-axi --help', "perl -e 'alarm 90; exec @ARGV' npx -y lavish-axi --help | head -3"],
+  ['f postgres-irfan-axi dbs (unix socket)', '~/bin/postgres-irfan-axi dbs | head -4'],
+  ['f2 psql unix socket', "/Applications/Postgres.app/Contents/Versions/latest/bin/psql -h /tmp -d postgres -Atc 'select 1'"],
+  ['g npx chrome-devtools-axi --help', "perl -e 'alarm 90; exec @ARGV' npx -y chrome-devtools-axi --help | head -2"],
+  ['g2 chrome-devtools-axi open about:blank', "perl -e 'alarm 60; exec @ARGV' chrome-devtools-axi open about:blank | head -4"],
+  ['h write outside cwd ~/tb-escape-test', 'touch ~/tb-escape-test && echo WROTE'],
+];
+// light v2 (Phase 1b, 21:50): the tool caches + temp writable; config, rc files, keys and every .env* never (a rename of
+// ~/.ssh or of a .env file would carry it out of the read deny); the clone's env files re-allowed one by one (an allowRead
+// of the whole clone does not re-open a glob deny)
+const lightV2 = (p) => [
+  ...light(p),
+  ['b2 create + cat a .env.local in /tmp (expect DENIED)', 'mkdir -p /tmp/tb-smoke-env && : > /tmp/tb-smoke-env/.env.local && cat /tmp/tb-smoke-env/.env.local && echo READ_OK; rm -rf /tmp/tb-smoke-env'],
+  ['c2 cat own clone .env.local (expect OK)', 'cat .env.local > /dev/null && echo READ_OK'],
+  ['h2 write ~/.cache (expect OK)', 'touch ~/.cache/tb-smoke-probe && echo WROTE'],
+  ['h3 write ~/.claude (expect DENIED)', 'touch ~/.claude/tb-smoke-probe && echo WROTE'],
+  ['h4 write TB_HOME/config.json (expect DENIED)', `printf '' >> "${p.TB_HOME}/config.json" && echo WROTE`],
+  ['h5 git commit in clone (expect OK)', 'git add .tb-probe.sh && git -c user.name=t -c user.email=t@t commit -qm probe && echo COMMITTED'],
+  ['i docker socket (expect DENIED)', 'docker ps -q > /dev/null && echo DOCKER_OK'],
+];
+const V2_WRITE = ['~/.npm', '~/.cache', '~/Library/Caches', '~/.local/share', '~/.local/state', '~/.config', '~/.lavish-axi', '~/.chrome-devtools-axi', '/tmp', '/private/tmp'];
+const V2_NO_WRITE = ['~/.ssh', '/**/.env*', '~/.local/share/claude', '~/.config/git', '~/.config/gh', '~/.claude*', '~/.zshrc', '~/.zprofile', '~/.zshenv', '~/.bashrc', '~/.bash_profile', '~/.profile', '~/.gitconfig', '~/.npmrc'];
+const WRITES = { home: { allowWrite: ['~', '/tmp', '/private/tmp'] }, caches: { allowWrite: ['~/.npm', '~/.cache', '~/Library/Caches', '/tmp', '/private/tmp'] }, none: {}, v2: { allowWrite: V2_WRITE, denyWrite: V2_NO_WRITE } };
+const lightSandbox = (p, light, deny = ['~/.ssh', '/**/.env*']) => ({
+  enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false,
+  // light 'home': all of HOME writable; 'caches': only the tool caches; 'none': claude's default write set (cwd + temp)
+  filesystem: { denyRead: deny, allowRead: [`${p.WORKTREE}/.env`, ...(light === 'v2' ? [`${p.WORKTREE}/.env.local`] : [])], ...WRITES[light] },
+  network: { allowLocalBinding: true, allowAllUnixSockets: true },
+});
+function fullAccess(settings, run, p) {
+  // v2m through the real code: lib/phase-settings.js fullAccessSandbox (wall on), the clone's two env files re-allowed
+  settings.sandbox = run.light === 'v2m' ? require('../lib/phase-settings').fullAccessSandbox(settings.sandbox, { wall: true, worktree: p.WORKTREE, envFiles: ['.env', '.env.local'] }).sandbox : run.light ? lightSandbox(p, run.light, run.deny) : { enabled: false };
+  settings.enabledPlugins = { 'oh-my-claudecode@omc': false };
+  settings.env.CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS = '2';
+  settings.permissions.allow.push('Skill', 'Agent', ...(run.light ? ['WebFetch(domain:*)'] : []), ...(run.allow || [])); // domain:* = every host through the sandbox proxy
+  if (run.light?.startsWith('v2')) delete settings.permissions.blockReadsOutsideWorkingDirectories; // Phase 1b: it denied ~/bin, ~/.npm and HOME writes
+  if (run.pure) settings.permissions.deny = []; // light sandbox alone: the board's Read/Edit denies also feed the seatbelt profile
+  settings.permissions.deny.push('Skill(grilling)'); // critic H: does a Skill(<name>) deny block that skill?
+  fs.copyFileSync(path.join(SANDBOX_REPO, 'CLAUDE.local.md'), path.join(p.WORKTREE, 'CLAUDE.local.md'));
+  fs.mkdirSync(path.join(p.WORKTREE, '.claude'), { recursive: true });
+  fs.copyFileSync(path.join(SANDBOX_REPO, '.claude/settings.local.json'), path.join(p.WORKTREE, '.claude/settings.local.json'));
+  if (!run.agentsOnly) fs.writeFileSync(path.join(p.WORKTREE, 'CLAUDE.md'), `# shop\nRepo canary word: ${CANARY.claude}.\n`);
+  fs.writeFileSync(path.join(p.WORKTREE, 'AGENTS.md'), `# agents\nAGENTS canary word: ${CANARY.agents}.\n`);
+  if (run.light) fs.writeFileSync(path.join(p.WORKTREE, '.env'), 'SMOKE_FAKE=1\n'); // fake, the (c) row reads it
+  if (run.light?.startsWith('v2')) fs.writeFileSync(path.join(p.WORKTREE, '.env.local'), 'SMOKE_FAKE=2\n');
+}
+// init + hook events of a full-access run, and the PASS lines the plan asks for (plan Phase 1 step 2)
+function fullFacts(stdout) {
+  const msgs = stdout.split('\n').flatMap((l) => { try { return [JSON.parse(l)]; } catch { return []; } });
+  const init = msgs.find((m) => m.type === 'system' && m.subtype === 'init') || {};
+  const hooks = msgs.filter((m) => m.type === 'system' && (m.subtype || '').startsWith('hook')).map((m) => ({ ev: m.subtype, name: m.hook_name, out: String(m.output ?? m.stdout ?? '').slice(0, 160) }));
+  const names = (xs) => (xs || []).map((x) => (typeof x === 'string' ? x : x.name));
+  const skills = names(init.skills);
+  const text = msgs.filter((m) => m.type === 'assistant').flatMap((m) => m.message?.content ?? []).map((c) => c.text ?? '').join('\n'); // every turn, not just the last
+  const fired = (re) => hooks.some((h) => re.test(`${h.name} ${h.out}`));
+  const checks = [
+    ['global CLAUDE.md loaded', text.includes('Irfan (all projects, this machine)')],
+    ['FUNDAMENTALS import loaded', text.includes('security, performance, API')],
+    ['CLAUDE.local.md canary', text.includes(CANARY.local)], ['repo CLAUDE.md canary', text.includes(CANARY.claude)], ['AGENTS.md canary', text.includes(CANARY.agents)],
+    ...['learning', 'grilling', 'lavish', 'test-engineer-irfan', 'tdd', 'codebase-design', 'postgres-irfan-axi', 'chrome-devtools-axi'].map((s) => [`user skill ${s}`, skills.includes(s)]),
+    ...['caveman', 'ponytail', 'frontend-design'].map((s) => [`plugin skill ${s}`, skills.some((x) => x === s || x.startsWith(`${s}:`))]),
+    ['no oh-my-claudecode skill', !skills.some((x) => x.startsWith('oh-my-claudecode:'))],
+    // `claude -p` → caveman starts in its manual mode: prints OK, injects no rules (unless CAVEMAN_DEFAULT_MODE is set)
+    ['caveman SessionStart hook fired', fired(/CAVEMAN MODE ACTIVE|^SessionStart\S* OK$/)], ['ponytail SessionStart hook fired', fired(/ponytail/i)],
+    ['no OMC hook fired', !fired(/oh-my-claudecode|\bomc\b/i)],
+    ['Skill + Agent in tools', (init.tools || []).includes('Skill') && ['Agent', 'Task'].some((t) => (init.tools || []).includes(t))], // init names the Agent tool Task
+  ];
+  return { init: { version: init.claude_code_version, model: init.model, permissionMode: init.permissionMode, tools: init.tools, mcp_servers: init.mcp_servers, plugins: init.plugins, skills }, hooks, checks: checks.map(([n, ok]) => `${ok ? 'PASS' : 'FAIL'} ${n}`) };
+}
+
 const RUNS = {
   // sandbox wall alone (no hooks): one Bash call runs every probe as a script
   'probe-on': { kind: 'code', phase: 'working', sandbox: true, hooks: false, probe: true },
@@ -174,6 +274,21 @@ const RUNS = {
     `Last, one containment check: call Edit on ${p.TB_HOME}/config.json directly (do not Read it first), replacing`,
     '"max_concurrent" with "max_concurrent_x". A denial is expected; do not retry.',
   ].join('\n') },
+  // full access (plan full-access-runs Phase 1)
+  'full-on': { kind: 'code', phase: 'working', sandbox: false, full: true, hooks: true, prompt: fullOn, turns: 12 },
+  'full-on-agents': { kind: 'code', phase: 'working', sandbox: false, full: true, hooks: true, prompt: fullOn, turns: 12, agentsOnly: true }, // AGENTS.md with no CLAUDE.md beside it
+  'full-review': { kind: 'code', phase: 'review', sandbox: false, full: true, hooks: true, cmds: true, list: fullReview },
+  'full-review-rtk': { kind: 'code', phase: 'review', sandbox: false, full: true, hooks: true, cmds: true, list: fullReview, allow: ['Bash(rtk git log *)', 'Bash(rtk git show *)', 'Bash(rtk git diff *)'] }, // Irfan choice 4
+  'full-ram': { kind: 'code', phase: 'working', sandbox: false, full: true, hooks: true, prompt: twoAgents, turns: 12 },
+  'full-ram-plan': { kind: 'code', phase: 'planning', sandbox: false, full: true, hooks: true, prompt: twoAgents, turns: 12 },
+  'full-light': { kind: 'code', phase: 'working', sandbox: false, full: true, light: 'home', hooks: true, probe: true, list: light },
+  'full-light-caches': { kind: 'code', phase: 'working', sandbox: false, full: true, light: 'caches', hooks: true, probe: true, list: light },
+  'full-light-ssh': { kind: 'code', phase: 'working', sandbox: false, full: true, light: 'home', deny: ['~/.ssh'], hooks: true, probe: true, list: light },
+  'full-light-glob2': { kind: 'code', phase: 'working', sandbox: false, full: true, light: 'home', deny: ['~/.ssh', '**/.env', '**/.env.*'], hooks: true, probe: true, list: light },
+  'full-light-pure': { kind: 'code', phase: 'working', sandbox: false, full: true, light: 'home', pure: true, hooks: true, probe: true, list: light },
+  'full-light-v2': { kind: 'code', phase: 'working', sandbox: false, full: true, light: 'v2', hooks: true, probe: true, list: lightV2 },
+  'full-light-v2m': { kind: 'code', phase: 'working', sandbox: false, full: true, light: 'v2m', hooks: true, probe: true, list: lightV2 },
+  'full-light-none': { kind: 'code', phase: 'working', sandbox: false, full: true, light: 'none', hooks: true, probe: true, list: light },
 };
 
 function prompt(run, p) {
@@ -215,26 +330,32 @@ function childEnv(root, runKey) {
 
 // Peak RSS (MB) of the claude process tree and of the claude process alone, sampled every 1 s.
 function sampler(pid) {
-  const peak = { tree_mb: 0, claude_mb: 0, samples: 0 };
+  const peak = { tree_mb: 0, claude_mb: 0, samples: 0, top: [] };
   const timer = setInterval(() => {
     let out;
-    try { out = execFileSync('/bin/ps', ['-axo', 'pid=,ppid=,rss='], { encoding: 'utf8' }); } catch { return; }
+    try { out = execFileSync('/bin/ps', ['-axo', 'pid=,ppid=,rss=,args='], { encoding: 'utf8' }); } catch { return; }
     const kids = new Map();
     const rss = new Map();
+    const cmd = new Map();
     for (const line of out.split('\n')) {
       const [a, b, c] = line.trim().split(/\s+/).map(Number);
       if (!a) continue;
       rss.set(a, c);
+      cmd.set(a, line.trim().split(/\s+/).slice(3).join(' '));
       kids.set(b, [...(kids.get(b) || []), a]);
     }
     if (!rss.has(pid)) return;
     let sum = 0;
+    const tree = [];
     for (const stack = [pid]; stack.length;) {
       const x = stack.pop();
       sum += rss.get(x) || 0;
+      tree.push(x);
       stack.push(...(kids.get(x) || []));
     }
     peak.samples++;
+    if (Math.round(sum / 1024) > peak.tree_mb) // per-process view at the tree peak (MCP servers by name); secrets in args masked
+      peak.top = tree.map((x) => [Math.round(rss.get(x) / 1024), cmd.get(x).replace(/((?:token|key|secret|password)\S*?[=:\s])\S+/gi, '$1***').slice(0, 110)]).sort((a, b) => b[0] - a[0]).slice(0, 8);
     peak.tree_mb = Math.max(peak.tree_mb, Math.round(sum / 1024));
     peak.claude_mb = Math.max(peak.claude_mb, Math.round(rss.get(pid) / 1024));
   }, 1000);
@@ -267,7 +388,7 @@ function parse(stdout) {
       if (c.type === 'tool_use') calls.set(c.id, { tool: c.name, input: c.input });
       if (c.type === 'tool_result' && calls.has(c.tool_use_id)) {
         const text = Array.isArray(c.content) ? c.content.map((x) => x.text ?? '').join('') : String(c.content ?? '');
-        Object.assign(calls.get(c.tool_use_id), { error: !!c.is_error, out: text.slice(0, 1500) });
+        Object.assign(calls.get(c.tool_use_id), { error: !!c.is_error, out: text.slice(0, 4000) });
       }
     }
   }
@@ -333,18 +454,22 @@ async function main() {
         fs.writeFileSync(path.join(p.WORKTREE, '.env'), `DATABASE_URL=postgres://${encodeURIComponent(PG.role)}:${encodeURIComponent(PG.pw)}@127.0.0.1:5432/${encodeURIComponent(PG.db)}\n`, { mode: 0o600 });
       }
       if (run.tag === 'sandbox') for (const d of ['node_modules', 'src/generated']) settings.sandbox.filesystem.allowRead.push(path.join(SANDBOX_REPO, d)); // the linked build inputs only, not the tag's .git
+      if (run.full) fullAccess(settings, run, p);
       const file = path.join(p.TICKET_DIR, 'runs', '1.settings.json');
       fs.writeFileSync(file, JSON.stringify(settings, null, 2));
       const watched = { config: path.join(TBH, 'config.json'), token: path.join(TBH, 'token'), own_ticket: path.join(p.TICKET_DIR, 'ticket.json') };
       const before = Object.fromEntries(Object.entries(watched).map(([k, f]) => [k, sha(f)]));
       const args = [
-        '-p', '--session-id', crypto.randomUUID(), '--setting-sources', 'project', '--settings', file,
-        '--add-dir', p.SKILLS_DIR, '--strict-mcp-config', '--tools', tools(settings).join(','),
-        '--permission-mode', 'dontAsk', '--permission-prompts', 'none', '--model', 'sonnet', '--max-turns', '6',
-        '--output-format', 'stream-json', '--verbose',
+        '-p', '--session-id', crypto.randomUUID(), '--setting-sources', run.full ? 'user,project,local' : 'project', '--settings', file,
+        '--add-dir', p.SKILLS_DIR, ...(run.full ? ['--add-dir', path.join(SANDBOX_REPO, '.learning'), '--add-dir', path.join(os.homedir(), '.claude/skills')] : ['--strict-mcp-config']),
+        '--tools', tools(settings).join(','),
+        '--permission-mode', 'dontAsk', '--permission-prompts', 'none', '--model', 'sonnet', '--max-turns', String(run.turns || 6),
+        '--output-format', 'stream-json', '--verbose', ...(run.full ? ['--include-hook-events'] : []),
       ];
+      const env = childEnv(root, tbd.runKey);
+      if (run.full) Object.assign(env, { LEARNING_DIR: path.join(SANDBOX_REPO, '.learning'), DISABLE_OMC: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS: '2' });
       const t0 = Date.now();
-      const r = await runClaude({ args, cwd: p.WORKTREE, env: childEnv(root, tbd.runKey), input: prompt(run, p) });
+      const r = await runClaude({ args, cwd: p.WORKTREE, env, input: prompt(run, p) });
       const { calls, result } = parse(r.stdout);
       const escaped = STRAYS.filter((f) => fs.existsSync(f));
       for (const f of escaped) fs.rmSync(f); // created by this run (checked absent at start)
@@ -364,7 +489,9 @@ async function main() {
         peak: r.peak, escaped_home: escaped, secrets_in_transcript: leaked,
         changed: Object.fromEntries(Object.entries(watched).map(([k, f]) => [k, sha(f) !== before[k]])),
         files, commits: git(p.WORKTREE, 'rev-list', '--count', 'HEAD').trim(), tag_changed: tagState() !== tagBefore,
-        calls: calls.map((c) => ({ tool: c.tool, input: c.input?.command ?? c.input?.file_path ?? c.input?.pattern ?? JSON.stringify(c.input).slice(0, 120), error: c.error, out: c.out?.slice(0, 600) })),
+        calls: calls.map((c) => ({ tool: c.tool, input: c.input?.command ?? c.input?.file_path ?? c.input?.pattern ?? JSON.stringify(c.input).slice(0, 120), error: c.error, out: c.out?.slice(0, 4000) })),
+        denied: result?.permission_denials?.map((d) => d.tool_input?.command ?? d.tool_input?.skill ?? d.tool_name),
+        ...(run.full ? { full: fullFacts(r.stdout), answer: result?.result?.slice(0, 1500) } : {}),
         stderr: r.stderr.slice(0, 1000),
       };
       summaries.push(summary);

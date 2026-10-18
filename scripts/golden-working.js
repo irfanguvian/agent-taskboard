@@ -434,6 +434,7 @@ async function seed(env, plan, text) {
   write(path.join(dir, 'ticket.json'), {
     id, type: 'flow', kind: 'code', tag: 'sandbox', title: text.slice(0, 100), text, state: 'plan_approval', round: 1, created_at: now, updated_at: now,
     parent: null, blocked_by: [], fix_of: null, must_ask: false, rework: 0, failures: {}, waiting: null, lease: null,
+    sandbox: true, // full-access-runs Phase 3 (critic 9): the sandbox-traps golden keeps testing the locked run
     base_sha: env.base, worktree: wt, git_dir: made.git_dir, common_dir: env.commonDir, clone: made.clone,
     locked_decisions: plan.decisions.filter((d) => String(d.source).startsWith('answer:')),
   });

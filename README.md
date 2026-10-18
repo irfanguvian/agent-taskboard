@@ -25,7 +25,7 @@ flowchart LR
 
 Rollback: `tb doctor --pin --version <old>` (old copy still in `~/.taskboard/bin/`).
 
-Default pin for new installs: `DEFAULT_PIN` in `lib/util.js` (now 2.1.295).
+Default pin for new installs: `DEFAULT_PIN` in `lib/util.js` (now 2.1.302).
 
 ## Parallel lanes (code tickets)
 

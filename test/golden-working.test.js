@@ -82,7 +82,8 @@ test('--no-docker-reserve: a real run drops only the Docker reserve of the temp 
   const m = G.harnessConfig(G.parse(['--real', '--no-docker-reserve']), '/bin/claude').memory;
   assert.equal(Object.hasOwn(require.cache, store), false); // gatesRun must load it later with the temp TB_HOME
   // D36 + D-0100 defaults, only the reserve moves (D-0126, D-0141)
-  assert.deepEqual(m, { min_free_gb: 0.5, phase_need_gb: { planning: 0.4, review: 0.4, working: 1.0, qa: 1.0, final_gate: 0.4 }, docker_reserved_gb: 0, start_at_warn_when_idle: true });
+  // full-access-runs Phase 4 (contract change): planning / review / final_gate defaults 0.4 → 0.6
+  assert.deepEqual(m, { min_free_gb: 0.5, phase_need_gb: { planning: 0.6, review: 0.6, working: 1.0, qa: 1.0, final_gate: 0.6 }, docker_reserved_gb: 0, start_at_warn_when_idle: true });
   assert.deepEqual(G.harnessConfig(G.parse(['--real']), '/c'), { claude_bin: '/c', interview: { lavish: false } }); // no memory key → store defaults (reserve 2)
   assert.throws(() => G.parse(['--dry', '--no-docker-reserve']), /with --real only/);
   assert.throws(() => G.parse(['--blind', '/p', '--labels', '/l', '--scores', '/s', '--json', '/o', '--no-docker-reserve']), /with --real only/);

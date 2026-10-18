@@ -79,7 +79,8 @@ test('AC1 outcomes from the last result line: crash, invalid JSON, max turns, sc
     t_rsfg01: { state: 'final_gate', kind: 'research' },
     t_d9kid1: { state: 'clarify', parent: 't_d9par1' },
     t_fgate1: { state: 'final_gate' },
-  });
+    // full-access-runs Phase 4 (contract change: default planning model fable high → opus xhigh): U7 below needs fable
+  }, { config: { models: { ...require('../lib/store').DEFAULTS.models, planning: { model: 'fable', effort: 'high' } } } });
   // usage limit: test/recovery-tbd.test.js (its pause would hold every later start here)
   const ran = ['t_crash1', 't_ijson1', 't_maxt01', 't_schem1', 't_refus1', 't_okres1', 't_next01', 't_throw1', 't_refsd1'];
   const blocked = ['t_crash1', 't_ijson1', 't_maxt01', 't_schem1', 't_refus1']; // P3b: what follows these outcomes
@@ -140,6 +141,18 @@ test('spawn failure (claude_bin missing) → lease exit crash, pid null, the err
   assert.equal(fs.existsSync(path.join(tbd.tbHome, 'tickets/t_nobin1/runs/2.prompt')), false, 'no second attempt');
 });
 
+// full-access-runs Phase 3 (critic 18): the lease records which live global rules a full-access run loaded
+test('lease.global: a full-access run records the sha12 of the ~/.claude/CLAUDE.md it loaded; a sandbox run records none', async (t) => {
+  const home = fs.mkdtempSync(path.join(ROOT, 'home-'));
+  fs.mkdirSync(path.join(home, '.claude'));
+  fs.writeFileSync(path.join(home, '.claude', 'CLAUDE.md'), '# global rules\n');
+  const scenario = { steps: [{ sleep_ms: 1500 }, { result: { structured_output: {} } }] };
+  const tbd = await boot(t, { t_glob01: { scenario }, t_glob02: { sandbox: true, scenario } }, { env: { HOME: home } });
+  const lease = (id) => until(() => read(tbd, id).lease?.pid && read(tbd, id).lease, 15_000, `${id} lease saved`);
+  assert.equal((await lease('t_glob01')).global, require('node:crypto').createHash('sha256').update('# global rules\n').digest('hex').slice(0, 12));
+  assert.equal('global' in (await lease('t_glob02')), false);
+});
+
 test('AC2 + AC3: §9 argv and env through tbd (removed keys absent, TBX_RUN live then dropped); an agent git push fails (real git)', async (t) => {
   const g = fs.mkdtempSync(path.join(ROOT, 'git-'));
   const gitEnv = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
@@ -156,7 +169,8 @@ test('AC2 + AC3: §9 argv and env through tbd (removed keys absent, TBX_RUN live
   const secrets = { ANTHROPIC_API_KEY: 'sk-x', ANTHROPIC_AUTH_TOKEN: 'x', SSH_AUTH_SOCK: '/tmp/x.sock', GH_TOKEN: 'x', GITHUB_TOKEN: 'x', CLAUDE_CODE_ENTRYPOINT: 'cli' };
   const oauth = { CLAUDE_CODE_OAUTH_TOKEN: 'oauth-x' }; // S2: dropped too, runs log in through the claude.ai keychain entry
   const tbd = await boot(t, {
-    t_argv01: { tag: 'acme/docs', scenario: { steps: [{ exec: ['git', '-C', clone, 'push', 'origin', 'HEAD:main'] }, { sleep_ms: 2500 }, { result: { structured_output: {} } }] } },
+    // full-access-runs Phase 3 (contract change): this pins the locked run's argv + env, so the ticket has the Sandbox toggle on
+    t_argv01: { tag: 'acme/docs', sandbox: true, scenario: { steps: [{ exec: ['git', '-C', clone, 'push', 'origin', 'HEAD:main'] }, { sleep_ms: 2500 }, { result: { structured_output: {} } }] } },
   }, { files: { 'tags.json': { acme: {}, 'acme/docs': { path: tag, type: 'folder' } } }, env: { FAKE_CLAUDE_DUMP_DIR: dump, ...secrets, ...oauth } });
   const lease = await until(() => read(tbd, 't_argv01').lease?.pid && read(tbd, 't_argv01').lease, 15_000, 'lease saved');
   const d = await until(() => fs.existsSync(path.join(dump, '1.json')) && JSON.parse(fs.readFileSync(path.join(dump, '1.json'), 'utf8')), 5000, 'dump');
@@ -166,7 +180,8 @@ test('AC2 + AC3: §9 argv and env through tbd (removed keys absent, TBX_RUN live
     // M5 C2 (contract change: was the phase's prompt.md): a code run's prompt + phases/_rules.md
     '--append-system-prompt-file', path.join(tk, 'runs/1.system.md'), '--add-dir', path.join(tk, 'skills'), '--add-dir', tag,
     '--strict-mcp-config', '--mcp-config', path.join(tk, 'runs/1.mcp.json'), '--tools', 'Read,Glob,Grep', '--disallowedTools', 'Agent',
-    '--permission-mode', 'dontAsk', '--permission-prompts', 'none', '--model', 'fable', '--effort', 'high', '--fallback-model', 'opus',
+    // full-access-runs Phase 4 (contract change): default planning model fable high → opus xhigh (no fallback flag)
+    '--permission-mode', 'dontAsk', '--permission-prompts', 'none', '--model', 'opus', '--effort', 'xhigh',
     '--max-turns', '60', '--json-schema', JSON.stringify(SCHEMA), '--output-format', 'stream-json', '--verbose', '--include-partial-messages',
   ]);
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(tk, 'runs/1.mcp.json'), 'utf8')), { mcpServers: {} });
@@ -176,7 +191,8 @@ test('AC2 + AC3: §9 argv and env through tbd (removed keys absent, TBX_RUN live
   assert.equal(fs.realpathSync(d.cwd), fs.realpathSync(tk), 'folder tag: cwd = ticket dir');
   assert.equal(d.prompt, '# run t_argv01\n\ndo the thing\n', 'prompt = ticket.md render, on stdin from runs/1.prompt');
   const want = {
-    CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS: '3', CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH: '1', CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1',
+    // full-access-runs Phase 4 (contract change): default subagents.concurrent 3 → 2
+    CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS: '2', CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH: '1', CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1',
     CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: String(30 * 60_000), BASH_DEFAULT_TIMEOUT_MS: '1800000', BASH_MAX_TIMEOUT_MS: '1800000',
     DISABLE_AUTOUPDATER: '1', GIT_TERMINAL_PROMPT: '0', GIT_CONFIG_COUNT: '2', GIT_CONFIG_KEY_0: 'credential.helper', GIT_CONFIG_VALUE_0: '',
     GIT_CONFIG_KEY_1: 'url.no-push://.pushInsteadOf', GIT_CONFIG_VALUE_1: '', TBD_SOCK: path.join(tbd.tbHome, 'tbd.sock'),

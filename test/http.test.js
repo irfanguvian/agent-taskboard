@@ -133,7 +133,7 @@ test('AC4 SSE: system event on connect, reminder event after a PATCH; bad Host r
   const fromState = (await tbd.api('GET', '/api/state')).json.system;
   for (const [where, got] of [['SSE', JSON.parse(sys)], ['/api/state', fromState]]) {
     assert.deepEqual(Object.keys(got).sort(), keys, `${where} carries the system object`);
-    assert.deepEqual(runner(got), { runs: 0, max: 1, paused_until: null, paused_reason: null, usage_warning: false }, where);
+    assert.deepEqual(runner(got), { runs: 0, max: 3, paused_until: null, paused_reason: null, usage_warning: false }, where); // full-access-runs Phase 4 (contract change): default max_concurrent 1 → 3
   }
   const { json } = await tbd.api('POST', '/api/reminders', { title: 'sse me' });
   await tbd.api('PATCH', `/api/reminders/${json.reminder.id}`, { status: 'now' });

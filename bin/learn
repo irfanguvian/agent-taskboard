@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Board-run wrapper for the learning CLI. bash-guard denies Bash naming `.claude`, so runs call `learn`.
+# Read-only sub-commands only; `build` only in the working phase. Everything else writes the main DB or the clone's config.
+set -uo pipefail
+case "${1:-}" in
+  find|status|stats) ;;
+  build) [ "${TB_PHASE:-}" = working ] || { echo "learn: build only in the working phase" >&2; exit 2; }
+    exec bash "$HOME/.claude/skills/learning/bin/learn.sh" build ;; # no extra args: build only the run's LEARNING_DIR
+  *) echo "learn: '${1:-}' not in a board run (allowed: find, status, stats, build in working)" >&2; exit 2 ;;
+esac
+exec bash "$HOME/.claude/skills/learning/bin/learn.sh" "$@"

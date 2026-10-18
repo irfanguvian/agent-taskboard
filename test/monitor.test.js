@@ -263,7 +263,7 @@ test('AC1 HTTP: /api/state.system = monitor snapshot; SSE system event only when
   assert.deepEqual(frames().map((f) => f.pressure), [null, 'normal', 'warn'], 'connect frame, then one frame per change');
   const live = await state();
   assert.deepEqual(live, frames().at(-1));
-  assert.deepEqual(live, { ...w.mon.snapshot(), runs: 0, max: 1, paused_until: null, paused_reason: null, usage_warning: false });
+  assert.deepEqual(live, { ...w.mon.snapshot(), runs: 0, max: 3, paused_until: null, paused_reason: null, usage_warning: false }); // full-access-runs Phase 4 (contract change): default max_concurrent 1 → 3
 });
 
 test('AC1 live: harness tbd reports real RAM, pressure, disk, claude RSS, power from this Mac', async (t) => {

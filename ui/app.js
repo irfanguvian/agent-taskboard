@@ -2006,6 +2006,7 @@ function openNew(mode = 'reminder', typed = '') {
     { k: 'kind', label: 'Kind', kind: 'select', opts: KINDS.map(k => [k, k[0].toUpperCase() + k.slice(1)]) },
     { k: 'tag', label: 'Tag', kind: 'select', opts: [['', 'No Tag'], ...ui.tags.map(n => [n, n])] },
     { k: 'fix_of', label: 'Fix Of', kind: 'select', opts: [['', 'None'], ...(state?.flows ?? []).map(f => [f.id, vis(f.title)])] },
+    { k: 'sandbox', label: 'Sandbox: locked run, for untrusted input (--sandbox)', kind: 'check' },
   ] : [
     { k: 'title', label: 'Title', kind: 'text' },
     { k: 'status', label: 'Column', kind: 'select', opts: COLS.slice(0, 4) },
@@ -2016,7 +2017,7 @@ function openNew(mode = 'reminder', typed = '') {
   ];
   const f = sheetFields(specs, flow ? { text: typed, kind: KINDS[0] } : { title: typed, status: 'inbox' }, () => {});
   if (flow) loadTags();
-  const typedIn = sp => sp.kind !== 'select' && f.ctl[sp.k].value.trim();
+  const typedIn = sp => sp.kind !== 'select' && sp.kind !== 'check' && f.ctl[sp.k].value.trim();
   const seg = el('div', { class: 'seg', role: 'group', 'aria-label': 'Item type' }, ...[['reminder', 'Reminder'], ['flow', 'Flow']].map(([m, l]) =>
     el('button', { type: 'button', value: m, 'aria-pressed': String(flow === (m === 'flow')), onclick: () => {
       if (flow === (m === 'flow') || asking) return;
@@ -2039,7 +2040,7 @@ function openNew(mode = 'reminder', typed = '') {
     add.disabled = true;
     // empty optional fields are undefined: JSON leaves them out. An Inbox add goes on top (the old composer line's body);
     // another column keeps the server's default, as the old More… sheet posted
-    const sent = await addItem(flow, () => (flow ? api('POST', '/api/flows', { text: v.text, title: v.title || undefined, kind: v.kind, tag: v.tag || undefined, fix_of: v.fix_of || undefined })
+    const sent = await addItem(flow, () => (flow ? api('POST', '/api/flows', { text: v.text, title: v.title || undefined, kind: v.kind, tag: v.tag || undefined, fix_of: v.fix_of || undefined, sandbox: v.sandbox || undefined })
       : api('POST', '/api/reminders', { title: v.title, status: v.status, pos: v.status === 'inbox' ? 'top' : undefined, due: v.due || undefined, project: v.project || undefined, note: v.note || undefined, tag: v.tag || undefined })));
     if (sent && form.onsubmit === submit && sheetOpen()) closeSheet(true); // a Reminder ↔ Flow switch (or another sheet) since: not this one to close
     add.disabled = false;

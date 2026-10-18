@@ -6,7 +6,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { skillSources } = require('../lib/skills');
+const { skillSources, effectiveSkills, DEFAULT_SKILLS } = require('../lib/skills');
 
 function fixture(t) {
   const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'skills-')));
@@ -54,4 +54,13 @@ test('AC8 skillSources: HOME without ~/.claude/skills → empty, no throw', asyn
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'skills-empty-'));
   t.after(() => fs.rmSync(home, { recursive: true, force: true }));
   assert.deepEqual(await skillSources(home), { skills: {}, conflicts: [] });
+});
+
+// Phase 4: (defaults + tag.skills) - tag.skills_off, stable order, no duplicates
+test('Phase 4 effectiveSkills: board defaults + tag adds - tag removes; config.skills.defaults replaces the built-in list', () => {
+  assert.equal(DEFAULT_SKILLS.length, 11);
+  assert.deepEqual(effectiveSkills({}, { skills: ['learning', 'extra'], skills_off: ['tdd', 'caveman'] }),
+    ['learning', 'grilling', 'lavish', 'test-engineer-irfan', 'codebase-design', 'postgres-irfan-axi', 'chrome-devtools-axi', 'ponytail', 'frontend-design', 'extra']);
+  assert.deepEqual(effectiveSkills({ skills: { defaults: ['a', 'b'] } }, { skills: ['b', 'c'], skills_off: ['a'] }), ['b', 'c']);
+  assert.deepEqual(effectiveSkills({ skills: { defaults: ['a'] } }, undefined), ['a']);
 });

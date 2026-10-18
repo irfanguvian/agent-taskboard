@@ -239,3 +239,9 @@ test('M7 NAME_RE: a or a/b of lowercase letters, digits and - (a and a-b/c-1 ok)
   for (const ok of ['a', 'a/b', 'shop', 'self/taskboard', 'a-b/c-1', '9x']) assert.ok(tags.NAME_RE.test(ok), ok);
   for (const bad of ['-x', '--setup', '-', 'A', 'a b', 'a//b', '/a', 'a/']) assert.equal(tags.NAME_RE.test(bad), false, bad);
 });
+
+// Phase 4: skills_off is a list of plain names, like skills
+test('Phase 4 tag key skills_off: a list of names is valid; a non-list or a non-string item → rejected', () => {
+  tags.validate('p4', { skills: ['tdd'], skills_off: ['caveman', 'ponytail'] });
+  for (const bad of ['caveman', [1], [''], {}]) assert.throws(() => tags.validate('p4', { skills_off: bad }), /skills_off/, JSON.stringify(bad));
+});
