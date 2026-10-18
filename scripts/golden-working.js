@@ -26,6 +26,8 @@
 //     temp dir holding the packet + tb-sandbox at sandbox_base (./repo-at-base/); a run naming the answer key is
 //     discarded and run once more; scores mapped back by label (lower of 2; a spread of 2+ gets a 3rd, median) → --json.
 //   --real: claude_bin = the pinned version; tbd keeps the real HOME (claude's keychain login); TB_HOME is temp.
+//   --no-docker-reserve (--real; Irfan D-0126, D-0141): the temp TB_HOME's RAM gate drops the Docker Desktop reserve
+//     (memory.docker_reserved_gb 0, other memory keys = defaults). The live tbd's gate is never touched.
 //   --dry: test/fake-claude.js + the run-spy preload (no launchctl, no caffeinate), temp HOME. Each session applies the
 //     case's fixture patch (test/golden/fixtures/{b,c}.patch: verified solutions) and commits it with a fixed author and
 //     date, so its sha is known before the run (precommit: the same commit made in a shared bare clone).
@@ -775,7 +777,7 @@ function report(o, env, results) {
   const out = [`# P5 goldens: working phase, ${o.dry ? 'dry (fake claude + fixture patches)' : 'real (opus xhigh)'} (${env.date})`, '',
     `Verdict (scripted): ${pass === all.length && clean.length === env.planned ? 'PASS' : 'FAIL'}, ${pass}/${all.length} checks, ${clean.length}/${env.planned} clean runs, ${results.length - clean.length} contaminated. Irfan score per clean B/C run: below (pass = 4+, K17).`, '',
     `- cmd \`node scripts/golden-working.js ${process.argv.slice(2).join(' ')}\``,
-    `- claude_bin \`${env.claude}\` · working model: config default (opus xhigh), not overridden · one run at a time`,
+    `- claude_bin \`${env.claude}\` · working model: config default (opus xhigh), not overridden · one run at a time${env.noDockerReserve ? ' · RAM gate: docker reserve 0 (--no-docker-reserve, D-0126/D-0141)' : ''}`,
     `- prompt \`${o.prompt}\` (sha256 ${env.promptSha}) as code/working/prompt.md`,
     `- tbd dev, own port per run · TB_HOME \`${env.tbHome}\` (${o.keep ? 'kept' : 'removed'}) · HOME ${o.dry ? 'temp' : 'real (keychain login)'}`,
     `- sandbox \`${SANDBOX}\` base \`${env.base.slice(0, 12)}\` · checks: sandbox-exec, gate profile (mode test) + gate env`,
@@ -983,8 +985,27 @@ async function blindMain(o) {
   process.exitCode = json.pass && m ? 0 : 1;
 }
 
+// models, wall caps, max turns: repo defaults (working = opus xhigh). config.json merges shallow: a memory key replaces the
+// default memory object whole, so --no-docker-reserve spreads the defaults. lib/store must NOT stay loaded here: its paths
+// are fixed at require, and gatesRun loads it later with the temp TB_HOME (its guard refused every check on 2026-10-18).
+function storeDefaults() {
+  const p = require.resolve('../lib/store');
+  const had = Object.hasOwn(require.cache, p);
+  const { DEFAULTS } = require(p);
+  if (!had) delete require.cache[p]; // ponytail: read the constants, unload; move DEFAULTS to a path-free module if more scripts need them
+  return DEFAULTS;
+}
+function harnessConfig(o, claude) {
+  return {
+    claude_bin: claude,
+    interview: { lavish: false }, // M5.4: harness tbds never start a real lavish page or browser tab
+    ...(o.dry && { memory: { min_free_gb: 0, phase_need_gb: { planning: 0, working: 0, review: 0, qa: 0, final_gate: 0 }, docker_reserved_gb: 0, start_at_warn_when_idle: true }, disk: { warn_gb: 0, stop_gb: 0 } }),
+    ...(!o.dry && o.noDockerReserve && { memory: { ...storeDefaults().memory, docker_reserved_gb: 0 } }),
+  };
+}
+
 // ---- main ---------------------------------------------------------------------------------------------------------
-const USAGE = `usage: node scripts/golden-working.js (--dry | --real) [--only ${Object.keys(CASES).join('|')}[,...]] [--runs N] [--prompt <md>] [--claude <bin>] [--keep] [--out <md>] [--stop review|close] [--cap-min N] [--packet <dir> [--labels <file>]] [--json <file>]
+const USAGE = `usage: node scripts/golden-working.js (--dry | --real) [--only ${Object.keys(CASES).join('|')}[,...]] [--runs N] [--prompt <md>] [--claude <bin>] [--keep] [--out <md>] [--stop review|close] [--cap-min N] [--packet <dir> [--labels <file>]] [--json <file>] [--no-docker-reserve]
        node scripts/golden-working.js --blind <packet-dir> --labels <file> --scores <in.json> --json <out.json> [--reviewers 2|3] [--run-root <dir>] [--claude <bin>]`;
 // the flags added after P5 (R box): set only when given, so a run without them parses as before
 const MORE = { '--stop': 'stop', '--cap-min': 'capMin', '--packet': 'packet', '--labels': 'labels', '--json': 'json', '--blind': 'blind', '--scores': 'scores', '--reviewers': 'reviewers', '--run-root': 'runRoot' };
@@ -1001,12 +1022,14 @@ function parse(argv) {
     else if (a === '--claude') o.claude = argv[++i];
     else if (a === '--out') o.out = argv[++i];
     else if (a === '--keep') o.keep = true;
+    else if (a === '--no-docker-reserve') o.noDockerReserve = true;
     else if (Object.hasOwn(MORE, a)) {
       const v = argv[++i];
       if (!v) throw new Error(`${a} needs a value\n${USAGE}`);
       o[MORE[a]] = ['--cap-min', '--reviewers'].includes(a) ? Number(v) : v;
     } else throw new Error(`unknown argument ${a}\n${USAGE}`);
   }
+  if (o.noDockerReserve && o.dry !== false) throw new Error('--no-docker-reserve: with --real only');
   if (o.blind !== undefined) {
     if (o.dry !== null) throw new Error('--blind runs no golden: no --dry or --real');
     if (!o.labels || !o.scores || !o.json) throw new Error(`--blind needs --labels, --scores and --json\n${USAGE}`);
@@ -1062,14 +1085,10 @@ async function main() {
   const tag = goldenTag(rules, port);
   tagsLib.validate('sandbox', tag);
   write(path.join(tbHome, 'tags.json'), { sandbox: tag });
-  write(path.join(tbHome, 'config.json'), { // models, wall caps, max turns: repo defaults (working = opus xhigh)
-    claude_bin: claude,
-    interview: { lavish: false }, // M5.4: harness tbds never start a real lavish page or browser tab
-    ...(o.dry && { memory: { min_free_gb: 0, phase_need_gb: { planning: 0, working: 0, review: 0, qa: 0, final_gate: 0 }, docker_reserved_gb: 0, start_at_warn_when_idle: true }, disk: { warn_gb: 0, stop_gb: 0 } }),
-  });
+  write(path.join(tbHome, 'config.json'), harnessConfig(o, claude));
   if (o.dry) fs.mkdirSync(scn);
   const env = {
-    root, tbHome, code, phases, scn, base, tag, plans, texts, date, claude, port, app: o.dry && port ? path.join(root, 'fake-app.js') : null,
+    root, tbHome, code, phases, scn, base, tag, plans, texts, date, claude, port, noDockerReserve: !!o.noDockerReserve, app: o.dry && port ? path.join(root, 'fake-app.js') : null,
     commonDir: fs.realpathSync(git(SANDBOX, 'rev-parse', '--path-format=absolute', '--git-common-dir').trim()),
     dry: o.dry ? Object.fromEntries(o.only.map((k) => [k, precommit(root, base, path.join(FIX, CASES[k].patch))])) : null,
     runMs: (o.capMin ?? (o.dry ? 15 : o.stop === 'close' ? 240 : 150)) * 60_000, poll: o.dry ? 1000 : 10_000,
@@ -1077,7 +1096,7 @@ async function main() {
     promptSha: crypto.createHash('sha256').update(promptText).digest('hex').slice(0, 12),
   };
   if (env.app) write(env.app, FAKE_APP);
-  console.log(`golden: ${o.dry ? 'DRY (fake claude)' : 'REAL (opus xhigh)'} · ${o.only.map((k) => `${k} ×${o.runs ?? CASES[k].runs}`).join(', ')}${o.stop === 'close' ? ` · stop close, qa port ${port}` : ''} · root ${root}`);
+  console.log(`golden: ${o.dry ? 'DRY (fake claude)' : 'REAL (opus xhigh)'} · ${o.only.map((k) => `${k} ×${o.runs ?? CASES[k].runs}`).join(', ')}${o.stop === 'close' ? ` · stop close, qa port ${port}` : ''}${o.noDockerReserve ? ' · docker reserve 0' : ''} · root ${root}`);
   process.on('SIGINT', () => { aborted = true; console.log('golden: SIGINT: cancelling the live run, then cleanup'); });
 
   const results = [];
@@ -1126,7 +1145,7 @@ async function main() {
   process.exitCode = ok ? 0 : 1;
 }
 
-module.exports = { codeCopy, freshPath, CASES, goldenTag, ticketText, guardHome, gatesRun, factsB, factsC, precommit, queueDry, report, DRY_MSG, queryInLoop, blockOf, removedLines, nonNicknameLines, specDiff, newTableCols, modelCols, firstCatch, loopEdits, contamination, checksB, checksC, checksCEmpty, B_NAMES, C_NAMES, CE_NAMES, parse,
+module.exports = { harnessConfig, codeCopy, freshPath, CASES, goldenTag, ticketText, guardHome, gatesRun, factsB, factsC, precommit, queueDry, report, DRY_MSG, queryInLoop, blockOf, removedLines, nonNicknameLines, specDiff, newTableCols, modelCols, firstCatch, loopEdits, contamination, checksB, checksC, checksCEmpty, B_NAMES, C_NAMES, CE_NAMES, parse,
   seed, cleanSandbox, live, phasesCopy, packetOf, scoreOf, blindDeny, reviewer, blindMerge };
 
 if (require.main === module) {

@@ -24,7 +24,7 @@ You get the ticket, `## Plan` (summary, acceptance criteria, tasks), `## Diff` (
 Each finding has:
 
 - `id`: `F1`, `F2`, ...; a new finding takes the next number after the highest earlier id.
-- `severity`: `CRIT` (an exploitable hole, data loss or corruption), `HIGH` (a wrong result on a main path, a missing access check, N+1 on a list), `MED` (wrong on an edge path: empty, missing, duplicate or boundary input; a changed behaviour without a test; a rule broken with real effect), `LOW` (minor: no wrong result, e.g. a misleading name).
+- `severity`: `CRIT` (an exploitable hole, e.g. one caller reads or changes another's data by id (IDOR), data loss or corruption), `HIGH` (a wrong result on a main path, N+1 on a list), `MED` (wrong on an edge path: empty, missing, duplicate or boundary input; a changed behaviour without a test; a rule broken with real effect), `LOW` (minor: no wrong result, e.g. a misleading name).
 - `confidence`: `high` only when you traced it in the code and can name the input that fails; else `medium`.
 - `where`: `path:line` or `path:line-line`, repo-relative, at HEAD: the line that does the wrong thing (Read shows line numbers), not the hunk header.
 - `problem`; `failure_scenario`: the concrete input or sequence and what goes wrong; `fix`: what to change.
