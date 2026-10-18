@@ -988,3 +988,118 @@ test('M5.2 E1 live: a result line while claude stays up (a background shell hold
   await w.step(5 * MIN);
   assert.deepEqual([w.killsOf(lb.pid), w.lease(b).exit, w.procs.has(lb.pid)], [[], undefined, true], 'b: still live');
 });
+
+// ---- M7 (m7-build gap 3, QT1; RC1's runner side): quiet episodes, one t:quiet line each, written by runner.closeQuiet ----
+const metricLines = (t, id) => (fs.existsSync(path.join(process.env.TB_HOME, 'metrics.jsonl')) ? fs.readFileSync(path.join(process.env.TB_HOME, 'metrics.jsonl'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : []).filter((m) => m.t === t && m.ticket === id);
+const quietOf = (id) => metricLines('quiet', id).map(({ at, end, quiet_s }) => [at, end, quiet_s]);
+const written = () => new Promise((r) => setTimeout(r, 50)); // the line's append (real fs) lands
+const TOOL_DONE = { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'tu_1', content: 'ok' }] } };
+
+test('M7 QT1 quiet: silent 5 → 7 min then an event → one t:quiet {quiet_s 120, resumed}; a wait with no event keeps the episode open (no line) until its next event', async (t) => {
+  const w = world(t);
+  const [a, b] = [await w.ticket(), await w.ticket()];
+  await w.step();
+  const t0 = w.clock;
+  w.say(a, STATUS);
+  w.say(b, STATUS);
+  await w.step(7 * MIN);
+  w.say(a, STATUS); // a speaks 2 min after its dot turned yellow (5:00)
+  w.waiting.add(`${b}.1`); // b: a heavy-slot wait from 7:00 on, no event
+  await w.step(13 * MIN + 15_000); // 20:15
+  await written();
+  assert.deepEqual(quietOf(a), [[iso(t0 + 5 * MIN), 'resumed', 120]]);
+  assert.deepEqual(quietOf(b), [], 'b: waiting with no event is not resumed: still open');
+  w.waiting.delete(`${b}.1`);
+  w.say(b, STATUS);
+  await w.step(15_000);
+  await written();
+  assert.deepEqual(quietOf(b), [[iso(t0 + 5 * MIN), 'resumed', 915]], '20:15 − 5:00');
+});
+
+test('M7 QT1 quiet: silent to 15 min → end stalled (one line, from the dot); a tool running the whole time → no episode', async (t) => {
+  const w = world(t);
+  const [a, b] = [await w.ticket(), await w.ticket()];
+  await w.step();
+  const t0 = w.clock;
+  w.say(a, STATUS);
+  w.say(b, TOOL);
+  await w.step(15 * MIN);
+  w.say(b, TOOL_DONE); // an event: it would end an open episode as resumed
+  await w.step(15_000);
+  await written();
+  assert.deepEqual(w.lease(a).gen, 2, 'a stalled and was recovered');
+  assert.deepEqual(quietOf(a), [[iso(t0 + 5 * MIN), 'stalled', 600]]);
+  assert.deepEqual(quietOf(b), [], 'b: liveness tool, never quiet');
+});
+
+test('M7 QT1 RC1 quiet: Irfan\'s Restart while quiet → end you (+ his interventions row and t:control); a crash while quiet → died', async (t) => {
+  const w = world(t);
+  const [a, b] = [await w.ticket(), await w.ticket()];
+  await w.step();
+  const t0 = w.clock;
+  w.say(a, STATUS);
+  w.say(b, STATUS);
+  await w.step(6 * MIN);
+  w.exit(w.lease(b).pid, 1); // b crashes at 6:00, no result line
+  await w.step(15_000); // the 6:15 tick sees it end
+  await written();
+  assert.deepEqual(quietOf(b), [[iso(t0 + 5 * MIN), 'died', 75]]);
+  const at = w.clock;
+  assert.equal(await w.runner.restart(a, { actor: 'cli' }), true);
+  await written();
+  assert.deepEqual(quietOf(a), [[iso(t0 + 5 * MIN), 'you', Math.round((at - t0 - 5 * MIN) / 1000)]]);
+  const rows = fs.readFileSync(path.join(store.ticketDir(a), 'interventions.jsonl'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+  assert.deepEqual([rows.map((r) => [r.actor, r.verb]), metricLines('control', a).map((c) => [c.op, c.actor]), w.get(a).interventions], [[['cli', 'restart']], [['restart', 'cli']], 1]);
+});
+
+test('M7 QT1 RC1 quiet: inside a wake grace no episode opens (the event after it ends none); the runner\'s own Cancel (no actor: a lane\'s end) writes no interventions row, no t:control', async (t) => {
+  const w = world(t);
+  const a = await w.ticket();
+  await w.step();
+  w.say(a, STATUS);
+  await w.step(MIN);
+  await w.lid(10 * MIN);
+  await w.sample(); // the OS wake at 11:00: 6 min grace
+  await w.step(2 * MIN); // 13 min silent (quiet by age), in the grace
+  w.say(a, STATUS);
+  await w.step(15_000);
+  await written();
+  assert.deepEqual(quietOf(a), []);
+  assert.equal(await w.runner.cancel(a), true);
+  await written();
+  assert.deepEqual([fs.existsSync(path.join(store.ticketDir(a), 'interventions.jsonl')), metricLines('control', a), w.get(a).interventions ?? 0], [false, [], 0]);
+});
+
+test('M7 QT1 quiet: a run that ends on its own while quiet → resumed with a result line after the dot (quiet_s to that line), died with none (an event alone is no result)', async (t) => {
+  const w = world(t);
+  const [a, b] = [await w.ticket(), await w.ticket()];
+  await w.step();
+  const t0 = w.clock;
+  w.say(a, STATUS);
+  w.say(b, STATUS);
+  await w.step(6 * MIN);
+  w.say(a, OK); // a: its result at 6:00, then it exits
+  w.exit(w.lease(a).pid, 0);
+  w.say(b, STATUS); // b: an event, then a crash, both before the next tick
+  w.exit(w.lease(b).pid, 1);
+  await w.step(15_000);
+  await written();
+  assert.deepEqual([quietOf(a), quietOf(b)], [[[iso(t0 + 5 * MIN), 'resumed', 60]], [[iso(t0 + 5 * MIN), 'died', 75]]]);
+});
+
+test('M7 QT1 quiet: a wall jump with no OS wake yet (held: its sleep_ms not in) → no episode opens while held, so the event after it ends none', async (t) => {
+  const w = world(t);
+  const a = await w.ticket();
+  await w.step();
+  w.say(a, STATUS);
+  await w.step(MIN);
+  w.clock += 10 * MIN; // the wall clock jumps, the OS reports no wake: a hint, held for wake_grace_min (6)
+  await w.step(15_000); // J: the tick that sees the jump
+  await w.step(15_000);
+  w.say(a, STATUS); // speaks at J + 0:15: the wake grace ends, the hold does not
+  await w.step(5 * MIN + 15_000); // J + 5:30: silent 5:15 (quiet by age), still held
+  w.say(a, STATUS);
+  await w.step(15_000);
+  await written();
+  assert.deepEqual(quietOf(a), []);
+});

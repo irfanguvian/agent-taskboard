@@ -10,7 +10,7 @@
 // so a blocking result never starts a fix session nor a pass a QA run) → collect → scripted checks → cleanup (only
 // our worktree).
 // Usage: node scripts/eval-phase.js (--fake | --real) [--cases E1,E2,E3] [--model <m> [--effort <e>]] [--prompt <md>]
-//   [--claude <bin>] [--keep] [--out <md>] [--packet <dir>] [--no-ram-wait]
+//   [--claude <bin>] [--keep] [--out <md>] [--packet <dir>] [--no-ram-wait] [--json <file>]
 //   --cases E4 (review only, D-0110): final_gate E2's IDOR diff; HIGH or CRIT both block, the report shows the label.
 //     Never in the default (E1-E3, as before).
 //   --real: claude_bin = the pinned version; tbd keeps the real HOME (claude's keychain login); TB_HOME is temp. Model =
@@ -20,6 +20,7 @@
 //   --prompt: the review prompt under test (default phases/code/review/prompt.md), copied as code/review/prompt.md.
 //   --packet: the anonymised blind-scoring packet (D-0069): ticket, plan, diffs, the review result + transcript per case
 //     under a neutral label, no expectations, no scripted verdicts, no model name.
+//   --json (M7 tb eval golden): the golden score JSON v1 (scripts/harness.js scoreJson), ids <phase>:<case>, blind null.
 // Leak (D-0059): --real runs tbd from a code copy without test/golden (scripts/golden-working.js codeCopy) and the repo is
 // denyRead (TB_EVAL_DENY_READ); contamination() still flags a tool call naming the goldens or .omc/.
 // --phase qa: the QA evals E1-E3 (M5.2; cases test/golden/m5/qa/E<n>/case.json): the ticket seeded in qa after review,
@@ -46,9 +47,9 @@ const { execFileSync } = require('node:child_process');
 const { startTbd, runTb, REPO, TBD } = require('../test/helpers/tbd');
 const { FAKE, RUN_SPY } = require('../test/helpers/runs');
 const { DEFAULT_PIN, cloneAt, cloneConfig } = require('../lib/util');
-const { SANDBOX, arr, sleep, readJson, write, git, events, runNs, runInfo, metricLines, ticketOf, reapRuns, chk, fence, details, usd, costOf, cell } = require('./eval-planner');
+const { SANDBOX, arr, sleep, readJson, write, git, events, runNs, runInfo, metricLines, ticketOf, reapRuns, chk, fence, details, usd, costOf, cell, microOf, stopOf } = require('./eval-planner');
 const { codeCopy, freshPath, guardHome, contamination } = require('./golden-working');
-const { memLevel, freePort, FAKE_APP, fakeExec, fakeDocs, hold, killIn, cleanup, blindPacket } = require('./harness');
+const { memLevel, freePort, FAKE_APP, fakeExec, fakeDocs, hold, killIn, cleanup, blindPacket, scoreJson } = require('./harness');
 const { configBaseline } = require('../lib/spawn');
 
 const PHASES = ['review', 'qa', 'final_gate'];
@@ -545,10 +546,16 @@ function writePacket(dir, env, results) {
     'Write per folder, beside the score: the findings you agree with, any you think are wrong or missing.'].join('\n') });
 }
 
+// --json (M7): golden score JSON v1 (harness scoreJson), blind null; cost_micro integer micro-USD (eval-planner microOf)
+const scoreOf = (results, meta) => scoreJson(results.map((r) => ({
+  id: `${r.phase}:${r.key}`, run: 1, stop: stopOf(r.ticket), checks: r.checks, contaminated: r.contaminated, fix_rounds: r.ticket?.fixes ?? null,
+  rework: r.ticket?.rework ?? null, cost_micro: arr(r.runs).reduce((s, x) => s + microOf(x), 0), min: r.min, blind: null,
+})), { sources: ['eval-phase'], ...meta });
+
 // ---- main ---------------------------------------------------------------------------------------------------------
-const USAGE = `usage: node scripts/eval-phase.js (--fake | --real) [--phase ${PHASES.join('|')}] [--cases ${CASES.join(',')} (review: ${CASES_OF.review.join(',')})] [--model <m> [--effort <e>]] [--prompt <md>] [--claude <bin>] [--keep] [--out <md>] [--packet <dir>] [--no-ram-wait]`;
+const USAGE = `usage: node scripts/eval-phase.js (--fake | --real) [--phase ${PHASES.join('|')}] [--cases ${CASES.join(',')} (review: ${CASES_OF.review.join(',')})] [--model <m> [--effort <e>]] [--prompt <md>] [--claude <bin>] [--keep] [--out <md>] [--packet <dir>] [--no-ram-wait] [--json <file>]`;
 function parse(argv) {
-  const o = { fake: null, phase: 'review', cases: CASES, noRamWait: false, model: null, effort: null, prompt: null, claude: null, keep: false, out: null, packet: null };
+  const o = { fake: null, phase: 'review', cases: CASES, noRamWait: false, model: null, effort: null, prompt: null, claude: null, keep: false, out: null, packet: null, json: null };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--fake' || a === '--real') {
@@ -556,6 +563,7 @@ function parse(argv) {
       o.fake = a === '--fake';
     } else if (a === '--cases') o.cases = String(argv[++i] ?? '').split(',').filter(Boolean);
     else if (['--phase', '--model', '--effort', '--prompt', '--claude', '--out', '--packet'].includes(a)) o[a.slice(2)] = argv[++i];
+    else if (a === '--json') o.json = argv[++i] ?? '';
     else if (a === '--keep' || a === '--no-ram-wait') o[a === '--keep' ? 'keep' : 'noRamWait'] = true;
     else throw new Error(`unknown argument ${a}\n${USAGE}`);
   }
@@ -565,6 +573,7 @@ function parse(argv) {
   if (!o.cases.length || o.cases.some((k) => !CASES_OF[o.phase].includes(k))) throw new Error(`--cases: pick from ${CASES_OF[o.phase].join(',')}`);
   if (o.effort && !o.model) throw new Error('--effort needs --model');
   if (o.noRamWait && o.fake) throw new Error('--no-ram-wait: --real only (--fake never waits)');
+  if (o.json === '') throw new Error('--json needs a file');
   if (o.model) o.effort ??= 'high';
   return o;
 }
@@ -575,6 +584,7 @@ async function main() {
   o.out = path.resolve(o.out ?? path.join(REPO, 'docs', 'verification', `${date}-m5-${o.phase}-evals${o.fake ? '-fake' : ''}.md`));
   o.prompt = path.resolve(o.prompt ?? path.join(REPO, 'phases', 'code', o.phase, 'prompt.md'));
   if (o.packet) o.packet = path.resolve(o.packet);
+  if (o.json) o.json = path.resolve(o.json);
   const promptText = fs.readFileSync(o.prompt, 'utf8');
   const claude = o.fake ? FAKE : path.resolve(o.claude ?? path.join(os.homedir(), '.local', 'share', 'claude', 'versions', DEFAULT_PIN));
   fs.accessSync(claude, fs.constants.X_OK);
@@ -631,18 +641,27 @@ async function main() {
         write(raw, JSON.stringify(results.map(({ runs, ...r }) => ({ ...r, runs: arr(runs).map((x) => ({ ...x, evs: undefined })) })), null, 2));
         console.log(`eval: report failed (${e.message}): raw results in ${raw}`);
       }
+      if (o.json) {
+        try {
+          write(o.json, scoreOf(results, { commit: git(REPO, 'rev-parse', 'HEAD').trim(), sandbox_base: env.base, mode: o.fake ? 'dry' : 'real' }));
+          console.log(`eval: score JSON ${o.json}`);
+        } catch (e) {
+          env.jsonError = e.message;
+          console.log(`eval: score JSON failed: ${e.message}`);
+        }
+      }
     }
     if (o.keep) console.log(`eval: kept ${root}`);
     else fs.rmSync(root, { recursive: true, force: true });
   }
   const clean = results.filter((r) => !arr(r.contaminated).length);
   const green = clean.filter((r) => r.checks.every((x) => x.ok)).length;
-  const ok = !failed && !env.aborted && green === env.planned;
+  const ok = !failed && !env.aborted && green === env.planned && !env.jsonError;
   console.log(`eval: ${ok ? 'PASS' : 'FAIL'} · ${green}/${env.planned} cases · ${results.length - clean.length} contaminated`);
   process.exitCode = ok ? 0 : 1;
 }
 
-module.exports = { CASES, CASES_OF, loadCase, caseOf, parseWhere, score, scoreQa, scoreFinal, parse, writePacket };
+module.exports = { CASES, CASES_OF, loadCase, caseOf, parseWhere, score, scoreQa, scoreFinal, parse, writePacket, scoreOf };
 
 if (require.main === module) {
   main().catch((e) => {

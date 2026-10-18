@@ -8,6 +8,8 @@ const os = require('node:os');
 const path = require('node:path');
 const E = require('../scripts/eval-phase');
 const H = require('../scripts/harness');
+const P = require('../scripts/eval-planner');
+const golden = require('../lib/evalscore');
 
 const fails = (c, result) => E.score(c, { accepted: true, why: '', result }).filter((x) => !x.ok).map((x) => x.name);
 
@@ -186,4 +188,23 @@ test('writePacket: <root>/tbhome/worktrees/t_1a2b3c → <tmp>/tbhome/worktrees/<
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+// M7 JS1 (tb eval golden): --json turns the fake results into a golden score JSON v1 (r-build.md frozen shape: ids
+// <phase>:<case> / planner:<case>, cost_micro integer micro-USD, blind null) that lib/evalscore.js checkScore accepts; without
+// --json none is asked for; --json with no file is refused.
+test('JS1 --json: eval-phase + eval-planner fake results → score JSON v1 (review:E1, planner:e2, integer cost_micro from cost_delta or rounded dollars) that checkScore accepts; no --json → null; --json without a file → refused', () => {
+  const meta = { commit: 'c'.repeat(40), sandbox_base: 'a'.repeat(40), mode: 'dry', at: '2026-10-18T00:00:00.000Z' };
+  const r = { phase: 'review', key: 'E1', checks: [{ ok: true }, { ok: true }, { ok: false }], contaminated: [], min: 3, ticket: { state: 'working', waiting: { reason: 'manual' }, fixes: 0, rework: 1 },
+    runs: [{ metric: { cost_delta: 410000 } }, { metric: null, result: { cost_usd: 0.1234567 } }] };
+  const s = E.scoreOf([r], meta);
+  assert.deepEqual(s, { v: 1, kind: 'golden-score', ...meta, sources: ['eval-phase'], pass: false,
+    cases: [{ id: 'review:E1', run: 1, stop: 'working:manual', checks: { pass: 2, total: 3 }, contaminated: false, fix_rounds: 0, rework: 1, cost_micro: 533457, min: 3, blind: null }] });
+  assert.equal(golden.checkScore(s), null);
+  const p = P.scoreOf([{ key: 'e2', checks: [{ ok: true }], rounds: [{ secs: 200, ticket: { state: 'plan_approval', waiting: null }, runs: [{ metric: { cost_delta: 900000 } }] }] }], meta);
+  assert.deepEqual(p.cases, [{ id: 'planner:e2', run: 1, stop: 'plan_approval', checks: { pass: 1, total: 1 }, contaminated: false, fix_rounds: null, rework: null, cost_micro: 900000, min: 3, blind: null }]);
+  assert.deepEqual([p.sources, p.pass, golden.checkScore(p)], [['eval-planner'], true, null]);
+  assert.deepEqual([E.parse(['--fake']).json, P.parse(['--fake']).json, E.parse(['--fake', '--json', 'out.json']).json], [null, null, 'out.json']);
+  assert.throws(() => E.parse(['--fake', '--json']), /--json needs a file/);
+  assert.throws(() => P.parse(['--fake', '--json']), /--json needs a file/);
 });

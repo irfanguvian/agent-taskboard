@@ -233,3 +233,9 @@ test('M5.3 L6 util.SHA_RE: a SHA-1 (40 hex) or SHA-256 (64 hex) commit name, not
   assert.match((await ident(tk, 'f'.repeat(64), {})).error ?? 'passed', /git log failed/, 'past the check: git is asked');
   assert.match((await ident(tk, 'f'.repeat(50), {})).error ?? 'passed', /no tested commit/);
 });
+
+// M7 review: a tag name is passed to tb as an argument (copy-command forms, doctor --tag): it never starts with -
+test('M7 NAME_RE: a or a/b of lowercase letters, digits and - (a and a-b/c-1 ok); a name starting with - (-x, --setup) refused', () => {
+  for (const ok of ['a', 'a/b', 'shop', 'self/taskboard', 'a-b/c-1', '9x']) assert.ok(tags.NAME_RE.test(ok), ok);
+  for (const bad of ['-x', '--setup', '-', 'A', 'a b', 'a//b', '/a', 'a/']) assert.equal(tags.NAME_RE.test(bad), false, bad);
+});

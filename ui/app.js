@@ -26,7 +26,8 @@ let wait = 1000; // reconnect backoff, ms (max 30 s)
 const ui = { drag: null, editing: null, tray: null, promote: null, pick: { kind: KINDS[0], tag: '' }, dirty: false, tags: [], tagDefs: {}, tagsLoaded: false, locked: false,
   runs: new Map(), open: null, ticket: null, log: null, act: null, arm: null, // runs: id → `run` event; open: the drawer's flow id + its ticket, log tail, last action, Cancel / Approve armed
   round: null, plan: null, drafts: new Map(), busy: new Map(), err: null, // the open ticket's newest planning round and frozen plan, Clarify / Reject drafts (`${id}:${n}` → draft), planning action in flight (id → role), its refusal
-  csrf: null, ask: null, gates: null, ivs: null, fb: null, pass: null, phase: new Map() }; // P5: synchronizer token, the open working ask, gate / intervention pages + a feedback file (on demand), the pass check, Resume's phase pick (id → phase)
+  csrf: null, ask: null, gates: null, ivs: null, fb: null, pass: null, phase: new Map(), // P5: synchronizer token, the open working ask, gate / intervention pages + a feedback file (on demand), the pass check, Resume's phase pick (id → phase)
+  q: '', hl: null, days: 30, follow: null }; // M7: reminder search (lowercase), the Health view's data + its days, the drawer's log Follow
 
 // ---------- helpers ----------
 const $ = (s, r = document) => r.querySelector(s);
@@ -77,8 +78,8 @@ $('#theme').addEventListener('click', e => {
   safe(() => localStorage.setItem('tb-theme', t));
 });
 
-// ---------- views: one per hash (#today #reminders #flows, #system on phones), so back / forward work ----------
-const VIEWS = { today: 'Today', reminders: 'Reminders', flows: 'Flows', system: 'System' };
+// ---------- views: one per hash (#today #reminders #flows #health, #system on phones), so back / forward work ----------
+const VIEWS = { today: 'Today', reminders: 'Reminders', flows: 'Flows', health: 'Health', system: 'System' };
 const PHONE = matchMedia('(max-width: 734px)');
 const phone = () => PHONE.matches;
 PHONE.addEventListener('change', e => { if (!e.matches && root.dataset.view === 'system') location.replace('#today'); }); // System is a phone view: widening leaves it
@@ -93,6 +94,7 @@ function route() {
   for (const s of document.querySelectorAll('main > .view')) s.hidden = s.dataset.view !== v;
   for (const a of document.querySelectorAll('a[data-view]')) a.setAttribute('aria-current', a.dataset.view === v ? 'page' : 'false');
   root.scrollTop = 0;
+  if (v === 'health') loadHealth(); // loads on open and on Refresh only: no timer
 }
 
 // ---------- api + toasts ----------
@@ -204,6 +206,7 @@ async function reconnect() {
   ui.runs.clear(); // the stream opens with every current run
   await load(); // events may have been missed while down
   if (!ui.locked) connect();
+  if (root.dataset.view === 'health') loadHealth(); // opened by hash before the page was trusted
 }
 
 function connect() {
@@ -321,20 +324,24 @@ function restoreFocus(f) {
   if (f) $(`.strip[data-id="${CSS.escape(f.id)}"] [data-role="${f.role || 'menu'}"]`)?.focus();
 }
 
+// search: case-insensitive substring over title, note, project and id, in every column; a search lifts the Done cap
+const hit = t => !ui.q || [t.title, t.note, t.project, t.id].some(v => v && String(v).toLowerCase().includes(ui.q));
+
 function renderReminders() {
   const f = rememberFocus();
-  $('#board').replaceChildren(...COLS.map(([key, label]) => bay(key, label)));
+  const cols = COLS.filter(([key]) => !ui.q || colOf(key).some(hit));
+  $('#board').replaceChildren(...(cols.length ? cols.map(([key, label]) => bay(key, label)) : [el('p', { class: 'empty', role: 'status' }, 'No matches.')]));
   const ed = $('.strip input.edit');
   if (ed) { ed.focus(); ed.select(); } else restoreFocus(f);
 }
 
 function bay(key, label) {
-  const items = colOf(key);
-  const shown = key === 'done' ? items.slice(0, DONE_SHOWN) : items;
-  const over = key === 'now' && items.length > NOW_LIMIT;
-  const count = key === 'now' ? `${items.length} / ${NOW_LIMIT}` : String(items.length);
+  const all = colOf(key), items = all.filter(hit);
+  const shown = key === 'done' && !ui.q ? items.slice(0, DONE_SHOWN) : items;
+  const over = key === 'now' && !ui.q && all.length > NOW_LIMIT;
+  const count = key === 'now' && !ui.q ? `${all.length} / ${NOW_LIMIT}` : String(items.length); // a search counts matches in every column
   const list = el('ul', { class: 'list', 'aria-labelledby': `bh-${key}` },
-    ...shown.map((t, i) => strip(t, i, items.length, key === 'now' && i === 0)),
+    ...shown.map((t, i) => strip(t, i, items.length, key === 'now' && i === 0 && !ui.q)),
     !shown.length && el('li', { class: 'empty' }, EMPTY[key]),
     items.length > shown.length && el('li', { class: 'empty' }, `${items.length - shown.length} older not shown`));
   const b = el('section', { class: `bay${over ? ' over' : ''}`, 'data-col': key },
@@ -349,7 +356,7 @@ function strip(t, i, total, isTop) {
   const done = t.status === 'done';
   const editing = ui.editing === t.id;
   const open = ui.tray === t.id;
-  const s = el('li', { class: `strip${done ? ' done' : ''}${isTop ? ' top' : ''}`, draggable: !editing, 'data-id': t.id });
+  const s = el('li', { class: `strip${done ? ' done' : ''}${isTop ? ' top' : ''}`, draggable: !editing && !ui.q, 'data-id': t.id }); // a filtered list has no true drop index
   s.addEventListener('dragstart', e => {
     ui.drag = t.id;
     s.classList.add('dragging');
@@ -391,9 +398,10 @@ function tray(t, i, total) {
     } else remove(t.id);
   }, { 'data-role': 'del', class: 'item del' });
   return el('div', { class: 'tray', role: 'group', 'aria-label': `Actions for ${t.title}`, onkeydown: e => { if (e.key === 'Escape') closeTray(); } },
+    detailLine(t),
     btn('Edit', () => startEdit(t.id)),
-    btn('Move up', () => move(t.id, t.status, i - 1), { disabled: i === 0 }),
-    btn('Move down', () => move(t.id, t.status, i + 1), { disabled: i >= total - 1 }),
+    btn('Move up', () => move(t.id, t.status, i - 1), { disabled: i === 0 || !!ui.q }),
+    btn('Move down', () => move(t.id, t.status, i + 1), { disabled: i >= total - 1 || !!ui.q }),
     el('label', null, 'Move to',
       el('select', { name: 'move-to', onchange: ev => move(t.id, ev.target.value, 0) },
         ...COLS.map(([k, l]) => el('option', { value: k, selected: k === t.status }, l)))),
@@ -406,6 +414,10 @@ function tray(t, i, total) {
     del,
     ui.promote === t.id && promoteForm(t));
 }
+
+// D-0156: id, created and (done only) the done date, as plain text
+const detailLine = t => el('p', { class: 'detail', 'data-role': 'detail' },
+  [`Id ${t.id}`, t.created && `Created ${t.created}`, t.status === 'done' && t.done_at && `Done ${t.done_at}`].filter(Boolean).join(' · '));
 
 function promoteForm(t) {
   const pick = (name, opts) => el('label', null, name,
@@ -471,27 +483,60 @@ async function remove(id) {
   catch (e) { toast(e.message, { title: 'Could not delete' }); load(); }
 }
 
-function startEdit(id) { ui.editing = id; ui.tray = null; renderReminders(); }
+function startEdit(id) { ui.editing = id; ui.tray = null; loadTags(); renderReminders(); }
 
+// The edit form: the title input is as it was (Enter saves, Escape cancels, leaving the form saves); project, due, note
+// and tag join it. Only fields that changed go in the PATCH; an emptied one is null (cleared). D-0149.
+const TAG_RE = /^[a-z0-9][a-z0-9-]*(\/[a-z0-9-]+)*$/; // lib/tags.js NAME_RE (the first character is never -: a name must not read as a flag); the server checks it again
 function editInput(t) {
-  const input = el('input', { type: 'text', name: 'edit', class: 'edit', 'data-role': 'edit', 'aria-label': 'Edit title', maxLength: 200, value: t.title });
-  input.value = t.title;
+  const title = el('input', { type: 'text', name: 'edit', class: 'edit', 'data-role': 'edit', 'aria-label': 'Edit title', maxLength: 200, value: t.title });
+  title.value = t.title;
+  const names = [...new Set([...ui.tags, ...Object.keys(ui.tagDefs)])].sort();
+  const field = (label, ctl) => el('label', { class: 'ef' }, el('span', null, label), ctl);
+  const project = el('input', { type: 'text', name: 'project', maxLength: 200, autocomplete: 'off' });
+  const due = el('input', { type: 'date', name: 'due' });
+  const tag = el('input', { type: 'text', name: 'tag', list: 'tag-names', maxLength: 200, autocomplete: 'off', spellcheck: 'false' });
+  const note = el('textarea', { name: 'note', rows: 2, maxLength: 10000 });
+  project.value = t.project ?? ''; due.value = t.due ?? ''; tag.value = t.tag ?? ''; note.value = t.note ?? '';
   let finished = false;
   const finish = save => {
     if (finished) return;
+    const v = title.value.trim(), body = {};
+    if (save) {
+      if (v && v !== t.title) body.title = v;
+      for (const [k, c] of [['project', project], ['due', due], ['tag', tag], ['note', note]]) {
+        const nv = k === 'note' ? c.value : c.value.trim();
+        if (nv !== (t[k] ?? '') && !(k === 'tag' && nv && !TAG_RE.test(nv))) body[k] = nv || null; // a malformed tag is left out
+      }
+    }
     finished = true;
     ui.editing = null;
-    const v = input.value.trim();
-    if (save && v && v !== t.title) { t.title = v; patch(t.id, () => ({ title: v })); }
+    if (Object.keys(body).length) {
+      for (const [k, nv] of Object.entries(body)) { if (nv == null) delete t[k]; else t[k] = nv; }
+      patch(t.id, () => body);
+    }
     render();
   };
-  input.addEventListener('keydown', e => {
-    if (e.key === 'Enter') finish(true);
-    else if (e.key === 'Escape') finish(false);
+  const form = el('form', { class: 'editform', 'aria-label': 'Edit reminder',
+    onsubmit: e => {
+      e.preventDefault();
+      if (!tag.value.trim() || TAG_RE.test(tag.value.trim())) return finish(true);
+      tag.setCustomValidity('Lowercase letters, digits and -; a/b for a child.'); // stay in the form until it is fixed
+      tag.reportValidity();
+    } },
+    title,
+    field('Project', project), field('Due', due), field('Tag', tag), field('Note', note),
+    el('datalist', { id: 'tag-names' }, ...names.map(n => el('option', { value: n }))),
+    el('div', { class: 'ef-acts' },
+      el('button', { type: 'submit', class: 'btn btn-sm', onmousedown: e => e.preventDefault() }, 'Save'),
+      el('button', { type: 'button', class: 'btn btn-sm btn-gray', onmousedown: e => e.preventDefault(), onclick: () => finish(false) }, 'Cancel')));
+  tag.addEventListener('input', () => tag.setCustomValidity(''));
+  form.addEventListener('keydown', e => {
+    if (e.key === 'Escape') finish(false);
     e.stopPropagation();
   });
-  input.addEventListener('blur', () => finish(true));
-  return input;
+  form.addEventListener('focusout', e => { if (!form.contains(e.relatedTarget)) finish(true); }); // leaving the whole form saves, as leaving the title did
+  return form;
 }
 
 // ---------- drag and drop ----------
@@ -530,13 +575,13 @@ function endDrag() {
 // ---------- keyboard: alt+arrows move, e edits, arrows walk the column ----------
 $('#board').addEventListener('keydown', e => {
   const s = e.target.closest('.strip');
-  if (!s || e.target.matches('input[type="text"], select')) return;
+  if (!s || e.target.matches('input:not([type="checkbox"]), textarea, select')) return;
   const t = byId(s.dataset.id);
   if (!t) return;
   const ci = COLS.findIndex(c => c[0] === t.status), i = colOf(t.status).indexOf(t);
   const colMove = d => COLS[ci + d] && move(t.id, COLS[ci + d][0], 0);
   const moves = { ArrowUp: () => move(t.id, t.status, i - 1), ArrowDown: () => move(t.id, t.status, i + 1), ArrowLeft: () => colMove(-1), ArrowRight: () => colMove(1) };
-  if (e.altKey && moves[e.key]) { e.preventDefault(); moves[e.key](); }
+  if (e.altKey && moves[e.key] && !ui.q) { e.preventDefault(); moves[e.key](); }
   else if (!e.altKey && !e.metaKey && !e.ctrlKey && (e.key === 'e' || e.key === 'F2')) { e.preventDefault(); startEdit(t.id); }
   else if (!e.altKey && e.target.dataset.role === 'check' && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
     const checks = [...s.parentNode.querySelectorAll('[data-role="check"]')];
@@ -607,6 +652,7 @@ function onRun(e) {
   if (ui.open === r.id) {
     renderRunBox();
     reloadOpen(); // the run moved: the lease changed too
+    followLog(r.id, r.liveness == null);
   }
 }
 
@@ -695,6 +741,8 @@ function drawerBody(f, ticket, error) {
       dd('Final', isObj(k.final) ? finalText(k.final) : null),
       dd('Branch', k.branch), dd('Base', k.base_sha?.slice(0, 12)), dd('Push', isObj(k.push) ? pushText(k.push, k) : null),
       fact('Ident', identText(td) ?? (td?.push ? noIdent(tg) : null)),
+      fact('Fix of', k.fix_of && el('button', { type: 'button', class: 'tlink', 'data-role': 'fix-of', onclick: () => openTicket(k.fix_of) }, vis(state.flows.find(x => x.id === k.fix_of)?.title || k.fix_of))),
+      fact('Promoted from', k.promoted_from && vis(k.promoted_from)),
       dd('Created', when(k.created_at)), dd('Updated', when(k.updated_at || f.updated_at)), dd('Id', f.id)),
     ticket && [
       notice(f.id, k.waiting),
@@ -756,8 +804,11 @@ function runBox(id, k) {
   if (acts.length) out.push(el('div', { class: 'run-actions' }, ...acts));
   out.push(el('p', { class: 'hint', 'aria-live': 'polite' }, outcome(id, k, running)));
   const shown = ui.log?.id === id;
+  const follow = ui.follow?.id === id && ui.follow.on;
   if (l?.log || shown) out.push(el('div', { class: 'log-head' }, el('h4', null, 'Log tail'),
-    l?.log && el('button', { type: 'button', class: 'tlink', 'data-role': 'log', onclick: () => loadLog(id) }, shown ? 'Refresh' : 'Show last 200 lines')));
+    el('span', { class: 'log-acts' },
+      l?.log && el('button', { type: 'button', class: 'tlink', 'data-role': 'follow', 'aria-pressed': String(follow), onclick: () => toggleFollow(id) }, 'Follow'),
+      l?.log && el('button', { type: 'button', class: 'tlink', 'data-role': 'log', onclick: () => loadLog(id) }, shown ? 'Refresh' : 'Show last 200 lines'))));
   if (shown) out.push(ui.log.error ? el('p', { class: 'hint' }, ui.log.error)
     : el('pre', { class: 'log', 'data-role': 'log-tail', tabindex: '0', 'aria-label': 'Run log, last lines' }, ui.log.lines.join('\n') || 'Empty so far.'));
   return out;
@@ -810,13 +861,50 @@ async function runAction(id, op) {
 
 async function loadLog(id) {
   try {
-    ui.log = { id, lines: (await api('GET', `/api/tickets/${encodeURIComponent(id)}/log?tail=200`)).lines };
+    const r = await api('GET', `/api/tickets/${encodeURIComponent(id)}/log?tail=200`);
+    ui.log = { id, lines: r.lines, run: r.run, offset: r.offset, ended: !!r.ended };
   } catch (e) {
     ui.log = { id, lines: [], error: e.status === 404 ? 'No run log yet.' : e.message };
   }
   renderRunBox();
   const pre = $('#runbox pre.log');
   if (pre) pre.scrollTop = pre.scrollHeight;
+}
+
+// Follow (tb logs -f): on, each `run` event of the open ticket reads the log after the last offset: one request at a time
+// (an event during it asks for one more round), the last 1000 lines kept; the run ending, an error or closing the drawer ends it.
+async function toggleFollow(id) {
+  if (ui.follow?.id === id && ui.follow.on) ui.follow = null;
+  else {
+    ui.follow = { id, on: true };
+    if (ui.log?.id !== id || ui.log.error) await loadLog(id);
+    if (ui.log?.error || ui.log?.ended) ui.follow = null;
+  }
+  renderRunBox();
+}
+async function followLog(id, ending) {
+  const f = ui.follow, lg = ui.log;
+  if (!f?.on || f.id !== id || lg?.id !== id || lg.offset == null) return;
+  if (ending) { f.ending = true; f.last = f.busy ? 'next' : 'this'; } // the run left the view: one more read (after the one in flight), then off
+  if (f.busy) { f.again = true; return; }
+  f.busy = true;
+  try {
+    do {
+      f.again = false;
+      const r = await api('GET', `/api/tickets/${encodeURIComponent(id)}/log?after=${lg.offset}&run=${lg.run}`);
+      if (ui.follow !== f || ui.log !== lg) return;
+      lg.lines = [...lg.lines, ...r.lines].slice(-1000);
+      lg.offset = r.offset ?? lg.offset;
+      if (r.ended || (f.ending && f.last === 'this')) f.on = false; // the last read, ended or not (press Follow again)
+      else if (f.ending) { f.last = 'this'; f.again = true; } // the run ended during this read: one more
+    } while (f.again && f.on);
+  } catch (e) {
+    f.on = false;
+    toast(e.message, { title: 'Follow stopped' });
+  } finally {
+    f.busy = false;
+  }
+  if (ui.follow === f) renderRunBox();
 }
 
 // The open drawer's ticket, read again (state, lease: the run box shows the outcome). Reads can answer out of order:
@@ -844,7 +932,7 @@ const reloadOpen = debounce(readOpen, 200);
 
 async function openTicket(id) {
   const d = $('#drawer');
-  if (ui.open !== id) Object.assign(ui, { log: null, ticket: null, round: null, plan: null, arm: null, err: null, ask: null, gates: null, ivs: null, fb: null, pass: null, qa: null, rec: null, final: null });
+  if (ui.open !== id) Object.assign(ui, { follow: null, log: null, ticket: null, round: null, plan: null, arm: null, err: null, ask: null, gates: null, ivs: null, fb: null, pass: null, qa: null, rec: null, final: null });
   ui.open = id;
   drawerBody(flowOf(id), ui.ticket);
   if (!d.open) d.showModal();
@@ -855,7 +943,7 @@ async function openTicket(id) {
 // A held Enter repeats clicks on the refocused button: the first repeat after 400 ms would confirm Approve or Cancel.
 $('#drawer').addEventListener('keydown', e => { if (e.repeat && e.key === 'Enter' && e.target.closest?.('button')) e.preventDefault(); });
 $('#drawer').addEventListener('click', e => { if (e.target === e.currentTarget) e.currentTarget.close(); });
-$('#drawer').addEventListener('close', () => { if (!$('#drawer').open) ui.open = null; }); // a late close event never ends a newer open
+$('#drawer').addEventListener('close', () => { if (!$('#drawer').open) { ui.open = null; ui.follow = null; } }); // a late close event never ends a newer open
 
 // ---------- planning in the drawer (P4 AC5): Assign, Clarify form, plan + decision sources, Approve / Reject, children ----------
 // POST /api/tickets/:id/{assign,answer,approve,reject}, same guards as tb. Agent text (questions, plan) is shown via vis().
@@ -1228,6 +1316,14 @@ function gateItem(id, x, newest, latestWorking) {
     x.why && el('pre', { class: 'log', tabindex: '0', 'aria-label': `Gate ${x.n}: what it found` }, vis(x.why)));
 }
 
+// Older / Newer between the kept results of a report (tb report --n): n - 1 / n + 1. Older is disabled at 1 or once tbd said
+// 404 for n - 1; Newer past the newest one seen. `go` loads that n.
+const pager = (role, n, r, go) => el('div', { class: 'acts pager' },
+  el('button', { type: 'button', class: BTN2, 'data-role': `${role}-older`, disabled: !(n > 1) || !!r.noOlder, onclick: () => go(n - 1) }, 'Older'),
+  el('button', { type: 'button', class: BTN2, 'data-role': `${role}-newer`, disabled: !(n < (r.latest ?? n)), onclick: () => go(n + 1) }, 'Newer'));
+// the state after asking for report n: the new data (latest = the newest n seen), or on a 404 for an older one the same data with Older off
+const paged = (cur, n, data) => ({ data, latest: n == null || cur?.latest == null ? data.n : cur.latest });
+
 // The review loop (lib/review.js): fix n of FIX_MAX, then the newest review's findings from GET …/report?kind=review. Agent text:
 // el() / textContent only, never markup. Open = blocking (tbd's one rule); a closed id carries how it was fixed.
 function reviewView(id, k) {
@@ -1238,7 +1334,7 @@ function reviewView(id, k) {
       el('button', { type: 'button', class: 'tlink', 'data-role': 'review', onclick: () => loadReview(id) }, r ? 'Refresh' : 'Show review')),
     r?.error && el('p', { class: 'hint' }, r.error),
     r?.data && [el('p', { class: 'hint' }, `Review ${r.data.n}: `, dot(r.data.verdict === 'pass' ? 'ok' : 'bad', vis(r.data.verdict)), r.data.at ? ` · ${when(r.data.at)}` : '', r.data.truncated ? ' · cut to fit' : ''),
-      findingsTable(`Review ${r.data.n}: findings`, rows)]);
+      findingsTable(`Review ${r.data.n}: findings`, rows), pager('review', r.data.n, r, n => loadReview(id, n))]);
 }
 // Review and Final findings, rows [finding, open | need review | closed, scenario or how fixed]. The drawer is 540 px:
 // short fields in one row, the long texts in a full-width row under it.
@@ -1252,8 +1348,11 @@ function findingsTable(caption, rows) {
       el('tr', { class: 'rdetail' }, el('td', { colSpan: 5 }, ...(st === 'closed' ? [['How fixed', why]] : [['Problem', x.problem], ['Scenario', why], ['Fix', x.fix]])
         .map(([h, v]) => el('p', null, el('b', null, `${h}: `), vis(v || DASH)))))]))) : el('p', { class: 'hint' }, 'No findings.');
 }
-async function loadReview(id) {
-  try { ui.review = { id, data: await api('GET', `/api/tickets/${enc(id)}/report?kind=review`) }; } catch (e) { ui.review = { id, error: e.status === 404 ? 'No review kept yet.' : e.message }; }
+async function loadReview(id, n) {
+  const cur = ui.review?.id === id ? ui.review : null;
+  try { ui.review = { ...paged(cur, n, await api('GET', `/api/tickets/${enc(id)}/report?kind=review${n == null ? '' : `&n=${n}`}`)), id }; } catch (e) {
+    ui.review = e.status === 404 && n != null && cur?.data ? { ...cur, noOlder: n < cur.data.n } : { id, error: e.status === 404 ? 'No review kept yet.' : e.message };
+  }
   redraw();
 }
 
@@ -1270,16 +1369,19 @@ function finalView(id, k) {
       el('button', { type: 'button', class: 'tlink', 'data-role': 'final', onclick: () => loadFinal(id) }, v ? 'Refresh' : 'Show final')),
     v && [...(d ? [el('p', { class: 'hint' }, `Final review ${d.n}: `, dot(d.verdict === 'pass' ? 'ok' : 'bad', vis(d.verdict)), d.at ? ` · ${when(d.at)}` : '', d.truncated ? ' · cut to fit' : ''),
       findingsTable(`Final review ${d.n}: findings`, d.findings.map(x => [x, x.blocking ? 'open' : 'need review', x.failure_scenario])),
-      el('p', { class: 'hint' }, 'Verification doc: ', ver ? el('a', { href: ver, target: '_blank', rel: 'noopener' }, vis(d.verification_doc)) : code(String(d.verification_doc ?? DASH)))]
+      el('p', { class: 'hint' }, 'Verification doc: ', ver ? el('a', { href: ver, target: '_blank', rel: 'noopener' }, vis(d.verification_doc)) : code(String(d.verification_doc ?? DASH))),
+      pager('final', d.n, v, n => loadFinal(id, n))]
       : [el('p', { class: 'hint' }, v.final.error)]),
     el('h4', null, 'Summary'), text(v.summary, 'final-summary', 'Summary, as text'),
     el('h4', null, 'Verdict doc'), text(v.verdict, 'final-verdict', 'Verdict doc with the evidence tbd captured, as text')]);
 }
-async function loadFinal(id) {
-  const get = (kind, none) => api('GET', `/api/tickets/${enc(id)}/report?kind=${kind}`).then(data => ({ data, text: data.text }), e => ({ error: e.status === 404 ? none : e.message }));
-  const [final, summary, verdict] = await Promise.all([get('final', 'No final review kept yet.'),
-    get('summary', 'No summary yet: a passing final review writes it.'), get('verdict', 'No verdict doc yet: it comes with a passing final review.')]);
-  ui.final = { id, final, summary, verdict };
+async function loadFinal(id, n) {
+  const cur = ui.final?.id === id ? ui.final : null;
+  const get = (kind, none, at) => api('GET', `/api/tickets/${enc(id)}/report?kind=${kind}${at == null ? '' : `&n=${at}`}`).then(data => ({ data, text: data.text }), e => ({ error: e.status === 404 ? none : e.message, missing: e.status === 404 }));
+  const [final, summary, verdict] = await Promise.all([get('final', 'No final review kept yet.', n),
+    get('summary', 'No summary yet: a passing final review writes it.'), get('verdict', 'No verdict doc yet: it comes with a passing final review.', n)]);
+  if (n != null && final.missing && cur?.final?.data) ui.final = { ...cur, noOlder: n < cur.final.data.n };
+  else ui.final = { id, final, summary, verdict, latest: n == null || cur?.latest == null ? final.data?.n : cur.latest };
   redraw();
 }
 
@@ -1300,7 +1402,7 @@ function qaView(id, k) {
     el('div', { class: 'log-head' }, el('h3', { id: 'qa-h' }, 'QA', el('span', { class: 'count' }, `QA ${k.qa.n ?? DASH}`)),
       el('button', { type: 'button', class: 'tlink', 'data-role': 'qa', onclick: () => loadQa(id) }, q ? 'Refresh' : 'Show QA')),
     q?.error && el('p', { class: 'hint' }, q.error),
-    d && [el('p', { class: 'hint' }, `QA ${d.n}: `, res(d.verdict), d.at ? ` · ${when(d.at)}` : '', d.truncated ? ' · cut to fit' : ''),
+    d && [el('p', { class: 'hint' }, `QA ${d.n}: `, res(d.verdict), d.at ? ` · ${when(d.at)}` : '', d.truncated ? ' · cut to fit' : ''), pager('qa', d.n, q, n => loadQa(id, n)),
       d.need_review.length ? el('div', { class: 'notice' }, el('p', null, el('strong', null, 'Check by hand: '), 'agent-made evidence can be faked.'),
         el('ul', { class: 'plist' }, ...d.need_review.map(x => el('li', null, vis(x))))) : null,
       d.cases.length ? el('table', { class: 'table dtable rtable' }, el('caption', { class: 'sr' }, `QA ${d.n}: cases`),
@@ -1330,8 +1432,11 @@ function qaView(id, k) {
         vis([`HTTP ${x.status}`, ...(Array.isArray(x.headers) ? x.headers : []).map(([h, v]) => `${h}: ${v}`), '', x.body ?? ''].join('\n'))))) : none()),
     rec?.next != null && el('div', { class: 'acts' }, el('button', { type: 'button', class: BTN2, 'data-role': 'recs-more', onclick: () => loadRecs(id, rec.run, rec.next) }, 'Load more')));
 }
-async function loadQa(id) {
-  try { ui.qa = { id, data: await api('GET', `/api/tickets/${enc(id)}/report?kind=qa`) }; } catch (e) { ui.qa = { id, error: e.status === 404 ? 'No QA result kept yet.' : e.message }; }
+async function loadQa(id, n) {
+  const cur = ui.qa?.id === id ? ui.qa : null;
+  try { ui.qa = { ...paged(cur, n, await api('GET', `/api/tickets/${enc(id)}/report?kind=qa${n == null ? '' : `&n=${n}`}`)), id }; } catch (e) {
+    ui.qa = e.status === 404 && n != null && cur?.data ? { ...cur, noOlder: n < cur.data.n } : { id, error: e.status === 404 ? 'No QA result kept yet.' : e.message };
+  }
   redraw();
 }
 async function loadQaDoc(id, url) {
@@ -1562,6 +1667,9 @@ async function loadTags() {
     ui.tags = leafTags((await api('GET', '/api/tags')).tags || {});
     ui.tagsLoaded = true;
     $('#flowTag').replaceChildren(...tagOptions());
+    $('#tag-names')?.replaceChildren(...[...new Set([...ui.tags, ...Object.keys(ui.tagDefs)])].sort().map(n => el('option', { value: n })));
+    const ft = $('#sheet select[name="tag"]');
+    if (ft) ft.replaceChildren(...tagOptions(ft.value));
     if (ui.promote) renderReminders();
   } catch (e) { toast(e.message, { title: 'Could not load tags' }); }
 }
@@ -1583,19 +1691,321 @@ function initComposer() {
     const input = $('#newTitle'), v = input.value.trim(), flow = mode() === 'flow', btn = $('button[type="submit"]', e.target);
     if (!v) return;
     btn.disabled = true;
-    try {
-      if (flow) await api('POST', '/api/flows', { text: v, kind: $('#flowKind').value, tag: $('#flowTag').value || undefined });
-      else await api('POST', '/api/reminders', { title: v, status: 'inbox', pos: 'top' });
-      input.value = '';
-      refresh();
-      if (root.dataset.view !== (flow ? 'flows' : 'reminders')) toast(flow ? 'The flow is in Backlog.' : 'The reminder is in Inbox.', { kind: 'info', title: 'Added' }); // it landed out of sight
-    } catch (err) {
-      toast(err.message, { title: refused(err, `Could not add ${flow ? 'flow' : 'reminder'}`) });
-    }
+    if (await addItem(flow, () => (flow ? api('POST', '/api/flows', { text: v, kind: $('#flowKind').value, tag: $('#flowTag').value || undefined })
+      : api('POST', '/api/reminders', { title: v, status: 'inbox', pos: 'top' })))) input.value = '';
     btn.disabled = false;
     input.focus();
   });
+  $('#more').addEventListener('click', moreSheet);
+  $('#q').addEventListener('input', e => { ui.q = e.target.value.trim().toLowerCase(); renderReminders(); });
 }
+
+// one add (send() posts it), from the composer line or the More… sheet → true when tbd took it
+async function addItem(flow, send) {
+  try {
+    await send();
+    refresh();
+    if (root.dataset.view !== (flow ? 'flows' : 'reminders')) toast(flow ? 'The flow is in Backlog.' : 'The reminder is in Inbox.', { kind: 'info', title: 'Added' }); // it landed out of sight
+    return true;
+  } catch (err) {
+    toast(err.message, { title: refused(err, `Could not add ${flow ? 'flow' : 'reminder'}`) });
+    return false;
+  }
+}
+
+// ---------- sheets (foundation .scrim > .sheet): More… on the composer, the copy-command forms ----------
+let sheetOpener = null;
+function openSheet(title, sub, fields, actions, first) {
+  const form = $('#sheet .sheet');
+  sheetOpener = document.activeElement;
+  form.replaceChildren(el('h2', { class: 'sheet-title', id: 'sheet-title' }, title), sub && el('p', { class: 'sheet-sub' }, sub),
+    el('div', { class: 'sheet-fields' }, ...fields), el('div', { class: 'sheet-actions' }, ...actions));
+  $('#sheet').classList.add('open');
+  $('.app').inert = true;
+  first?.focus();
+  return form;
+}
+function closeSheet() {
+  $('#sheet').classList.remove('open');
+  $('.app').inert = false;
+  sheetOpener?.focus();
+}
+const cancelBtn = () => el('button', { type: 'button', class: BTN2, 'data-role': 'sheet-cancel', onclick: closeSheet }, 'Cancel');
+$('#sheet').addEventListener('click', e => { if (e.target === e.currentTarget) closeSheet(); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && $('#sheet').classList.contains('open')) closeSheet(); });
+
+// Labelled fields of a sheet. spec {k, label, kind: text|area|date|select|check, opts [[value, label]], hint, ph}; init {k: value}.
+// → nodes, vals() (trimmed strings, checkboxes as booleans) and fail(errors) which writes {k: message} under the fields.
+let sfn = 0;
+function sheetFields(specs, init, onChange) {
+  const ctl = {}, errs = {};
+  const nodes = specs.map(sp => {
+    const id = `sf${++sfn}`, v = init[sp.k] ?? '';
+    const c = sp.kind === 'select' ? el('select', { id, name: sp.k, onchange: onChange }, ...sp.opts.map(([val, l]) => el('option', { value: val, selected: val === v }, l)))
+      : sp.kind === 'area' ? el('textarea', { id, name: sp.k, rows: 3, oninput: onChange })
+      : sp.kind === 'check' ? el('input', { id, name: sp.k, type: 'checkbox', checked: !!v, onchange: onChange })
+      : el('input', { id, name: sp.k, type: sp.kind === 'date' ? 'date' : 'text', autocomplete: 'off', spellcheck: 'false', placeholder: sp.ph, oninput: onChange });
+    if (sp.kind !== 'select' && sp.kind !== 'check') c.value = v;
+    ctl[sp.k] = c;
+    errs[sp.k] = el('p', { class: 'err', id: `${id}-err` });
+    c.setAttribute('aria-describedby', `${id}-err${sp.hint ? ` ${id}-hint` : ''}`);
+    return el('div', { class: `sf${sp.kind === 'check' ? ' sf-check' : ''}` }, el('label', { for: id }, sp.label), c, sp.hint && el('p', { class: 'hint', id: `${id}-hint` }, sp.hint), errs[sp.k]);
+  });
+  const vals = () => Object.fromEntries(specs.map(sp => [sp.k, sp.kind === 'check' ? ctl[sp.k].checked : sp.kind === 'select' ? ctl[sp.k].value : ctl[sp.k].value.trim()]));
+  const fail = errors => { for (const sp of specs) errs[sp.k].replaceChildren(...(errors[sp.k] ? [errors[sp.k]] : [])); };
+  return { nodes, vals, fail, ctl };
+}
+
+// D-0149 / D-0156 / D-0166: the composer's More… sheet adds a reminder with column, due and project, or a flow with a short title and a fix-of
+function moreSheet() {
+  const flow = mode() === 'flow', typed = $('#newTitle').value;
+  const specs = flow ? [
+    { k: 'text', label: 'Goal for the agent', kind: 'area' },
+    { k: 'title', label: 'Short title', kind: 'text', hint: 'Optional. The board shows it instead of the goal.' },
+    { k: 'kind', label: 'Kind', kind: 'select', opts: KINDS.map(k => [k, k]) },
+    { k: 'tag', label: 'Tag', kind: 'select', opts: [['', 'No tag'], ...ui.tags.map(n => [n, n])] },
+    { k: 'fix_of', label: 'Fix of', kind: 'select', opts: [['', 'None'], ...(state?.flows ?? []).map(f => [f.id, vis(f.title)])] },
+  ] : [
+    { k: 'title', label: 'Title', kind: 'text' },
+    { k: 'status', label: 'Column', kind: 'select', opts: COLS.slice(0, 4) },
+    { k: 'due', label: 'Due', kind: 'date' },
+    { k: 'project', label: 'Project', kind: 'text' },
+  ];
+  const f = sheetFields(specs, flow ? { text: typed, kind: $('#flowKind').value, tag: $('#flowTag').value } : { title: typed, status: 'inbox' }, () => {});
+  if (flow) loadTags();
+  const add = el('button', { type: 'submit', class: BTN1, 'data-role': 'sheet-add' }, flow ? 'Add flow' : 'Add reminder');
+  const form = openSheet(flow ? 'New flow' : 'New reminder', null, f.nodes, [cancelBtn(), add], f.ctl[flow ? 'text' : 'title']);
+  form.onsubmit = async e => {
+    e.preventDefault();
+    const v = f.vals(), main = flow ? v.text : v.title;
+    if (!main) return f.fail({ [flow ? 'text' : 'title']: flow ? 'Write the goal first.' : 'Type a title first.' });
+    add.disabled = true;
+    // empty optional fields are undefined: JSON leaves them out, so a title-only add posts what the composer posts
+    const sent = await addItem(flow, () => (flow ? api('POST', '/api/flows', { text: v.text, title: v.title || undefined, kind: v.kind, tag: v.tag || undefined, fix_of: v.fix_of || undefined })
+      : api('POST', '/api/reminders', { title: v.title, status: v.status, due: v.due || undefined, project: v.project || undefined })));
+    if (sent) { $('#newTitle').value = ''; closeSheet(); }
+    add.disabled = false;
+  };
+}
+
+// ---------- copy-command forms (D-0172): tag-add, doctor, gc, eval ----------
+// The page never posts to a CLI-only route (agent wall, D39). Each form builds the exact `tb …` line from labelled fields;
+// Copy puts it on the clipboard and Irfan pastes it in Terminal. Every value is quoted by shq() (the only quoting there is);
+// the checks are the ones lib/cli.js and lib/tags.js run, and Copy stays off while one fails.
+const shq = x => `'${String(x).replaceAll("'", "'\\''")}'`; // always wrapped; ' → '\''
+const shpath = x => (x === '~' ? '~' : x.startsWith('~/') ? `~/${shq(x.slice(2))}` : shq(x)); // ~ must stay unquoted for the shell to expand it (tb tag add resolves the path itself)
+const flag = (n, v) => (v ? `--${n} ${shq(v)}` : '');
+const words = (...p) => p.filter(Boolean).join(' ');
+const validName = x => x.length <= 100 && TAG_RE.test(x); // lib/tags.js validName
+const portsOk = x => /^\d{1,5}(,\d{1,5}){0,99}$/.test(x) && x.split(',').every(n => +n >= 1 && +n <= 65535); // cli.js CHECK['qa-ports']
+const remoteOk = x => /^(?!-)[A-Za-z0-9._-]{1,64}$/.test(x); // lib/tags.js push.remote
+const jsonOf = (x, arr) => { try { const j = JSON.parse(x); return arr ? Array.isArray(j) : j !== null && typeof j === 'object' && !Array.isArray(j); } catch { return false; } };
+const DB = [['', 'Leave as it is'], ['local', 'local'], ['none', 'none']];
+const TAG_FLAGS = [ // tag add and doctor --tag share these: merged into the tag
+  { k: 'ident', label: 'Author with my git name and email (--ident)', kind: 'check' },
+  { k: 'push-remote', label: 'Push remote', kind: 'text', ph: 'origin', hint: 'A remote name in the repo (https only).' },
+  { k: 'qa-ports', label: 'QA ports', kind: 'text', ph: '3000,3001', hint: 'Ports QA may call, 1 to 65535.' },
+  { k: 'db', label: 'Local database', kind: 'select', opts: DB },
+];
+function tagFlags(v, bad) {
+  if (v['push-remote'] && !remoteOk(v['push-remote'])) bad('push-remote', 'Use a remote name: letters, digits, . _ - (not starting with -).');
+  if (v['qa-ports'] && !portsOk(v['qa-ports'])) bad('qa-ports', 'Use ports from 1 to 65535, e.g. 3000,3001.');
+  return [v.ident && '--ident', flag('push-remote', v['push-remote']), flag('qa-ports', v['qa-ports']), flag('db', v.db)];
+}
+const ONLY = ['golden', 'planner', 'review', 'qa', 'final_gate'];
+const CMDS = {
+  'tag-add': {
+    title: 'Add a tag', sub: 'Builds a tb tag add command. The flags replace the whole tag, except ident, push remote, QA ports and database alone: those merge into the tag you have.',
+    fields: [
+      { k: 'name', label: 'Name', kind: 'text', ph: 'acme/api', hint: 'Lowercase letters, digits and -. Use a/b for a child.' },
+      { k: 'type', label: 'Type', kind: 'select', opts: [['', 'None (a group)'], ['git', 'git'], ['folder', 'folder']] },
+      { k: 'path', label: 'Path', kind: 'text', ph: '~/code/acme-api', hint: 'With a type.' },
+      { k: 'base', label: 'Base branch', kind: 'text', ph: 'main', hint: 'git needs one.' },
+      { k: 'setup', label: 'Setup command', kind: 'text' },
+      { k: 'output', label: 'Output folder', kind: 'text' },
+      { k: 'env-files', label: 'Env files', kind: 'text', hint: 'A comma list.' },
+      { k: 'context', label: 'Context files', kind: 'text', hint: 'A comma list.' },
+      { k: 'skills', label: 'Skills', kind: 'text', hint: 'A comma list.' },
+      { k: 'checks', label: 'Checks', kind: 'text', ph: '{"lint":"npm run lint"}', hint: 'A JSON object.' },
+      { k: 'heavy', label: 'Heavy commands', kind: 'text', ph: '["npm ci"]', hint: 'A JSON array of command prefixes.' },
+      { k: 'leak-check', label: 'Scan for leaks before a push (--leak-check)', kind: 'check' },
+      ...TAG_FLAGS],
+    build(v, bad) {
+      if (!v.name) bad('name', 'A name is needed.');
+      else if (!validName(v.name)) bad('name', 'Use lowercase letters, digits and -; a/b for a child.');
+      if (v.type && !v.path) bad('path', 'A type needs a path.');
+      if (v.path && !v.type) bad('type', 'A path needs a type.');
+      if (v.type === 'git' && !v.base) bad('base', 'A git tag needs a base branch.');
+      if (v.checks && !jsonOf(v.checks, false)) bad('checks', 'Use a JSON object, e.g. {"lint":"npm run lint"}.');
+      if (v.heavy && !jsonOf(v.heavy, true)) bad('heavy', 'Use a JSON array of command prefixes.');
+      return words('tb tag add', shq(v.name), flag('type', v.type), v.path && `--path ${shpath(v.path)}`, flag('base', v.base), flag('setup', v.setup), flag('output', v.output),
+        flag('env-files', v['env-files']), flag('context', v.context), flag('skills', v.skills), flag('checks', v.checks), flag('heavy', v.heavy), v['leak-check'] && '--leak-check', ...tagFlags(v, bad));
+    },
+  },
+  doctor: {
+    title: 'Check setup', sub: 'Builds a tb doctor command. With a tag it also checks that tag\'s repo and check commands, which can take minutes.',
+    fields: [{ k: 'tag', label: 'Tag', kind: 'text', ph: 'acme/api', hint: 'Leave empty to check Claude, billing and node only.' }, ...TAG_FLAGS],
+    build(v, bad) {
+      if (v.tag && !validName(v.tag)) bad('tag', 'Use lowercase letters, digits and -; a/b for a child.');
+      if (!v.tag) for (const k of ['ident', 'push-remote', 'qa-ports', 'db']) if (v[k]) bad(k, 'This needs a tag.');
+      return words('tb doctor', flag('tag', v.tag), ...tagFlags(v, bad));
+    },
+  },
+  gc: {
+    title: 'Clean up', sub: 'Builds a tb gc command. List first, then delete only the ids you read in the list.',
+    fields: [
+      { k: 'mode', label: 'What to do', kind: 'select', opts: [['list', 'List what can go'], ['delete', 'Delete these ids']] },
+      { k: 'limit', label: 'List size', kind: 'text', ph: '20', hint: 'Used when listing.' },
+      { k: 'ids', label: 'Ids to delete', kind: 'area', hint: 'One per line, from the list: worktree/t_…, log/…, cache/…, refs/…, branch/….' }],
+    build(v, bad) {
+      if (v.mode !== 'delete') {
+        if (v.limit && !/^[1-9]\d*$/.test(v.limit)) bad('limit', 'Use a number from 1.');
+        return words('tb gc', flag('limit', v.limit));
+      }
+      const ids = v.ids.split(/\s+/).filter(Boolean);
+      if (!ids.length) bad('ids', 'Give one or more ids from the list.');
+      else if (ids.some(i => !/^(worktree|log|cache|refs|branch)\/\S+$/.test(i))) bad('ids', 'An id looks like worktree/t_…, log/…, cache/…, refs/… or branch/….');
+      return words('tb gc --delete', ...ids.map(shq));
+    },
+  },
+  eval: {
+    title: 'Run evals', sub: 'Builds a tb eval command. A real golden run uses your Claude subscription and costs real money. The command prints the estimate and stops; add --yes yourself to run it.',
+    fields: [
+      { k: 'mode', label: 'What to run', kind: 'select', opts: [['dry', 'Golden tickets, dry run'], ['real', 'Golden tickets, real run'], ['record', 'Record a score file'], ['fake', 'Fake-claude test suite']] },
+      { k: 'only', label: 'Only these sources', kind: 'text', ph: 'golden,planner', hint: `Real run. A comma list of ${ONLY.join(', ')}. Empty runs all.` },
+      { k: 'file', label: 'Score file', kind: 'text', ph: '~/.taskboard/evals/score.json', hint: 'Record.' }],
+    build(v, bad) {
+      if (v.mode === 'fake') return 'tb eval fake';
+      if (v.mode === 'record') {
+        if (!v.file) bad('file', 'A score file is needed.');
+        return words('tb eval golden', v.file ? `--record ${shpath(v.file)}` : '--record');
+      }
+      if (v.mode === 'dry') return 'tb eval golden --dry';
+      if (v.only && !v.only.split(',').every(x => ONLY.includes(x))) bad('only', `Use a comma list of ${ONLY.join(', ')}.`);
+      return words('tb eval golden --real', flag('only', v.only)); // no --yes: the CLI prints the cost and refuses until it is added
+    },
+  },
+};
+// → {cmd, errors: {field: message}}; cmd is built even when a field fails, so the preview shows the quoted literal
+function buildCmd(id, v) {
+  const errors = {};
+  const cmd = CMDS[id].build(v, (k, msg) => { errors[k] ??= msg; });
+  return { cmd, errors };
+}
+
+async function copyCmd(pre, cmd) {
+  try {
+    await navigator.clipboard.writeText(cmd);
+    toast('Paste it in Terminal.', { kind: 'info', title: 'Copied' });
+  } catch { // no clipboard (or refused): select the preview so Cmd+C works
+    const r = document.createRange();
+    r.selectNodeContents(pre);
+    getSelection().removeAllRanges();
+    getSelection().addRange(r);
+    toast('The command is selected. Press Cmd+C.', { kind: 'warn', title: 'Copy by hand' });
+  }
+}
+
+function cmdSheet(id, preset = {}) {
+  const c = CMDS[id], pre = el('pre', { class: 'cmd', tabindex: '0', 'data-role': 'cmd', 'aria-label': 'Command, as text' });
+  const copy = el('button', { type: 'submit', class: BTN1, 'data-role': 'copy' }, 'Copy command');
+  const f = sheetFields(c.fields, preset, () => update());
+  function update() {
+    const { cmd, errors } = buildCmd(id, f.vals());
+    pre.replaceChildren(cmd);
+    f.fail(errors);
+    copy.disabled = Object.keys(errors).length > 0;
+    return cmd;
+  }
+  const cmd = update();
+  const form = openSheet(c.title, c.sub, [...f.nodes, el('p', { class: 'sf-label', id: 'cmd-l' }, 'Command'), pre], [cancelBtn(), copy], f.ctl[c.fields[0].k]);
+  form.onsubmit = e => {
+    e.preventDefault();
+    if (!copy.disabled) copyCmd(pre, update());
+  };
+  return { form, pre, copy, cmd };
+}
+
+// ---------- Health (M7): the §12 targets, doctor, the drill log, the tag list ----------
+// GET /api/health?days= (targets as sent: one rule, no client math but the count), GET /api/drills (paged by `before`), GET /api/tags.
+// Loads when the view opens and on Refresh; nothing polls. Doctor detail, drill notes and tag paths are text only.
+const pct = (x, y) => (y ? `${Math.round((x / y) * 1000) / 10}%` : DASH);
+const WORDS = { true: ['ok', 'PASS'], false: ['bad', 'FAIL'] };
+const verdict = ok => WORDS[ok] || ['', 'n/a'];
+const OPS_TEXT = { '>=': '≥', '<=': '≤' };
+function targetRow(t) {
+  const [tone, word] = verdict(t.ok);
+  const ratio = t.op === '>=' || t.op === '<=';
+  const now = [`${t.x} / ${t.y}${t.unit ? ` ${t.unit}` : ''}`, !t.unit && t.y > 0 && pct(t.x, t.y), t.pending > 0 && `${t.pending} pending`, t.no_data > 0 && `${t.no_data} no data`].filter(Boolean).join(' · ');
+  const goal = ratio ? `${OPS_TEXT[t.op]} ${t.unit ? `${t.y} ${t.unit}` : `${Math.round(t.threshold * 1000) / 10}%`}` : t.op;
+  const notes = [t.key === 'golden' && t.base_at && `Compared with the run of ${when(t.base_at)}.`, t.note].filter(Boolean);
+  return el('tr', { 'data-key': t.key },
+    el('td', { class: 'hl-label' }, vis(t.label), ...notes.map(n => el('span', { class: 'hint' }, vis(n)))),
+    el('td', { class: 'hl-result' }, dot(tone, word)),
+    el('td', { class: 'num hl-now' }, now),
+    el('td', { class: 'hl-goal' }, goal));
+}
+const hlTable = (caption, heads, rows, cls = '') => el('table', { class: `table htable ${cls}`.trim() }, el('caption', { class: 'sr' }, caption),
+  el('thead', null, el('tr', null, ...heads.map(h => el('th', { scope: 'col' }, h)))), el('tbody', null, ...rows));
+
+function healthView(hl) {
+  const h = hl.health, d = h?.doctor, dr = hl.drills, tags = hl.tags;
+  const scored = (h?.targets || []).filter(t => t.op !== 'watch'), met = scored.filter(t => t.ok === true).length; // n/a counts as not met, as tb health
+  const section = (id, title, ...kids) => el('section', { class: 'hl-sec', 'aria-labelledby': id }, el('div', { class: 'hl-head' }, el('h3', { id }, title), ...kids.slice(0, 1)), ...kids.slice(1));
+  const cmdBtn = (label, id, preset) => el('button', { type: 'button', class: BTN2, 'data-role': `cmd-${id}`, onclick: () => cmdSheet(id, preset) }, label);
+  return el('div', { class: 'hl' },
+    el('div', { class: 'hl-top' },
+      el('div', null,
+        el('p', { class: 'hl-lab' }, `Targets met, last ${h?.window_days ?? hl.days} days`),
+        h ? el('p', { class: 't-headline hl-num' }, `${met} of ${scored.length}`, el('span', { class: 'hl-unit' }, ' targets met')) : el('p', { class: 'hint' }, hl.loading ? 'Loading' : DASH),
+        h && el('p', { class: 'hint' }, `${h.targets.length - scored.length} watched, no target.${h.cut ? ' The metrics log was read in part: its newest 8 MB.' : ''}`)),
+      el('div', { class: 'hl-ctl' },
+        el('label', { class: 'hl-days' }, el('span', null, 'Days'),
+          el('select', { name: 'days', 'data-role': 'hl-days', onchange: e => { ui.days = Number(e.target.value); loadHealth(); } },
+            ...[7, 30, 90].map(n => el('option', { value: String(n), selected: n === (hl.days ?? 30) }, String(n))))),
+        el('button', { type: 'button', class: BTN2, 'data-role': 'hl-refresh', onclick: loadHealth }, 'Refresh'))),
+    hl.herr && el('p', { class: 'err', role: 'alert' }, hl.herr),
+    h && section('hl-t', 'Targets', null, hlTable('Targets: result, now, goal', ['Target', 'Result', 'Now', 'Goal'], h.targets.map(targetRow), 'hl-targets')),
+    section('hl-d', 'Doctor', cmdBtn('Check setup', 'doctor'),
+      !h ? null : !d ? el('p', { class: 'hint' }, 'No doctor run kept yet. Check setup builds the command.')
+        : el('p', { class: 'hint' }, dot(d.ok ? 'ok' : 'bad', d.ok ? 'PASS' : 'FAIL'), ` · ${when(d.at) ?? DASH} · ${(d.checks || []).filter(x => !x.ok).length} of ${(d.checks || []).length} checks failed`),
+      d && (d.checks || []).some(x => !x.ok) && hlTable('Failed doctor checks', ['Check', 'Detail', 'Fix'],
+        d.checks.filter(x => !x.ok).map(x => el('tr', null, el('td', null, vis(x.name)), el('td', { class: 'hl-wrap' }, vis(x.detail ?? DASH)), el('td', { class: 'hl-wrap' }, x.fix ? code(x.fix) : DASH))))),
+    section('hl-r', 'Drills', null,
+      hl.derr ? el('p', { class: 'err' }, hl.derr) : dr?.items.length ? hlTable('Drill log, newest first', ['At', 'Drill', 'Result', 'Note'],
+        dr.items.map(x => el('tr', null, el('td', null, when(x.at) ?? DASH), el('td', null, vis(x.name)), el('td', null, dot(verdict(x.ok)[0], verdict(x.ok)[1])), el('td', { class: 'hl-wrap' }, vis(x.note ?? ''))))) : el('p', { class: 'hint' }, dr ? 'No drills recorded yet.' : DASH),
+      dr && el('div', { class: 'acts' }, el('button', { type: 'button', class: BTN2, 'data-role': 'drills-older', disabled: dr.next == null, onclick: () => loadDrills(dr.next) }, 'Older'))),
+    section('hl-g', 'Tags', cmdBtn('Add tag', 'tag-add'),
+      hl.terr ? el('p', { class: 'err' }, hl.terr) : tags && Object.keys(tags).length ? hlTable('Tags', ['Name', 'Type', 'Path', ''],
+        Object.entries(tags).map(([name, def]) => el('tr', null, el('td', null, vis(name)), el('td', null, vis(def?.type ?? DASH)), el('td', { class: 'hl-wrap' }, vis(def?.path ?? DASH)),
+          el('td', { class: 'hl-edit' }, el('button', { type: 'button', class: 'tlink', 'data-role': `tag-edit-${name}`, 'aria-label': `Edit tag ${vis(name)}`, onclick: () => cmdSheet('doctor', { tag: name }) }, 'Edit'))))) : el('p', { class: 'hint' }, tags ? 'No tags yet.' : DASH)),
+    section('hl-m', 'Maintenance', null, el('p', { class: 'hint' }, 'These run in Terminal, not here. Each button builds the command and copies it.'),
+      el('div', { class: 'acts' }, cmdBtn('Clean up', 'gc'), cmdBtn('Run evals', 'eval'))));
+}
+
+let hlSeq = 0;
+function renderHealth() { $('#health').replaceChildren(healthView(ui.hl || { days: ui.days, loading: true })); }
+async function loadHealth() {
+  if (!trusted || ui.locked) return;
+  const mine = ++hlSeq, days = ui.days;
+  ui.hl = { ...ui.hl, days, loading: true };
+  renderHealth();
+  const tp = api('GET', '/api/tags');
+  const [h] = await Promise.allSettled([api('GET', `/api/health?days=${days}`)]);
+  const [d] = await Promise.allSettled([api('GET', '/api/drills?limit=20')]); // after health: one compute at a time
+  const [t] = await Promise.allSettled([tp]);
+  if (mine !== hlSeq) return;
+  ui.hl = { days, health: h.value, herr: h.reason?.message, drills: d.value && { items: d.value.items || [], next: d.value.next ?? null }, derr: d.reason?.message, tags: t.value && (t.value.tags || {}), terr: t.reason?.message };
+  renderHealth();
+}
+async function loadDrills(before) {
+  try {
+    const r = await api('GET', `/api/drills?limit=20&before=${enc(before)}`);
+    ui.hl = { ...ui.hl, drills: { items: [...ui.hl.drills.items, ...r.items], next: r.next ?? null } };
+  } catch (e) { ui.hl = { ...ui.hl, derr: e.message }; }
+  renderHealth();
+}
+
 
 // ---------- boot ----------
 function render() {

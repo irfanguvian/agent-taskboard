@@ -401,9 +401,14 @@ test('item 8 E2E (U8 U9 J3 J12 AC3 AC4 AC8): assign → questions → tb answer 
   await until(() => ticketLines(tbd).some((m) => m.ticket === id), 10_000, 't:ticket');
   const m = ticketLines(tbd).filter((x) => x.ticket === id);
   assert.equal(m.length, 1);
-  assert.deepEqual({ ...m[0], phase_minutes: Object.keys(m[0].phase_minutes).sort() }, {
+  // M7 contract change (m7-build.md Need Review): cancel is an intervention now (2 → 3); t:ticket gains at, created_at,
+  // approved_at (ISO) and hands_on = cli/ui rows after approve except close/push = the cancel (1)
+  const { at, created_at, approved_at, ...line } = m[0];
+  for (const v of [at, created_at, approved_at]) assert.match(v, /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/);
+  assert.ok(created_at <= approved_at && approved_at <= at, 'created ≤ approved ≤ the line');
+  assert.deepEqual({ ...line, phase_minutes: Object.keys(m[0].phase_minutes).sort() }, {
     t: 'ticket', ticket: id, kind: 'code', tag: 'acme/api', outcome: 'cancelled', rounds: 4, decisions: { you: 3, ticket: 0, adr: 0, planner: 1 },
-    rework: 0, interventions: 2, phase_minutes: ['planning', 'working'], pr_edited: null, fix_of: null,
+    rework: 0, interventions: 3, hands_on: 1, phase_minutes: ['planning', 'working'], pr_edited: null, fix_of: null,
   });
   assert.ok(Object.values(m[0].phase_minutes).every(Number.isInteger));
 });

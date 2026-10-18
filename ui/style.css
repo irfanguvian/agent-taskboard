@@ -210,6 +210,70 @@ main:focus { outline: none; }
 .promote { display: flex; flex-wrap: wrap; gap: 4px 8px; margin: 6px -6px 0; padding: 8px 6px 4px; border-top: 1px solid var(--separator-soft); }
 .promote .btn:first-of-type { margin-left: 10px; }
 
+/* ---------- M7: reminder search, edit form, id line ---------- */
+.search { position: relative; display: flex; align-items: center; }
+.search .icon { position: absolute; left: 10px; width: 14px; height: 14px; color: var(--text-2); pointer-events: none; }
+.search input {
+  width: 200px; height: 32px; padding: 0 12px 0 32px; border: 0; border-radius: var(--radius-pill);
+  background: var(--fill); color: var(--text); font-size: 14px; outline: none; transition: box-shadow var(--dur-fast) linear;
+}
+.search input::placeholder { color: var(--text-2); opacity: 1; }
+.search input:focus-visible { box-shadow: 0 0 0 4px var(--focus); }
+:root:not([data-view="reminders"]) .search, :root[data-view="health"] .composer { display: none; }
+
+.editform { display: grid; gap: 8px; }
+.editform .ef { display: grid; gap: 2px; color: var(--text-2); font-size: 12px; line-height: 1.33337; letter-spacing: -0.01em; }
+.editform .ef input, .editform .ef textarea {
+  width: 100%; min-height: 28px; padding: 4px 8px; border: 1px solid var(--separator); border-radius: var(--radius-sm);
+  background: var(--bg); color: var(--text); font: inherit; font-size: 14px; letter-spacing: -0.016em; outline: none;
+}
+.editform .ef textarea { resize: vertical; }
+.editform .ef :is(input, textarea):focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--focus); }
+.ef-acts { display: flex; gap: 8px; }
+.tray .detail { padding: 6px 10px 8px; color: var(--text-2); font-size: 12px; line-height: 1.33337; letter-spacing: -0.01em; overflow-wrap: anywhere; }
+
+/* ---------- M7: sheets (More…, copy-command forms) ---------- */
+.sheet-fields { display: grid; gap: 14px; }
+.sf { display: grid; gap: 4px; }
+.sf label, .sf-label { color: var(--text-2); font-size: 12px; line-height: 1.33337; letter-spacing: -0.01em; }
+.sf :is(input[type="text"], input[type="date"], select, textarea) {
+  width: 100%; min-height: 36px; padding: 7px 12px; border: 1px solid var(--separator); border-radius: var(--radius-sm);
+  background: var(--bg); color: var(--text); font: inherit; font-size: 14px; outline: none;
+  transition: border-color var(--dur-fast) linear, box-shadow var(--dur-fast) linear;
+}
+.sf textarea { resize: vertical; }
+.sf :is(input, select, textarea):focus { border-color: var(--accent); box-shadow: 0 0 0 4px var(--focus); }
+.sf-check { grid-template-columns: auto 1fr; align-items: center; column-gap: 10px; }
+.sf-check input { order: -1; width: 18px; height: 18px; margin: 0; }
+.sf-check :is(.hint, .err) { grid-column: 1 / -1; }
+.sf .hint, .sf .err { font-size: 12px; }
+.cmd {
+  margin: 0; padding: 12px; border-radius: var(--radius-sm); background: var(--fill); color: var(--text);
+  font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: 0; white-space: pre-wrap; overflow-wrap: anywhere; user-select: all;
+}
+.sheet-actions .btn:disabled { opacity: 0.32; cursor: default; }
+
+/* ---------- M7: Health view ---------- */
+.hl { display: grid; gap: 40px; max-width: 980px; }
+.hl-top { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 16px 24px; }
+.hl-lab { color: var(--text-2); font-size: 12px; line-height: 1.33337; letter-spacing: -0.01em; }
+.hl-num { margin: 0; }
+.hl-unit { font-size: 17px; line-height: 1.47059; font-weight: 400; letter-spacing: -0.022em; color: var(--text-2); }
+.hl-ctl { display: flex; align-items: center; gap: 12px; }
+.hl-days { display: inline-flex; align-items: center; gap: 8px; color: var(--text-2); }
+.hl-days select, .hl-days span + select {
+  height: 28px; padding: 0 8px; border: 0; border-radius: var(--radius-sm); background-color: var(--fill); color: var(--text); font-size: 14px; cursor: pointer;
+}
+.hl-sec { display: grid; gap: 12px; }
+.hl-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 16px; }
+.hl-head h3 { font-size: 17px; line-height: 1.29412; letter-spacing: -0.022em; }
+.hl .table { table-layout: auto; }
+.hl .table td { height: auto; padding-top: 12px; padding-bottom: 12px; vertical-align: top; }
+.hl-label .hint { display: block; margin-top: 2px; font-size: 12px; }
+.hl-wrap { overflow-wrap: anywhere; }
+.hl-edit { text-align: right; white-space: nowrap; }
+.hl .status { white-space: nowrap; }
+
 /* ---------- empty state: title, one line ---------- */
 .empty-state { display: grid; gap: 4px; padding: 24px 0 48px; }
 .empty-state .empty-title { font-size: 17px; font-weight: 600; letter-spacing: -0.022em; }
@@ -271,7 +335,6 @@ main:focus { outline: none; }
   :root:has(#live[data-live="off"]) .sys-link::after {
     content: ""; position: absolute; top: 6px; right: 6px; width: 7px; height: 7px; border-radius: 50%; background: var(--red);
   }
-  .composer { order: 2; }
   .composer .seg { flex: 1 0 100%; display: flex; }
   .composer .seg button { flex: 1; }
   .view > h2.sr + .hint { display: none; }
@@ -279,6 +342,16 @@ main:focus { outline: none; }
   main { padding: 16px 16px calc(50px + 40px + env(safe-area-inset-bottom)); }
   .today { padding-top: 8px; gap: 48px; }
   .bays { grid-template-columns: minmax(0, 1fr); gap: 32px; }
+  .search { order: 2; flex: 1 0 100%; }
+  .search input { width: 100%; }
+  .composer { order: 3; }
+  /* Health: two-line rows, not columns: the label and its word, then the numbers */
+  .hl-targets thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  .hl-targets tr { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 12px; padding: 10px 0; border-bottom: 1px solid var(--separator-soft); }
+  .hl-targets td { height: auto; padding: 0; border: 0; }
+  .hl-targets .hl-now, .hl-targets .hl-goal { grid-row: 2; color: var(--text-2); font-size: 12px; text-align: left; }
+  .hl-targets .hl-goal { text-align: right; }
+  .hl-targets .hl-result { grid-column: 2; grid-row: 1; }
   .grip { display: none; }
   .menu { opacity: 1; }
   .toasts { left: 16px; right: 16px; bottom: calc(50px + 16px + env(safe-area-inset-bottom)); width: auto; }

@@ -4,12 +4,13 @@
 // against a REAL dev tbd in a throwaway TB_HOME: seed, assign, wait, collect, deterministic checks, evidence report
 // (plan P4 AC1 AC9; contract J10 J11 J15-J18 U5 U8). One run at a time (RAM).
 // Usage: node scripts/eval-planner.js [--cases e1,e2,e3,golden-a] [--claude <bin>] [--prompt <md>] [--fake [--fake-bad]]
-//   [--keep] [--out <md>]
+//   [--keep] [--out <md>] [--json <file>]
 //   real (default): claude_bin = the pinned version (~/.local/share/claude/versions/<DEFAULT_PIN>), planning on fable
 //     high (J10). tbd keeps the real HOME (claude's keychain login: spawn passes tbd's HOME on); TB_HOME is temp.
 //   --fake: test/fake-claude.js with canned results (dry run, zero usage), temp HOME, the run-spy preload (passes the
 //     scenario env, kills only its own runs, no launchctl or caffeinate). --fake-bad: E2's canned plan breaks 2 checks.
 //   --prompt: the prompt under test (default .omc/drafts/planner-prompt.md, else phases/code/planning/prompt.md).
+//   --json (M7 tb eval golden): the golden score JSON v1 (scripts/harness.js scoreJson), ids planner:<case>, blind null.
 // Setup: $TMPDIR/tbe-*/ (realpath: sandbox rules see /private/var; short: tbd.sock < 104 bytes) holds tbhome (config,
 // tags, tickets), phases (a copy of the repo's phases/ + the prompt as code/planning/prompt.md: TB_PHASES_DIR) and, fake,
 // home + scn. Tickets are seeded as ticket.json in backlog before tbd starts (`tb new -f code` is refused while
@@ -30,6 +31,7 @@ const { FAKE, RUN_SPY } = require('../test/helpers/runs');
 const { dirtyPaths } = require('../lib/spawn');
 const { DEFAULT_PIN, GIT_SAFE, GIT_ENV, minimalEnv } = require('../lib/util');
 const { PLAN: PLAN_KEYS, SOURCE_RE, scriptsOf } = require('../lib/plan-rules');
+const { scoreJson } = require('./harness');
 
 const SANDBOX = path.join(os.homedir(), 'Documents', 'tb-sandbox');
 const GOLDEN = path.join(REPO, 'test', 'golden', 'sandbox-traps.md');
@@ -387,6 +389,15 @@ const usd = (x) => (typeof x === 'number' ? `$${x.toFixed(2)}` : '?');
 const costOf = (x) => (Number.isInteger(x.metric?.cost_delta) ? x.metric.cost_delta / 1e6 : x.result?.cost_usd ?? 0);
 const cell = (s) => String(s).replace(/\|/g, '\\|').replace(/\n/g, ' ');
 
+// --json (M7): golden score JSON v1 (harness scoreJson), blind null. cost_micro: integer micro-USD (t:run cost_delta, else
+// the result's dollars rounded). No contamination scan here: false. Shared with scripts/eval-phase.js.
+const microOf = (x) => (Number.isInteger(x.metric?.cost_delta) ? x.metric.cost_delta : Math.round((x.result?.cost_usd ?? 0) * 1e6));
+const stopOf = (t) => (!t?.state ? null : t.waiting?.reason ? `${t.state}:${t.waiting.reason}` : t.state);
+const scoreOf = (results, meta) => scoreJson(results.map((c) => ({
+  id: `planner:${c.key}`, run: 1, stop: stopOf(c.rounds.at(-1)?.ticket), checks: c.checks, contaminated: false, fix_rounds: null, rework: null,
+  cost_micro: c.rounds.flatMap((r) => r.runs).reduce((s, x) => s + microOf(x), 0), min: Math.round(c.rounds.reduce((s, r) => s + r.secs, 0) / 60), blind: null,
+})), { sources: ['eval-planner'], ...meta });
+
 function roundMd(label, r) {
   const t = r.ticket;
   const lines = [`### ${label}`, '',
@@ -454,20 +465,22 @@ function report(o, env, results) {
 
 // ---- main ----------------------------------------------------------------------------------------------------------
 function parse(argv) {
-  const o = { cases: Object.keys(CASES), claude: null, prompt: null, fake: false, bad: false, keep: false, out: null };
+  const o = { cases: Object.keys(CASES), claude: null, prompt: null, fake: false, bad: false, keep: false, out: null, json: null };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--cases') o.cases = String(argv[++i] ?? '').split(',').filter(Boolean);
     else if (a === '--claude') o.claude = argv[++i];
     else if (a === '--prompt') o.prompt = argv[++i];
     else if (a === '--out') o.out = argv[++i];
+    else if (a === '--json') o.json = argv[++i] ?? '';
     else if (a === '--fake') o.fake = true;
     else if (a === '--fake-bad') o.fake = o.bad = true;
     else if (a === '--keep') o.keep = true;
-    else throw new Error(`unknown argument ${a}\nusage: node scripts/eval-planner.js [--cases ${Object.keys(CASES).join(',')}] [--claude <bin>] [--prompt <md>] [--fake [--fake-bad]] [--keep] [--out <md>]`);
+    else throw new Error(`unknown argument ${a}\nusage: node scripts/eval-planner.js [--cases ${Object.keys(CASES).join(',')}] [--claude <bin>] [--prompt <md>] [--fake [--fake-bad]] [--keep] [--out <md>] [--json <file>]`);
   }
   const unknown = o.cases.filter((c) => !Object.hasOwn(CASES, c));
   if (!o.cases.length || unknown.length) throw new Error(`--cases: pick from ${Object.keys(CASES).join(',')}`);
+  if (o.json === '') throw new Error('--json needs a file');
   return o;
 }
 
@@ -475,12 +488,13 @@ async function main() {
   const o = parse(process.argv.slice(2));
   const date = new Date().toLocaleDateString('en-CA');
   o.out = path.resolve(o.out ?? path.join(REPO, 'docs', 'verification', `${date}-p4-planner-evals${o.fake ? '-fake' : ''}.md`));
+  if (o.json) o.json = path.resolve(o.json);
   const draft = path.join(REPO, '.omc', 'drafts', 'planner-prompt.md');
   o.prompt = path.resolve(o.prompt ?? (fs.existsSync(draft) ? draft : path.join(REPO, 'phases', 'code', 'planning', 'prompt.md')));
   const claude = o.fake ? FAKE : path.resolve(o.claude ?? path.join(os.homedir(), '.local', 'share', 'claude', 'versions', DEFAULT_PIN));
   fs.accessSync(claude, fs.constants.X_OK); // throws: not there / not executable
   const promptText = fs.readFileSync(o.prompt, 'utf8');
-  git(SANDBOX, 'rev-parse', '--verify', '--quiet', 'main^{commit}'); // throws: no sandbox repo / no main
+  const base = git(SANDBOX, 'rev-parse', '--verify', '--quiet', 'main^{commit}').trim(); // throws: no sandbox repo / no main
   const gold = o.cases.includes('golden-a') ? golden() : null;
   if (gold) CASES['golden-a'].text = gold.text;
 
@@ -526,6 +540,7 @@ async function main() {
 
   const results = [];
   let failed = null;
+  let jsonError = null;
   try {
     for (const key of o.cases) {
       if (aborted) break;
@@ -560,6 +575,15 @@ async function main() {
     if (results.length) {
       write(o.out, report(o, env2, results));
       console.log(`eval: report ${o.out}`);
+      if (o.json) {
+        try {
+          write(o.json, scoreOf(results, { commit: git(REPO, 'rev-parse', 'HEAD').trim(), sandbox_base: base, mode: o.fake ? 'dry' : 'real' }));
+          console.log(`eval: score JSON ${o.json}`);
+        } catch (e) {
+          jsonError = e.message;
+          console.log(`eval: score JSON failed: ${e.message}`);
+        }
+      }
     }
     await tbd.stop({ keep: true }).catch((e) => console.log(`eval: tbd stop: ${e.message}`));
     reapRuns(tbHome, Object.values(ids));
@@ -573,13 +597,13 @@ async function main() {
     }
   }
   const all = results.flatMap((c) => c.checks);
-  const ok = !failed && !aborted && results.length === o.cases.length && all.every((x) => x.ok);
+  const ok = !failed && !aborted && results.length === o.cases.length && all.every((x) => x.ok) && !jsonError;
   console.log(`eval: ${ok ? 'PASS' : 'FAIL'} · ${all.filter((x) => x.ok).length}/${all.length} deterministic checks`);
   process.exitCode = ok ? 0 : 1;
 }
 
 // shared with scripts/golden-working.js (P5d goldens): tbd run artifacts, git, report bits
-module.exports = { SANDBOX, arr, sleep, readJson, write, git, events, runNs, runInfo, metricLines, ticketOf, reapRuns, chk, fence, details, usd, costOf, cell };
+module.exports = { SANDBOX, arr, sleep, readJson, write, git, events, runNs, runInfo, metricLines, ticketOf, reapRuns, chk, fence, details, usd, costOf, cell, microOf, stopOf, scoreOf, parse };
 
 if (require.main === module) {
   main().catch((e) => {

@@ -275,3 +275,10 @@
 @media (prefers-reduced-motion: reduce) {
   .drawer[open], .drawer[open]::backdrop, .spin { animation: none; }
 }
+
+/* ---------- M7: Follow on the log tail, Older / Newer on the kept reports ---------- */
+.log-acts { display: inline-flex; flex-wrap: wrap; gap: 4px 16px; }
+.tlink[aria-pressed="true"] { color: var(--text); font-weight: 600; }
+.tlink[aria-pressed="true"]::before { content: ""; display: inline-block; width: 7px; height: 7px; margin-right: 6px; border-radius: 50%; background: var(--green); vertical-align: middle; }
+.pager { justify-content: flex-start; }
+.pager .btn:disabled { opacity: 0.32; cursor: default; }

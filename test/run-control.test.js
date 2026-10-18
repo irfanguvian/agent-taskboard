@@ -131,3 +131,30 @@ test('AC10 admission: a phase needs the median peak of its last 10 t:run lines (
   await until(() => read(tbd, 't_needp1').waiting?.reason === 'memory', 15_000, 'planning waits for memory');
   assert.equal(read(tbd, 't_needp1').lease, null, 'planning never spawned');
 });
+
+test('M7 RC1 Irfan\'s Resume / Restart: one interventions row each (token = actor cli, cookie = ui), interventions + 1, one t:control each; a refused Resume (409) writes neither', async (t) => {
+  const at = new Date(Date.now() - 60_000).toISOString();
+  const lease = { // run 1 died (crash), the ticket Blocked
+    gen: 1, pid: 3_999_999, lstart: 'start gone', pgid: 3_999_999, phase: 'planning', task: null, session: '11111111-1111-4111-8111-111111111111', log: 'runs/1.jsonl',
+    started_at: at, last_event_at: at, ended_at: at, tool: null, slot_wait_ms: 0, subagents_alive: 0, subagents_spawned: 0, exit: 'crash', failure: true,
+  };
+  const hang = [say('assistant', [{ type: 'tool_use', id: 'tu_1', name: 'Bash', input: {} }]), { hang: true }];
+  const tbd = await boot(t, { t_rctl01: { state: 'blocked', blocked_from: 'planning', lease, scenario: { steps: hang, resume_steps: hang } } });
+  const rows = () => lines(path.join(tbd.tbHome, 'tickets/t_rctl01/interventions.jsonl')).map((r) => [r.actor, r.verb]);
+  const controls = () => lines(path.join(tbd.tbHome, 'metrics.jsonl')).filter((l) => l.t === 'control').map((l) => [l.ticket, l.op, l.actor]);
+  const live = (gen) => until(() => { const l = read(tbd, 't_rctl01').lease; return l.gen === gen && l.lstart && !l.exit; }, 30_000, `run of gen ${gen} live`);
+
+  const r1 = await tbd.api('POST', '/api/tickets/t_rctl01/resume', {});
+  assert.equal(r1.status, 202, r1.text);
+  await live(2);
+  await until(() => controls().length, 15_000, 't:control');
+  assert.deepEqual([rows(), controls(), read(tbd, 't_rctl01').interventions], [[['cli', 'resume']], [['t_rctl01', 'resume', 'cli']], 1]);
+
+  const r2 = await tbd.api('POST', '/api/tickets/t_rctl01/resume', {});
+  assert.deepEqual([r2.status, r2.json], [409, { error: 't_rctl01: the run is live; Resume works once it ended' }]);
+  const r3 = await tbd.api('POST', '/api/tickets/t_rctl01/restart', undefined, { 'x-tb-token': undefined, cookie: await tbd.unlock(), 'sec-fetch-site': 'same-origin' });
+  assert.equal(r3.status, 202, r3.text);
+  await live(3);
+  await until(() => controls().length === 2, 15_000, 'the second t:control');
+  assert.deepEqual([rows(), controls(), read(tbd, 't_rctl01').interventions], [[['cli', 'resume'], ['ui', 'restart']], [['t_rctl01', 'resume', 'cli'], ['t_rctl01', 'restart', 'ui']], 2], 'the refused Resume wrote no row and no line');
+});

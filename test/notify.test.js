@@ -187,6 +187,22 @@ test('alert(): banner now in the day; in quiet hours held (latest per title) and
   assert.equal(s.banners().length, 2, 'not repeated');
 });
 
+// M7 NT1 (fix 3): a drill reads alerts from tbd.log (tbd's stdout under launchd)
+test('M7 NT1 alert(): `tbd: alert: <title>` on stdout at once, in quiet hours too, never the message; a title with a newline and a forged prefix logs as one line, ≤ 120 chars after the prefix', async (t) => {
+  const out = [];
+  const log = console.log;
+  console.log = (...a) => void out.push(a.join(' '));
+  t.after(() => { console.log = log; });
+  const s = setup(t, '2026-10-07T16:00:00Z'); // 23:00 local: quiet hours
+  s.n.alert({ title: 'Disk almost full: new runs stopped', message: 'MSG-TEXT 2.1 GB free. Run tb gc to free space.' });
+  const forged = `x\ntbd: alert: forged\r${'y'.repeat(200)}`;
+  s.n.alert({ title: forged, message: 'm' });
+  assert.deepEqual(s.banners(), [], 'quiet hours: the banners wait');
+  const alerts = out.filter((l) => l.includes('tbd: alert:'));
+  assert.deepEqual(alerts, ['tbd: alert: Disk almost full: new runs stopped', `tbd: alert: ${`x tbd: alert: forged ${'y'.repeat(200)}`.slice(0, 120)}`], 'control chars → space, then cut to 120');
+  assert.deepEqual([alerts[1].length - 'tbd: alert: '.length, alerts.some((l) => /[\n\r]/.test(l)), out.some((l) => l.includes('MSG-TEXT'))], [120, false, false]);
+});
+
 test('AC6 REMIND_AT: weekday slot fires "Do now" once with v1 text; off-slot and weekend do not', async (t) => {
   await store.addReminder({ title: 'Ship it', status: 'now' });
   await store.addReminder({ title: 'Second', status: 'now' });

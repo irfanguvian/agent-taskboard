@@ -10,7 +10,7 @@ const http = require('node:http');
 const os = require('node:os');
 const path = require('node:path');
 const { startTbd, runTb, request, isolatedEnv, phaseFixture, PHASE_FILES, FAKE_HANDLERS } = require('./helpers/tbd');
-const { ticket } = require('./helpers/runs');
+const { ticket, FAKE, until } = require('./helpers/runs');
 
 const ROOT = path.join(__dirname, '..');
 const TB = path.join(ROOT, 'bin', 'tb');
@@ -460,6 +460,282 @@ test('bin/tb and bin/taskboard-axi are executable node scripts', () => {
     fs.accessSync(file, fs.constants.X_OK);
     assert.equal(fs.readFileSync(file, 'utf8').split('\n')[0], '#!/usr/bin/env node');
   }
+});
+
+// M7 TH1 (m7-build.md lane M-B): tb health renders GET /api/health as tbd sends it, from a tbd seeded with
+// test/fixtures/health.json (its expected x / y come from the §12 rules): each target's label, x / y, %, goal, PASS / FAIL /
+// n/a with pending, no data and the golden base; tbd RSS; the doctor line. --drills pages the drill log.
+const FIX = require('./fixtures/health.json');
+const NOW = Date.now();
+const UNIT = { d: 86_400_000, h: 3_600_000, m: 60_000, s: 1000 };
+const when = v => (typeof v === 'string' && /^@([+-]\d+[dhms])+$/.test(v)
+  ? new Date(NOW + v.slice(1).match(/[+-]\d+[dhms]/g).reduce((n, x) => n + Number(x.slice(0, -1)) * UNIT[x.at(-1)], 0)).toISOString() : v);
+const jsonl = rows => rows.map(l => `${JSON.stringify(l)}\n`).join('');
+
+test('TH1 tb health: the 10 targets as tbd sends them (x / y, %, goal, PASS / FAIL / n/a, pending, no data, golden base), tbd RSS, doctor; --drills a page + the cursor help; --days 0, a bad --cursor, --limit without --drills → usage', async (t) => {
+  const SEED = JSON.parse(JSON.stringify(FIX.seed, (_k, v) => when(v)));
+  const phases = fs.mkdtempSync(path.join(os.tmpdir(), 'tb-th1-')); // empty: no phase built, so nothing moves the seeded numbers
+  const tbd = await startTbd({ env: { TB_PHASES_DIR: phases }, files: {
+    'metrics.1.jsonl': jsonl(SEED['metrics.1.jsonl']), 'metrics.jsonl': jsonl(SEED['metrics.jsonl']), 'evals/golden.jsonl': jsonl(SEED['evals/golden.jsonl']),
+    'doctor.json': SEED['doctor.json'], ...Object.fromEntries(Object.entries(SEED.tickets).map(([id, over]) => [`tickets/${id}/ticket.json`, ticket(id, over)])),
+  } });
+  t.after(async () => { await tbd.stop(); fs.rmSync(phases, { recursive: true, force: true }); });
+  const tb = (...args) => runTb(args, tbd);
+  const r = await tb('health');
+  assert.equal(r.code, 0, r.stdout);
+  const [head, cols, ...rows] = r.stdout.trimEnd().split('\n');
+  assert.match(head, /^health: 4 of 9 targets met · last 30 days \(\d{4}-\d\d-\d\dT[\d:.]+Z → \d{4}-\d\d-\d\dT[\d:.]+Z\)$/);
+  assert.equal(cols, 'targets[10]{key,target,x,y,pct,goal,result,note}:');
+  const base = SEED['evals/golden.jsonl'][0].at; // the -10d line: the -6d one is ok false (fixture _comment)
+  const want = [
+    '  recovered,Interruptions recovered without you,2,4,50%,>= 95%,FAIL,pending 1',
+    '  resume_restart,Runs you had to Resume or Restart,2,10,20%,<= 5%,FAIL,""',
+    '  infra,Gate failures classified infra,2,4,50%,<= 5%,FAIL,""',
+    '  false_stall,False stall alerts (the run produced events within 6 min),1,5,20%,<= 20%,PASS,""',
+    '  rework,Code tickets done with ≤ 1 rework,4,5,80%,>= 70%,PASS,""',
+    '  hands_off,Hands-off after approve,2,4,50%,>= 60%,FAIL,no data 1',
+    '  fix_of,fix_of tickets within 14 days of done,2,5,40%,<= 10%,FAIL,""', // fixture _comment: t_fix011 + t_fix014 in range
+    `  golden,"Golden-ticket score: no regression vs last run",2,2,100%,all,PASS,${JSON.stringify(`base ${base} · changed (total moved, not compared): golden:E`)}`, // TOON quotes a value holding : or ,
+    /^ {2}rss,tbd RSS,\d+(\.\d+)? MB,80 MB,"-",<= 80 MB,PASS,""$/,
+    '  planner_call,"Decisions marked \\"planner\'s call\\"",4,9,44%,watch,n/a,""',
+    `doctor: FAIL (tag shop) · ${SEED['doctor.json'].at}`,
+  ];
+  assert.equal(rows.length, want.length, r.stdout);
+  want.forEach((w, i) => (w instanceof RegExp ? assert.match(rows[i], w) : assert.equal(rows[i], w)));
+
+  const page = await tb('health', '--drills', '--limit', '2');
+  assert.equal(page.stdout, ['drills[2]{at,name,ok,note}:', `  "${when('@-1d')}",kill-tbd,"true",tbd back in 3 s`, `  "${when('@-3d')}",restart,"false",run not resumed in 10 min`,
+    `help: tb health --drills --limit 2 --cursor ${when('@-3d')}`, ''].join('\n'), 'the next page keeps the page size given');
+  const last = await tb('health', '--drills', '--limit', '2', '--cursor', when('@-3d'));
+  assert.equal(last.stdout, ['drills[2]{at,name,ok,note}:', `  "${when('@-12d')}",kill-claude,"true",run resumed in 40 s`, `  "${when('@-40d')}",kill-tbd,"true",tbd back in 4 s`, ''].join('\n'), 'the last page: no cursor help');
+  for (const [args, msg] of /** @type {[string[], string][]} */ ([[['--days', '0'], 'error: --days must be a whole number from 1 to 365'], [['--drills', '--cursor', 'yesterday'], 'error: --cursor must be the time the help line names (ISO-8601 UTC)'],
+    [['--limit', '2'], 'error: --days is for the targets; --limit and --cursor go with --drills']])) {
+    const bad = await tb('health', ...args);
+    assert.deepEqual([bad.code, bad.stdout.split('\n')[0]], [2, msg], args.join(' '));
+  }
+});
+
+// M7 EG1: tb eval golden's harness spawns (sys.run) go through this preload: TB_HOME/spawn.json = [{exit, score?}] in run
+// order; each call is logged to TB_HOME/spawn.jsonl; the --out evidence and (score) the --json file are written. No
+// harness ever runs.
+const SPY_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'tb-spy-'));
+after(() => fs.rmSync(SPY_DIR, { recursive: true, force: true }));
+const RUN_SPY = `--require ${path.join(SPY_DIR, 'run-spy.js')}`;
+fs.writeFileSync(path.join(SPY_DIR, 'run-spy.js'), `'use strict';
+const fs = require('node:fs');
+const path = require('node:path');
+const { sys } = require(${JSON.stringify(path.join(ROOT, 'lib', 'cli'))});
+const home = process.env.TB_HOME;
+const steps = JSON.parse(fs.readFileSync(path.join(home, 'spawn.json'), 'utf8'));
+let n = 0;
+sys.run = async (file, args, ms) => {
+  fs.appendFileSync(path.join(home, 'spawn.jsonl'), JSON.stringify({ file, args, ms }) + '\\n');
+  const s = steps[n++] ?? { exit: 9 };
+  const at = (f) => args[args.indexOf(f) + 1];
+  fs.writeFileSync(at('--out'), '# fake evidence\\n');
+  if (s.score) fs.writeFileSync(at('--json'), JSON.stringify(s.score));
+  return s.exit;
+};
+`);
+const spawned = home => (fs.existsSync(path.join(home, 'spawn.jsonl')) ? fs.readFileSync(path.join(home, 'spawn.jsonl'), 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l)) : []);
+const flagOf = (args, f) => (args.includes(f) ? args[args.indexOf(f) + 1] : undefined);
+const today = () => new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Jakarta' }); // tb's TB_TZ default
+const BIN_296 = '/opt/x/claude-2.1.296';
+
+test('EG1 eval golden --dry: golden-working, eval-planner, eval-phase review / qa / final_gate one at a time on fake claude, each pinned to its phase prompt, config claude_bin passed, evidence in TB_HOME/evals (0700), exit 0; one harness exit 1 → exit 1, its row shows it', async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'tb-eg1-'));
+  try {
+    fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({ claude_bin: BIN_296 }));
+    const run = exits => {
+      fs.writeFileSync(path.join(home, 'spawn.json'), JSON.stringify(exits.map(exit => ({ exit }))));
+      fs.rmSync(path.join(home, 'spawn.jsonl'), { force: true });
+      return runTb(['eval', 'golden', '--dry'], { tbHome: home, port: 1, home }, { NODE_OPTIONS: RUN_SPY }); // no tbd: --dry records nothing
+    };
+    const ok = await run([0, 0, 0, 0, 0]);
+    assert.equal(ok.code, 0, ok.stdout + ok.stderr);
+    // m7-build.md M-B --dry: golden-working --dry --only B,C,C-empty --runs 1 (+ --stop close, fix 7), eval-planner --fake,
+    // eval-phase --fake --phase review|qa|final_gate; --prompt <checkout>/phases/code/<phase>/prompt.md; --out under TB_HOME/evals
+    const prompt = p => path.join(ROOT, 'phases', 'code', p, 'prompt.md');
+    const out = s => path.join(home, 'evals', `${today()}-${s}-dry.md`);
+    const phase = p => ['eval-phase.js', { '--fake': true, '--phase': p, '--prompt': prompt(p), '--out': out(p) }];
+    const want = [['golden-working.js', { '--dry': true, '--only': 'B,C,C-empty', '--runs': '1', '--stop': 'close', '--prompt': prompt('working'), '--out': out('golden') }],
+      ['eval-planner.js', { '--fake': true, '--prompt': prompt('planning'), '--out': out('planner') }], phase('review'), phase('qa'), phase('final_gate')];
+    const runs = spawned(home);
+    assert.equal(runs.length, 5);
+    runs.forEach((x, i) => {
+      const [script, flags] = /** @type {[string, Record<string, string | boolean>]} */ (want[i]);
+      assert.deepEqual([x.file, x.args[0]], [process.execPath, path.join(ROOT, 'scripts', script)]);
+      for (const [f, v] of Object.entries(flags)) assert.equal(v === true ? x.args.includes(f) : flagOf(x.args, f), v, `${script} ${f}`);
+      assert.equal(flagOf(x.args, '--claude'), BIN_296, 'config claude_bin, never the harness default pin path');
+      assert.equal(x.args.includes('--json'), false, 'dry: no score');
+      assert.ok(x.ms > 0, 'a timeout');
+    });
+    assert.equal(fs.statSync(path.join(home, 'evals')).mode & 0o777, 0o700);
+    assert.match(ok.stdout, /^evals\[5\]\{source,exit,evidence\}:$/m);
+    assert.match(ok.stdout, /^dry: PASS \(5 of 5 exit 0\)$/m);
+    const red = await run([0, 1, 0, 0, 0]);
+    assert.equal(red.code, 1, red.stdout);
+    assert.ok(red.stdout.includes(`  planner,1,~/evals/${today()}-planner-dry.md\n`), red.stdout);
+    assert.match(red.stdout, /^dry: FAIL \(1 of 5 exit non-zero\)$/m);
+    assert.equal(spawned(home).length, 5, 'a red harness does not stop the others');
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('EG1 eval golden --real: without --yes → usage naming the cost, nothing spawned; --real --yes while tbd has a live run → the cost first, refused, exit 1, nothing spawned', async () => {
+  const fake = http.createServer((req, res) => { // tbd stand-in (token x): one live run
+    const u = new URL(req.url, 'http://x');
+    if (u.pathname === '/api/whoami') return res.end(JSON.stringify({ mac: crypto.createHmac('sha256', 'x').update(String(u.searchParams.get('n'))).digest('hex') }));
+    res.end(JSON.stringify({ reminders: [], flows: [], system: { runs: 1 } }));
+  });
+  await new Promise(resolve => fake.listen(0, '127.0.0.1', () => resolve(undefined)));
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'tb-eg1r-'));
+  try {
+    for (const [f, v] of [['token', 'x'], ['config.json', JSON.stringify({ claude_bin: BIN_296 })], ['spawn.json', '[]']]) fs.writeFileSync(path.join(home, f), v);
+    const port = /** @type {import('node:net').AddressInfo} */ (fake.address()).port;
+    const tb = (...args) => runTb(['eval', 'golden', ...args], { tbHome: home, port, home }, { NODE_OPTIONS: RUN_SPY });
+    const noYes = await tb('--real');
+    assert.equal(noYes.code, 2, noYes.stdout);
+    assert.match(noYes.stdout, /^error: --real costs usage: ~\$\d+ typical, ~\$\d+ worst for golden, planner, review, qa, final_gate .*; add --yes to run it$/m);
+    const live = await tb('--real', '--yes');
+    assert.equal(live.code, 1, live.stdout);
+    assert.match(live.stdout, /^cost: ~\$\d+ typical, ~\$\d+ worst for golden, planner, review, qa, final_gate /);
+    assert.match(live.stdout, /^error: refused: tbd has 1 live run\(s\); real evals wait for an idle board \(RAM\)$/m);
+    assert.deepEqual(spawned(home), [], 'nothing spawned');
+  } finally {
+    fake.close();
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('EG1 eval golden --real --yes: a case worse than its base runs once more with its --only; the rerun is recorded (rerun: true) even when lower; still worse → exit 1. --record posts a score file and prints tbd\'s verdict; worse → exit 1', async (t) => {
+  const BASE = { t: 'golden', at: '2026-10-17T00:00:00.000Z', run_id: '11111111-1111-4111-8111-111111111111', commit: 'a'.repeat(40), mode: 'real',
+    cases: [{ id: 'golden:B', pass: 8, total: 8, contaminated: false, blind: null }], pass: true, ok: null };
+  const tbd = await startTbd({ files: { 'config.json': { claude_bin: FAKE }, 'evals/golden.jsonl': `${JSON.stringify(BASE)}\n` } });
+  t.after(() => tbd.stop());
+  // a score JSON v1 as scripts/harness.js scoreJson writes it (r-build.md frozen shape), one case golden:B with pass of 8 checks
+  const score = pass => ({ v: 1, kind: 'golden-score', at: '2026-10-18T01:00:00.000Z', commit: 'c'.repeat(40), sandbox_base: 'b'.repeat(40), mode: 'real', sources: ['golden-working'],
+    cases: [{ id: 'golden:B', run: 1, stop: 'final_gate:close', checks: { pass, total: 8 }, contaminated: false, fix_rounds: 0, rework: 0, cost_micro: 3_000_000, min: 20, blind: null }], pass: pass === 8 });
+  const recordedLines = () => fs.readFileSync(path.join(tbd.tbHome, 'evals', 'golden.jsonl'), 'utf8').trim().split('\n').map(l => JSON.parse(l));
+  fs.writeFileSync(path.join(tbd.tbHome, 'spawn.json'), JSON.stringify([{ exit: 1, score: score(7) }, { exit: 1, score: score(6) }]));
+  const r = await runTb(['eval', 'golden', '--real', '--yes', '--only', 'golden'], tbd, { NODE_OPTIONS: RUN_SPY });
+  assert.equal(r.code, 1, r.stdout + r.stderr);
+  const runs = spawned(tbd.tbHome);
+  assert.equal(runs.length, 2, 'the worse case once more, not again');
+  const ev = f => path.join(tbd.tbHome, 'evals', f);
+  // m7-build.md M-B --real: --real --json <TB_HOME>/evals/<date>-<source>.json --out …md, its pinned prompt, config claude_bin
+  assert.ok(runs[0].args.includes('--real') && runs[0].args.includes('--no-docker-reserve'), 'D-0174: the harness test tbd skips the Docker reserve');
+  for (const [f, v] of Object.entries({ '--only': 'B,C', '--runs': '1', '--stop': 'close', '--claude': FAKE, '--prompt': path.join(ROOT, 'phases', 'code', 'working', 'prompt.md'),
+    '--json': ev(`${today()}-golden.json`), '--out': ev(`${today()}-golden.md`) })) assert.equal(flagOf(runs[0].args, f), v, f);
+  assert.deepEqual([flagOf(runs[1].args, '--only'), flagOf(runs[1].args, '--json')], ['B', ev(`${today()}-golden-rerun-B.json`)]);
+  const line = recordedLines().at(-1);
+  assert.deepEqual([line.cases, line.ok], [[{ id: 'golden:B', pass: 6, total: 8, contaminated: false, blind: null, rerun: true }], false], 'the rerun (6/8, lower than the first 7/8) is what counts');
+  assert.match(r.stdout, /^verdict: FAIL · 0\/1 compared not worse · base 2026-10-17T00:00:00\.000Z\nworse\[1\]\{id,why\}:\n {2}"golden:B",fewer checks pass$/m);
+
+  const file = path.join(tbd.tbHome, 'score.json');
+  fs.writeFileSync(file, JSON.stringify(score(8)));
+  const ok = await runTb(['eval', 'golden', '--record', file], tbd);
+  assert.equal(ok.code, 0, ok.stdout);
+  assert.match(ok.stdout, /^run_id: ([0-9a-f]{8}-[0-9a-f-]{27}) \(made here: .+score\.json has none\)\nrecorded: \1 · 1 cases · score pass\nverdict: PASS · 1\/1 compared not worse · base 2026-10-17T00:00:00\.000Z\n$/);
+  assert.deepEqual(recordedLines().at(-1).cases, [{ id: 'golden:B', pass: 8, total: 8, contaminated: false, blind: null }]);
+  fs.writeFileSync(file, JSON.stringify(score(7)));
+  const worse = await runTb(['eval', 'golden', '--record', file], tbd);
+  assert.equal(worse.code, 1, worse.stdout);
+  assert.match(worse.stdout, /^verdict: FAIL · 0\/1 compared not worse · base /m);
+});
+
+// Review fix (MED): --real keeps the score + its run_id in TB_HOME/evals before the post (0600, never overwritten); a
+// failed post names it for --record; --record keeps a file's run_id, so a repeat is tbd's 409 → "already recorded".
+test('EG1 eval golden --real: the post fails → the score kept with its run_id (0600; a 2nd run -2) + help --record <file>, exit 1; --record of that file → 201, same run_id; again → 409 "already recorded", exit 1', async (t) => {
+  const down = http.createServer((req, res) => { // tbd stand-in (token x): idle, POST /api/evals fails
+    const u = new URL(req.url, 'http://x');
+    if (u.pathname === '/api/whoami') return res.end(JSON.stringify({ mac: crypto.createHmac('sha256', 'x').update(String(u.searchParams.get('n'))).digest('hex') }));
+    if (req.method === 'POST') { res.statusCode = 500; return res.end(JSON.stringify({ error: 'internal error' })); }
+    res.end(JSON.stringify({ reminders: [], flows: [], system: { runs: 0 } }));
+  });
+  await new Promise(resolve => down.listen(0, '127.0.0.1', () => resolve(undefined)));
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'tb-eg1p-'));
+  t.after(() => { down.close(); fs.rmSync(home, { recursive: true, force: true }); });
+  const score = { v: 1, kind: 'golden-score', at: '2026-10-18T03:00:00.000Z', commit: 'c'.repeat(40), sandbox_base: 'b'.repeat(40), mode: 'real', sources: ['golden-working'],
+    cases: [{ id: 'golden:B', run: 1, stop: 'final_gate:close', checks: { pass: 8, total: 8 }, contaminated: false, fix_rounds: 0, rework: 0, cost_micro: 3_000_000, min: 20, blind: null }], pass: true };
+  for (const [f, v] of [['token', 'x'], ['config.json', JSON.stringify({ claude_bin: BIN_296 })], ['spawn.json', JSON.stringify([{ exit: 0, score }])]]) fs.writeFileSync(path.join(home, f), v);
+  const port = /** @type {import('node:net').AddressInfo} */ (down.address()).port;
+  const real = () => runTb(['eval', 'golden', '--real', '--yes', '--only', 'golden'], { tbHome: home, port, home }, { NODE_OPTIONS: RUN_SPY });
+  const kept = path.join(home, 'evals', `${today()}-golden-score.json`);
+  const r = await real();
+  assert.equal(r.code, 1, r.stdout);
+  assert.match(r.stdout, new RegExp(`\nerror: internal error\nhelp: tb eval golden --record ${kept.replace(/[.]/g, '\\.')}\n$`));
+  assert.equal(fs.statSync(kept).mode & 0o777, 0o600);
+  const body = JSON.parse(fs.readFileSync(kept, 'utf8'));
+  assert.match(body.run_id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  assert.deepEqual([body.cases, body.mode, body.pass], [score.cases, 'real', true], 'the score as it was posted');
+  fs.rmSync(path.join(home, 'spawn.jsonl'), { force: true });
+  const again = await real();
+  assert.ok(again.stdout.includes(`help: tb eval golden --record ${kept.replace(/\.json$/, '-2.json')}\n`), again.stdout);
+  assert.notEqual(JSON.parse(fs.readFileSync(kept, 'utf8')).run_id, undefined, 'the first file kept as it was');
+  assert.equal(JSON.parse(fs.readFileSync(kept, 'utf8')).run_id, body.run_id);
+
+  const tbd = await startTbd();
+  t.after(() => tbd.stop());
+  const rec = await runTb(['eval', 'golden', '--record', kept], tbd);
+  assert.equal(rec.code, 0, rec.stdout);
+  assert.match(rec.stdout, new RegExp(`^recorded: ${body.run_id} · 1 cases · score pass\nverdict: baseline \\(nothing to compare yet\\)`), 'the file\'s own run_id, no new one');
+  const dup = await runTb(['eval', 'golden', '--record', kept], tbd);
+  assert.deepEqual([dup.code, dup.stdout], [1, `error: already recorded: run_id ${body.run_id}\n`]);
+});
+
+// Review fix: a harness past its time gets SIGINT, then (grace later) SIGKILL to its whole process group; a SIGINT
+// ignorer and its child are gone when run() answers.
+test('sys.run: past ms the harness gets SIGINT, grace later its whole group SIGKILL (a child of it too); exit 1', async (t) => {
+  const { sys } = require('../lib/cli');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tb-run-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const mark = path.join(dir, 'mark');
+  const kid = path.join(dir, 'kid');
+  const code = `const fs = require('node:fs'); const k = require('node:child_process').spawn('/bin/sleep', ['30'], { stdio: 'ignore' });
+fs.writeFileSync(${JSON.stringify(kid)}, String(k.pid)); process.on('SIGINT', () => fs.appendFileSync(${JSON.stringify(mark)}, 'int\\n')); setInterval(() => {}, 1000);`;
+  const exit = await sys.run(process.execPath, ['-e', code], 300, 300);
+  assert.equal(exit, 1);
+  assert.equal(fs.readFileSync(mark, 'utf8'), 'int\n', 'SIGINT first, once');
+  const pid = Number(fs.readFileSync(kid, 'utf8'));
+  await until(() => { try { process.kill(pid, 0); return false; } catch { return true; } }, 5000, 'its child killed with the group');
+});
+
+// D-0177 (orchestrator, m7-build "the RERUN result is what gets recorded"): a harness exit ≠ 0 is covered when each of its
+// worse cases was rerun with exit 0 and is worse no more; a crash (no score) is never covered. --real relieves the
+// harness test tbds' RAM gate (D-0126, D-0141, D-0174): golden-working --no-docker-reserve, eval-phase --no-ram-wait.
+test('EG1 eval golden --real --yes: a worse case whose rerun passes covers its harness\'s exit 1 → exit 0, recorded rerun: true; a harness that crashed (no score) → exit 1 with nothing to rerun; golden --no-docker-reserve, eval-phase --no-ram-wait', async (t) => {
+  const BASE = { t: 'golden', at: '2026-10-17T00:00:00.000Z', run_id: '22222222-2222-4222-8222-222222222222', commit: 'a'.repeat(40), mode: 'real',
+    cases: [{ id: 'golden:B', pass: 8, total: 8, contaminated: false, blind: null }], pass: true, ok: null };
+  const tbd = await startTbd({ files: { 'config.json': { claude_bin: FAKE }, 'evals/golden.jsonl': `${JSON.stringify(BASE)}\n` } });
+  t.after(() => tbd.stop());
+  const one = (id, pass, total, source) => ({ v: 1, kind: 'golden-score', at: '2026-10-18T02:00:00.000Z', commit: 'c'.repeat(40), sandbox_base: 'b'.repeat(40), mode: 'real', sources: [source],
+    cases: [{ id, run: 1, stop: 'qa', checks: { pass, total }, contaminated: false, fix_rounds: null, rework: null, cost_micro: 500_000, min: 4, blind: null }], pass: pass === total });
+  const run = steps => {
+    fs.writeFileSync(path.join(tbd.tbHome, 'spawn.json'), JSON.stringify(steps));
+    fs.rmSync(path.join(tbd.tbHome, 'spawn.jsonl'), { force: true });
+    return runTb(['eval', 'golden', '--real', '--yes', '--only', 'golden,review'], tbd, { NODE_OPTIONS: RUN_SPY });
+  };
+  const last = () => JSON.parse(fs.readFileSync(path.join(tbd.tbHome, 'evals', 'golden.jsonl'), 'utf8').trim().split('\n').at(-1));
+  const golden = pass => one('golden:B', pass, 8, 'golden-working');
+  const review = one('review:E1', 3, 3, 'eval-phase');
+
+  const ok = await run([{ exit: 1, score: golden(7) }, { exit: 0, score: review }, { exit: 0, score: golden(8) }]);
+  assert.equal(ok.code, 0, ok.stdout + ok.stderr);
+  const runs = spawned(tbd.tbHome);
+  assert.deepEqual(runs.map(x => [path.basename(x.args[0]), flagOf(x.args, '--only'), flagOf(x.args, '--phase')]), [['golden-working.js', 'B,C', undefined], ['eval-phase.js', undefined, 'review'], ['golden-working.js', 'B', undefined]]);
+  assert.ok(runs[0].args.includes('--no-docker-reserve') && runs[2].args.includes('--no-docker-reserve'), 'golden-working: no Docker reserve, rerun too');
+  assert.ok(runs[1].args.includes('--real') && runs[1].args.includes('--no-ram-wait'), 'eval-phase: no RAM wait');
+  assert.deepEqual([last().cases, last().ok], [[{ id: 'golden:B', pass: 8, total: 8, contaminated: false, blind: null, rerun: true }, { id: 'review:E1', pass: 3, total: 3, contaminated: false, blind: null }], true]);
+  assert.match(ok.stdout, /^ {2}golden,1,.+\n {2}review,0,.+\n {2}golden rerun B,0,/m, 'the first exit 1 stays on screen');
+  assert.match(ok.stdout, /^verdict: PASS · 1\/1 compared not worse · base 2026-10-17T00:00:00\.000Z$/m);
+
+  const crash = await run([{ exit: 0, score: golden(8) }, { exit: 1 }]);
+  assert.equal(crash.code, 1, crash.stdout);
+  assert.equal(spawned(tbd.tbHome).length, 2, 'nothing worse: no rerun');
+  assert.match(crash.stdout, /^warn: review: score not used: no score file$/m);
+  assert.match(crash.stdout, /^verdict: PASS · 1\/1 compared not worse · /m, 'the verdict alone passes; the crash makes exit 1');
 });
 
 // AC1: every command in the skills (tb syntax) exits as documented against a seeded tbd.

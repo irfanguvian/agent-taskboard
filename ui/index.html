@@ -29,6 +29,10 @@
         <svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><circle cx="4" cy="3.5" r="1.5"/><circle cx="4" cy="12.5" r="1.5"/><circle cx="12" cy="5.5" r="1.5"/><path d="M4 5v6M12 7c0 3-8 1.5-8 4"/></svg>
         <span>Flows</span>
       </a>
+      <a href="#health" data-view="health">
+        <svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 8h3l2-4.5 3 9 2-4.5h3"/></svg>
+        <span>Health</span>
+      </a>
     </nav>
 
     <section class="system" aria-label="System">
@@ -57,6 +61,7 @@
       <a class="sys-link" href="#system" data-view="system" aria-label="System and appearance">
         <svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M2 5h12M2 11h12"/><circle cx="6" cy="5" r="1.75"/><circle cx="10.5" cy="11" r="1.75"/></svg>
       </a>
+      <label class="search"><svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5"/><path d="m10.5 10.5 3 3"/></svg><input id="q" type="search" autocomplete="off" aria-label="Search reminders" placeholder="Search"></label>
       <form id="composer" class="composer" aria-label="New item">
         <div class="seg" role="group" aria-label="Item type">
           <button type="button" value="reminder" aria-pressed="true">Reminder</button>
@@ -65,6 +70,7 @@
         <input id="newTitle" type="text" autocomplete="off" aria-label="New item" required pattern=".*\S.*" title="Type a title first." placeholder="Add a reminder. It lands in Inbox.">
         <select id="flowKind" aria-label="Flow kind" hidden></select>
         <select id="flowTag" aria-label="Flow tag" hidden></select>
+        <button class="btn btn-sm btn-gray" type="button" id="more" aria-haspopup="dialog">More…</button>
         <button class="btn btn-sm btn-gray" type="submit">Add</button>
       </form>
     </header>
@@ -103,9 +109,16 @@
           <ul id="cancelledList" class="flist"></ul>
         </details>
       </section>
+
+      <section class="view" data-view="health" aria-labelledby="hl-h" hidden>
+        <h2 id="hl-h" class="sr">Health</h2>
+        <div id="health" class="health"></div>
+      </section>
     </main>
   </div>
 </div>
+
+<div class="scrim" id="sheet"><form class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-title"></form></div>
 
 <dialog id="drawer" class="drawer" aria-label="Flow details"></dialog>
 <div id="toasts" class="toasts" role="status" aria-live="polite"></div>

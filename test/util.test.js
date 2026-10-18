@@ -103,3 +103,24 @@ test('H3 envBlock: a SECRET-named value of 4+ that is no boolean, digits or pass
     ['https://ghp_abc123@github.com/r', 'mysql://u:pw12345@h/db', 's3cr3tvalue1', 'longpass1', '%E0%A4%A', 'pw12345', 'p%40ss', 'pa/ss', 'p@ss']);
   await assert.rejects(util.envBlock({ path: dir, env_files: ['missing.env'] }), /not a plain file/);
 });
+
+// M7: eachLine reads in 64 KB pieces (no readline): lines across a piece edge, CRLF, a last line with no \n, an open
+// FileHandle left open, from (its cut first line skipped), pre; a link is never read (as before)
+test('M7 eachLine: lines across a 64 KB edge whole, CRLF and a last line without \\n; an open FileHandle stays open; from skips the cut line; pre counts unparsed lines; a link → nothing', async () => {
+  const f = path.join(ROOT, 'lines.jsonl');
+  const big = { t: 'x', pad: 'é'.repeat(50_000) }; // 100 KB of UTF-8: crosses the first edge
+  fs.writeFileSync(f, `${JSON.stringify({ t: 'a', n: 1 })}\n\n${JSON.stringify(big)}\r\n{"t":"torn"\n${JSON.stringify({ t: 'b', n: 2 })}`);
+  const seen = [];
+  await util.eachLine(f, (v, n) => void seen.push([n, v?.t, v?.pad?.length]));
+  assert.deepEqual(seen, [[1, 'a', undefined], [2, 'x', 50_000], [3, undefined, undefined], [4, 'b', undefined]], 'empty line not counted; a torn one counted, undefined');
+  const fh = await fs.promises.open(f, 'r');
+  const from = [];
+  await util.eachLine(fh, (v) => void from.push(v?.t), ['"t":"b"'], { from: 5 });
+  assert.deepEqual(from, [undefined, undefined, 'b'], 'from 5: the cut first line skipped; pre: only "b" parsed');
+  assert.equal((await fh.stat()).size > 0, true, 'the caller\'s handle is still open');
+  await fh.close();
+  fs.symlinkSync(f, path.join(ROOT, 'link.jsonl'));
+  const none = [];
+  await util.eachLine(path.join(ROOT, 'link.jsonl'), (v) => void none.push(v));
+  assert.deepEqual(none, []);
+});
