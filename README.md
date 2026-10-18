@@ -64,3 +64,22 @@ flowchart LR
 - Tickets made before this change keep their old worktree and keep working.
 - Needs git 2.49+ (`clone --revision`); `tb doctor` checks it.
 - Local Postgres: TCP loopback needs a password (scram); the socket is out of agent reach. A tag without `db: local` must hold no DB password in its env files (`tb doctor --tag` fails it). `tb doctor` shows `pg_wall`.
+
+## Health, evals and drills
+
+`tb health` (or the Health view in the board) shows the reliability targets as x / y over the last 30 days: interruptions recovered without you, runs you had to Resume or Restart, gate failures that were infra, false stall alerts, rework, hands-off after approve, fix-of tickets, golden score, tbd memory. Computed on request from `~/.taskboard/metrics.jsonl` (rotates at 32 MB into `metrics.1.jsonl`), no timer.
+
+```mermaid
+flowchart LR
+  R[runs, gates, tickets, your Resume / Restart / Cancel] --> M[(metrics.jsonl)]
+  D[tb eval chaos] --> M
+  G[tb eval golden] --> E[(evals/golden.jsonl)]
+  M --> H[tb health / Health view]
+  E --> H
+  H --> W[website forms build tb commands<br/>you paste them in Terminal]
+```
+
+- `tb health --days 7`, `tb health --drills` (drill log, paged).
+- `tb eval golden --dry`: every eval harness with fake claude, no cost. `--real` prints the cost and needs `--yes`; the score is saved in `~/.taskboard/evals/` before it is posted, so `--record <file>` can post it again if tbd was down.
+- `tb eval chaos <drill> [<id>]`: kill-tbd, kill-claude, restart, freeze, disk, memory, wifi, lid, reboot. Acts only on a live run; records pass or fail.
+- Website Maintenance and Tags: Add tag, Check setup, Clean up and Run evals build the exact `tb …` command (shell-quoted) for you to paste. These commands run outside the agent sandbox, so the website never runs them itself.

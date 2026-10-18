@@ -533,7 +533,7 @@ The phase prompts themselves are built from the head-to-head skill review in the
 
 ### What gets recorded
 
-`metrics.jsonl` gets one line per run, per gate, per finished ticket, and per chaos drill. The line shapes are in Appendix C.
+`metrics.jsonl` gets one line per run, per gate, per finished ticket, per chaos drill, per Resume / Restart / Cancel you do (`t:control`), per quiet episode of a run (`t:quiet`) and per recorded golden score (`t:golden`). The line shapes are in Appendix C. The file rotates at 32 MB into `metrics.1.jsonl` (one old file kept). Golden scores are also kept in `evals/golden.jsonl` (never rotated): the base for the next comparison.
 
 - **Gate failures are auto-classified.** `infra` means exit 127, a timeout, `EADDRINUSE`, a missing lockfile, or a `uimatch` exit 2. Everything else is `work`.
 - **Follow-up fixes:** tickets get `fix_of` when you create a fix for an earlier ticket.
@@ -542,7 +542,7 @@ The phase prompts themselves are built from the head-to-head skill review in the
 
 ### Health tab
 
-Shown as counts (x / y), because a month of personal use is a small sample.
+Shown as counts (x / y), because a month of personal use is a small sample. Computed on request (no timer) from the last 8 MB of the two metrics files, `evals/golden.jsonl`, the tickets and the last `tb doctor` record; default window 30 days (1-365). Same numbers in the website Health view, `tb health` and `GET /api/health`. The headline is "x of y targets met": y = every target that has a goal (no data counts as not met), the watch-only row is not counted.
 
 | Metric | Target |
 | --- | --- |
@@ -551,7 +551,7 @@ Shown as counts (x / y), because a month of personal use is a small sample.
 | Gate failures classified `infra` | ≤ 5% |
 | False stall alerts (the run produced events within 6 min) | ≤ 20% |
 | Code tickets done with ≤ 1 rework | ≥ 70% |
-| PRs merged without your edits | ≥ 60% |
+| Hands-off after approve: code tickets closed with no action from you between plan approve and close (D-0148; replaces "PRs merged without your edits", there is no PR anymore) | ≥ 60% |
 | `fix_of` tickets within 14 days of done | ≤ 10% |
 | Golden-ticket score | No regression vs the last run |
 | `tbd` RSS | ≤ 80 MB |
@@ -581,7 +581,7 @@ Shown as counts (x / y), because a month of personal use is a small sample.
 - memory pressure raised;
 - reboot mid-run.
 
-Each drill has an expected outcome and is logged pass or fail.
+Each drill has an expected outcome and is logged pass or fail. `tb eval chaos <drill> [<id>]` acts only on a live run (a run that already ended is refused) and records a `t:drill` line; `tb health --drills` and the website drill log show them. `disk` fills one unlinked file to 1 GB under `disk.stop_gb` (byte cap `--max-gb`, its space comes back on any exit). `memory` uses `memory_pressure -S` (simulated; on this Mac it needs root, so tb prints the `sudo` step for you). Wi-Fi, lid and reboot print the steps for you and then watch.
 
 **3. Golden tickets: after any prompt or model change.** Start with 4, in a sandbox NestJS + Prisma repo:
 
@@ -591,6 +591,8 @@ Each drill has an expected outcome and is logged pass or fail.
 - a research question with checkable sources.
 
 Each has scripted checks (was the trap caught, in which phase, how much rework) and your 1–5 score. Add more later: a tempting test edit, a behaviour-preserving refactor, a UI ticket. A prompt change ships only if no golden ticket gets worse.
+
+`tb eval golden --dry` runs every harness with fake claude (no cost). `--real` prints the cost estimate and runs only with `--yes`; it saves the score file in `TB_HOME/evals/` before posting it, reruns a worse case once and exits 1 when a case is still worse. `--record <file>` posts a score file made earlier (a repeat is refused). The blind 1-5 score comes from sandboxed reviewer runs that see only the ticket text and the diff (`scripts/golden-working.js --blind`).
 
 ## 13. Milestones
 
@@ -752,8 +754,8 @@ From M4 on, build later milestones through the pipeline itself.
 | `tb scope <id> --allow\|--deny` | Answer `NEEDS_SCOPE` |
 | `tb resume <id> [--phase <p>]`, `tb restart <id>`, `tb cancel <id>` | Run control |
 | `tb tag add\|list\|doctor` | Tags |
-| `tb doctor`, `tb gc`, `tb health` | System |
-| `tb eval fake\|golden\|chaos` | Evaluation |
+| `tb doctor`, `tb gc`, `tb health [--days N] [--drills [--limit N] [--cursor <next>]]` | System |
+| `tb eval fake`, `tb eval golden --dry\|--real [--yes] [--only …]\|--record <file>`, `tb eval chaos <drill> [<id>]` (kill-tbd, kill-claude, restart, freeze, wifi, lid, reboot, disk, memory) | Evaluation |
 
 `tbx` (agents only): `tbx status` (read-only system view), `tbx heavy -- <cmd>` (inserted by the hook, never typed by the agent).
 
@@ -773,7 +775,9 @@ From M4 on, build later milestones through the pipeline itself.
 | `POST /api/tickets/:id/{assign,answer,approve,reject,scope,resume,restart,cancel,promote}` | Actions, with the same guards as `tb` |
 | `GET /api/gc`, `POST /api/gc` | Preview, then delete confirmed items |
 | `POST /api/drills` | Chaos drill result `{name, ok, note}` from `tb eval chaos` → `t:drill` line (token only) |
-| `GET /api/health` | Metrics summary |
+| `GET /api/health?days=30` | The 10 targets `{key, label, x, y, op, threshold, ok}` + doctor status (days 1-365) |
+| `GET /api/drills?limit=20&before=<ISO>` | Drill log, newest first, paged (`next`) |
+| `POST /api/evals` | A golden score file + `run_id` → `t:golden` line + verdict (terminal only; a repeated run_id is 409) |
 
 Event payloads:
 
@@ -805,7 +809,12 @@ Used by `tbx` and the hooks. `slot.acquire {pid, cmd}` → waits → `{lease}`; 
 {"t":"gate","ticket":"t_k3x9qa","gate":"task","ok":false,"class":"work|infra","ms":48210,"detail":"2 tests failed"}
 {"t":"ticket","ticket":"t_k3x9qa","kind":"code","tag":"acme/billing","outcome":"done|blocked|cancelled","rounds":3,"decisions":{"you":9,"ticket":2,"adr":1,"planner":2},"rework":1,"interventions":0,"phase_minutes":{"planning":14,"working":52,"review":6,"qa":21},"pr_edited":false,"fix_of":null}
 {"t":"drill","at":"2026-10-09T03:12:40.000Z","name":"wifi","ok":true,"note":"healthy after 312s: run 2 running"}
+{"t":"control","at":"…","ticket":"t_k3x9qa","op":"resume|restart|cancel","actor":"cli|ui"}
+{"t":"quiet","at":"…","ticket":"t_k3x9qa","phase":"working","task":"T2","quiet_s":120,"end":"resumed|stalled|died|you|other"}
+{"t":"golden","at":"…","run_id":"<uuid>","commit":"<sha>","mode":"real","cases":[{"id":"golden:B","pass":8,"total":8,"contaminated":false,"blind":4}],"pass":true,"ok":true}
 ```
+
+`t:ticket` also carries `at`, `created_at`, `approved_at` and `hands_on` (your cli / ui actions after plan approve, except close and push).
 
 `cost_delta` is integer micro-USD (T5): 840000 = $0.84. `total_cost_usd` adds up over `--resume`, so a resumed run's `cost_delta` is its total minus the session's last known total (`cost_base` on the lease).
 
