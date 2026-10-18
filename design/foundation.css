@@ -292,6 +292,7 @@ kbd, .kbd {
 }
 .seg button:hover { color: var(--fg); }
 .seg button:is([aria-pressed="true"], [aria-selected="true"], [aria-current="true"]) { background: var(--surface-raised); color: var(--fg); box-shadow: var(--shadow-control); }
+.seg button:focus-visible { box-shadow: var(--focus), var(--shadow-control); } /* the selected segment keeps its ring (§15) */
 .seg .n { margin-left: 6px; color: var(--fg-subtle); font-weight: 400; font-variant-numeric: tabular-nums; }
 
 /* ---------- filter chip ---------- */
@@ -335,15 +336,22 @@ button.card:active { opacity: 0.7; }
   height: 40px; padding: 0 12px; border-bottom: var(--hairline) solid var(--line);
   color: var(--fg-subtle); font: 500 var(--footnote) var(--font); text-align: left; vertical-align: middle; white-space: nowrap;
 }
-.table td { height: 44px; padding: 8px 12px; border-bottom: var(--hairline) solid var(--line); vertical-align: middle; }
-.table tbody tr:last-child td { border-bottom: 0; }
+.table td { height: 44px; padding: 8px 12px; vertical-align: middle; }
+/* body rows: a hairline under each but the last, inset --table-inset (20) both sides; the header's runs full width. The
+   row's first cell draws it against the row (tr is the containing block; no cell is positioned), so row fills stay full width */
+.table tbody tr { position: relative; }
+.table tbody tr:not(:last-child) > :first-child::after {
+  content: ""; position: absolute; left: var(--table-inset, 20px); right: var(--table-inset, 20px); bottom: 0;
+  border-bottom: var(--hairline) solid var(--line); pointer-events: none;
+}
 .table :is(th, td):first-child { padding-left: 20px; }
 .table :is(th, td):last-child { padding-right: 20px; }
 .table .num { text-align: right; font-variant-numeric: tabular-nums; }
 .table tbody tr.go { cursor: pointer; transition: background-color 100ms linear; }
 .table tbody tr.go:hover { background: var(--hover); }
-.table tbody tr[aria-selected="true"], .table tbody tr.go[aria-selected="true"]:hover { background: var(--accent-soft); }
-[aria-selected="true"] .pill.hue-lavender { background: var(--surface); } /* lavender-soft = accent-soft: keep the pill visible on a selected row */
+/* the selected row: aria-current on a plain table (the open row), aria-selected in a grid */
+.table tbody tr:is([aria-selected="true"], [aria-current="true"]), .table tbody tr.go:is([aria-selected="true"], [aria-current="true"]):hover { background: var(--accent-soft); }
+:is([aria-selected="true"], tr[aria-current="true"]) .pill.hue-lavender { background: var(--surface); } /* lavender-soft = accent-soft: keep the pill visible on a selected row */
 .cell-title { font-weight: 500; overflow-wrap: anywhere; }
 .cell-sub { display: block; color: var(--fg-subtle); font: 400 var(--subheadline) var(--font); overflow-wrap: anywhere; }
 

@@ -66,11 +66,13 @@ function sandbox(qs = {}) { // qs: selector → the node $() answers with (the r
   return ctx;
 }
 // every string in the tree, and where it sits: text (a child) or attr. Tags leave out icon() SVG (createElementNS, fixed
-// path data from app.js's ICONS): an 'svg' tag in the list still means one made from markup.
+// path data from app.js's ICONS), which may only ever make svg and path: an 'svg' tag in the list still means one made
+// from markup.
 function walk(n, out = { text: [], attrs: [], tags: [] }) {
   if (typeof n === 'string' || typeof n === 'number') { out.text.push(String(n)); return out; }
   if (!(n instanceof Object) || !Array.isArray(n.kids)) return out;
-  if (!n.ns) out.tags.push(n.tag);
+  if (n.ns) assert.ok(n.tag === 'svg' || n.tag === 'path', `createElementNS made only svg / path, not ${n.tag}`);
+  else out.tags.push(n.tag);
   for (const [k, v] of Object.entries(n.attrs)) out.attrs.push(`${k}=${v}`);
   for (const k of n.kids) walk(k, out);
   return out;
@@ -254,7 +256,7 @@ test('XSS: M5.5 the parent\'s lanes table (task id, waiting why) renders as text
   assert.deepEqual(w.attrs.filter((a) => /^(on\w+|src|srcdoc|formaction|href)=/i.test(a)), [], 'no payload in an attribute');
   // X14: one row, as text: task, lane id, state, waiting (reason: why), live (no: as tb show), attempt
   const at = w.text.indexOf(`T2${P}`);
-  assert.deepEqual(w.text.slice(at, at + 6), [`T2${P}`, 't_lan001', 'blocked', `infra: gate ${S}`, 'no', '2']);
+  assert.deepEqual(w.text.slice(at, at + 6), [`T2${P}`, 't_lan001', 'Blocked', `infra: gate ${S}`, 'no', '2']);
   const wait = (r) => walk(run(`notice("t_xss001", { reason: "${r}" })`)).text.join(' ');
   assert.match(wait('lane_setup'), /Nothing to approve/);
   assert.doesNotMatch(wait('lane_setup'), /approved plan/);
@@ -310,7 +312,7 @@ test('UX1: the Health view shows the 10 targets from the fixture with x / y and 
   const EXPECT = { // result words are status pills in Title Case (DESIGN.md §8); tb health prints PASS / FAIL
     recovered: ['Fail', '2 / 4', '≥ 95%'], resume_restart: ['Fail', '2 / 10', '≤ 5%'], infra: ['Fail', '2 / 4', '≤ 5%'], false_stall: ['Pass', '1 / 5', '≤ 20%'],
     rework: ['Pass', '4 / 5', '≥ 70%'], hands_off: ['Fail', '2 / 4', '≥ 60%'], fix_of: ['Fail', '2 / 5', '≤ 10%'], golden: ['Pass', '2 / 2', 'all'],
-    rss: ['Pass', '61.2 / 80 MB', '≤ 80 MB'], planner_call: ['n/a', '4 / 9', 'watch'],
+    rss: ['Pass', '61.2 / 80 MB', '≤ 80 MB'], planner_call: ['N/A', '4 / 9', 'watch'],
   };
   const rows = find(tree, (x) => x.tag === 'tr' && x.attrs['data-key']);
   assert.deepEqual(rows.map((r) => r.attrs['data-key']), Object.keys(EXPECT), '10 targets in the frozen order');
@@ -403,7 +405,7 @@ test('UX2: search finds a done item past the 15 cap (title, note, project or id,
   run('ui.q = "acme"; renderReminders()');
   assert.ok(walk(board).text.includes('1') && !walk(board).text.includes('1 / 3'), 'Now counts matches too, not n / 3');
   run('ui.q = "zzz"; renderReminders()');
-  assert.deepEqual(walk(board).text, ['No matches.']);
+  assert.deepEqual(walk(board).text, ['No Matches', 'Try another word, or clear the search.', 'Clear Search']);
 });
 
 test('UX3: the drawer shows fix_of (opens that ticket) and promoted_from as text; absent: no fact row', async () => {
@@ -524,7 +526,7 @@ test('UX6: the flow sheet with title + fix-of posts {text, title, kind, tag, fix
   const n = trust(ctx);
   run(`state = { reminders: [], flows: [{ id: "t_a1", title: "Earlier flow", state: "done" }], system: {}, calendar: {} }; ui.tags = ["acme/api"];`);
   run('openNew("flow")'); // calm UI: the New sheet (N / New) replaced the composer line and its More… sheet
-  assert.deepEqual(find(sheet, (x) => x.tag === 'label').map((l) => txt(l)), ['Goal for the agent', 'Short title', 'Kind', 'Tag', 'Fix of']);
+  assert.deepEqual(find(sheet, (x) => x.tag === 'label').map((l) => txt(l)), ['Goal for the Agent', 'Short Title', 'Kind', 'Tag', 'Fix Of']);
   const ids = find(sheet, (x) => x.tag === 'label').map((l) => l.attrs.for);
   assert.deepEqual(ids.map((id) => find(sheet, (x) => x.attrs.id === id).length), [1, 1, 1, 1, 1], 'each label points at one control');
   assert.deepEqual(find(byName(sheet, 'fix_of'), (x) => x.tag === 'option').map((o) => o.attrs.value), ['', 't_a1']);
@@ -594,6 +596,35 @@ test('calm UI: the New sheet refuses a blank title and a malformed tag inline (n
   byName(sheet, 'note').value = 'Before Friday';
   await sheet.onsubmit({ preventDefault() {} });
   assert.deepEqual(posts().map((c) => c.body), [{ title: 'Pay rent', status: 'inbox', pos: 'top', note: 'Before Friday', tag: 'home' }]);
+});
+
+test('calm UI: New Flow posts once while its add is in flight (a second submit, Enter in the goal box); once it lands Add works again', async () => {
+  const sheet = /** @type {any} */ (new Node('form'));
+  const ctx = sandbox({ '#sheet .sheet': sheet, '#sheet': new Node('div') });
+  const run = (code) => vm.runInContext(code, ctx);
+  trust(ctx);
+  const posts = [];
+  let land;
+  /** @type {any} */ (ctx).fetch = async (/** @type {string} */ url, /** @type {any} */ init = {}) => { // a POST waits until land(): the add stays in flight
+    if (init.method === 'POST') { posts.push([url, JSON.parse(init.body)]); await new Promise((r) => { land = r; }); }
+    return { ok: true, status: 200, json: async () => ({}) };
+  };
+  run('state = { reminders: [], flows: [], system: {}, calendar: {} };');
+  run('openNew("flow")');
+  sheet.requestSubmit = () => sheet.onsubmit({ preventDefault() {} }); // the browser's: a submit event
+  byRole(sheet, 'sheet-add').isConnected = true;
+  byName(sheet, 'text').value = 'Make the list sortable';
+  const first = sheet.onsubmit({ preventDefault() {} });
+  sheet.onsubmit({ preventDefault() {} }); // not awaited: a second post would wait for land() too
+  sheet.onkeydown({ key: 'Enter', target: { tagName: 'TEXTAREA' }, preventDefault() {} });
+  await tick();
+  assert.deepEqual(posts, [['/api/flows', { text: 'Make the list sortable', kind: 'code' }]], 'one POST while the first add is in flight');
+  land();
+  await first;
+  const again = sheet.onsubmit({ preventDefault() {} });
+  assert.equal(posts.length, 2, 'the add landed: the next submit posts');
+  land();
+  await again;
 });
 
 test('calm UI: the Overdue highlight filters Reminders to open reminders due before today (never a done one); a search narrows it; the chip clears it', () => {

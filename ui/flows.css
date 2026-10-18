@@ -10,7 +10,7 @@
 .flows th:nth-child(4) { width: 104px; }
 .flows td { height: 56px; }
 /* the selected row keeps its fill under the pointer (foundation's hover would win) */
-.flows tbody tr[aria-selected="true"]:hover { background: var(--accent-soft); }
+.flows tbody tr[aria-current="true"]:hover { background: var(--accent-soft); }
 .flows tbody tr:has(.row-open:focus-visible) { background: var(--hover); }
 /* the row's one real control: its title, for the keyboard. A click anywhere on the row opens the flow (app.js) */
 .row-open {
@@ -200,7 +200,9 @@
 .kin-title { font-weight: 500; overflow-wrap: anywhere; }
 .kin-sub { color: var(--fg-subtle); font: 400 var(--footnote) var(--font); overflow-wrap: anywhere; }
 
-/* tables in the inspector: foundation .table, no card around them, so the outer cells sit on the content edge */
+/* tables in the inspector: foundation .table, no card around them, so the outer cells (and the row hairlines) sit on the
+   content edge */
+.insp .table { --table-inset: 0px; }
 .insp .table :is(th, td):first-child { padding-left: 0; }
 .insp .table :is(th, td):last-child { padding-right: 0; }
 .insp .table td { height: auto; padding-top: 10px; padding-bottom: 10px; overflow-wrap: anywhere; }
@@ -210,7 +212,8 @@
 .wtable td, .ctable td { vertical-align: middle; }
 .rtable td:last-child, .ctable td:last-child { width: auto; }
 .wtable tr.cur td:first-child { font-weight: 600; }
-.rtable tr:not(.rdetail) td { border-bottom: 0; padding-bottom: 4px; }
+.rtable tr:not(.rdetail) td { padding-bottom: 4px; }
+.rtable tbody tr:not(.rdetail) > td:first-child::after { content: none; } /* a finding's two rows read as one: the hairline goes under its detail row */
 .rtable tr:not(.rdetail) td:not(:nth-child(4)) { white-space: nowrap; }
 .rtable tr.rdetail td { padding-top: 0; color: var(--fg-muted); }
 .rtable .rdetail p { margin: 0 0 4px; color: var(--fg); }
@@ -251,6 +254,7 @@
     position: relative; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px 12px; padding: 12px 16px;
   }
   .flows tbody tr + tr::before { content: ""; position: absolute; top: 0; left: 16px; right: 0; border-top: var(--hairline) solid var(--line); }
+  .table.flows tbody tr:not(:last-child) > :first-child::after { content: none; } /* the list draws its own hairline (above) */
   .table.flows td { display: block; height: auto; padding: 0; border: 0; }
   .table.flows .f-flow { grid-column: 1; grid-row: 1; }
   .table.flows .f-upd { grid-column: 2; grid-row: 1; }
@@ -266,8 +270,7 @@
   .rtable thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
   .rtable, .rtable tbody { display: block; }
   .rtable tr { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; padding-top: 12px; }
-  .rtable tr.rdetail { display: block; padding: 4px 0 12px; border-bottom: var(--hairline) solid var(--line); }
-  .rtable tbody tr.rdetail:last-child { border-bottom: 0; }
+  .rtable tr.rdetail { display: block; padding: 4px 0 12px; } /* its hairline: foundation .table (none after the last) */
   .insp .rtable tr td { display: block; height: auto; padding: 0; border: 0; white-space: normal; }
   .rtable tr:not(.rdetail) td:last-child { margin-left: auto; }
   .ftable tr:not(.rdetail) td:nth-child(4) { order: 6; flex-basis: 100%; }
