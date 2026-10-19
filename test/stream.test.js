@@ -187,4 +187,9 @@ test('Phase 3 brief(): Read, Ran, Failed, Started subagent, Refused, Said (contr
     [use('Read', { file_path: 'shop/cart.js' }, { parent_tool_use_id: 'toolu_task1' }), []],
   ];
   for (const [ev, want] of cases) assert.deepEqual(brief(JSON.stringify(ev)), want, JSON.stringify(ev));
+  // live sample: a subagent's task_notification summary is claude's handback note; its name comes from its start
+  const seen = { at: null };
+  brief(JSON.stringify(cases[3][0]), seen);
+  assert.deepEqual(brief(JSON.stringify({ type: 'system', subtype: 'task_notification', task_id: 'sub1', status: 'completed', summary: `This agent's report was delivered to you as a message from "a1" (its SubagentHandback call). Read it there.` }), seen),
+    [{ at: null, text: 'Finished subagent Map the shop (completed)', tone: 'ok' }]);
 });

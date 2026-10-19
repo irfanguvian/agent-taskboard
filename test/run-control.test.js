@@ -113,12 +113,12 @@ test('Phase 3 GET …/activity: the last rows + steps (state moves + your action
   const dir = path.join(tbd.tbHome, 'tickets/t_feed01');
   await until(() => read(tbd, 't_feed01').lease?.exit && fs.existsSync(path.join(dir, 'runs/1.jsonl.gz')), 30_000, 'run 1 ended and packed');
   const feed = [
-    { at: T(1), text: 'Started · model opus', tone: 'info' }, // no timestamp, before the first one: that one's time (Phase 3 review)
+    { at: T(1), text: 'Turn started · model opus', tone: 'info' }, // no timestamp, before the first one: that one's time (Phase 3 review)
     { at: T(1), text: 'Said: Reading the shop', tone: 'info' },
     { at: T(1), text: 'Read shop/cart.js', tone: 'info' },
     { at: T(4), text: 'Ran npm test', tone: 'info' },
     { at: T(5), text: 'Failed: Exit code 1', tone: 'bad' },
-    { at: T(5), text: 'Step ended: success · $0.12', tone: 'ok' }, // no timestamp: the last one of this read
+    { at: T(5), text: 'Turn ended: success · $0.12 total', tone: 'ok' }, // no timestamp: the last one of this read
   ];
   const get = async (q) => { const r = await tbd.api('GET', `/api/tickets/t_feed01/activity?${q}`); return r.status === 200 ? r.json : [r.status, r.json]; };
 
