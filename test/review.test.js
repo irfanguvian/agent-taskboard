@@ -285,6 +285,16 @@ test('Phase 2 task 2: bash_all_steps on, a review that edits a tracked file → 
   assert.deepEqual(lines(path.join(w.tbd.tbHome, 'test-alerts.jsonl')).map((a) => a.title), ['Review changed its worktree']);
 });
 
+// review H1: auto mode alone (bash_all_steps off) lets the classifier allow Bash the review's tools hold: the same check
+test('review H1: auto_mode on, bash_all_steps off, a review that edits a tracked file → Blocked (result not taken)', async (t) => {
+  const edit = { steps: [{ exec: ['/bin/sh', '-c', 'echo edit >> src/users.js'] }, ...reviewRun({}).steps] };
+  const w = await reviewed(t, { sessions: [edit], config: { terminal: { ...BASH_ALL.terminal, bash_all_steps: false, auto_mode: true } }, gitignore: 'node_modules/\n' });
+  await until(() => w.k().state === 'blocked' && w.k().lease?.exit, 60_000, 'review → blocked, its lease ended');
+  const l = w.k().lease;
+  assert.deepEqual([l.phase, l.escaped, l.error], ['review', true, 'worktree changed during review (it is read-only):  M src/users.js']);
+  assert.deepEqual(reviews(w.tbd, w.id), [], 'the result is not taken');
+});
+
 test('Phase 2 task 2: bash_all_steps on, a review starting with an untracked leftover (the env file) and changing nothing → not Blocked, its pass taken → qa', async (t) => {
   const w = await reviewed(t, { sessions: [reviewRun({})], config: BASH_ALL, gitignore: 'node_modules/\n' });
   await until(() => w.k().state === 'qa', 60_000, 'review → qa');

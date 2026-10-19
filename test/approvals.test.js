@@ -6,7 +6,8 @@
 // run holds the exact allow rule once. Real tbd, fake claude (test/fake-claude.js), fixture phases. Security review: M2
 // (a WebFetch Allow and retry is an ask rule + a one-shot seed, never an allow rule), M3 (the retry note never repeats
 // the agent's input), L3 (a classifier-looking tool_result counts only once claude confirms it), L4 (a card whose text
-// could hide part of a command: only No).
+// could hide part of a command: only No). Code review: M3 (Allow only while the blocked session goes on), M4, L-tests
+// (a run's end cancels its waiting card).
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -56,6 +57,9 @@ before(async () => {
     files[`tickets/${id}/ticket.json`] = ticket(id);
     files[`tickets/${id}/scenario.json`] = id === 't_block1' ? BLOCK : { steps: [{ hang: true }] };
   }
+  // review M3: a block recorded in planning (its run's session), the ticket moved on to working since
+  files['tickets/t_block3/ticket.json'] = ticket('t_block3', { state: 'working', lease: { gen: 1, pid: 1, phase: 'planning', round: 0, session: 's-planning', exit: 'result' },
+    blocked_actions: [{ id: 'b_000003', at: '2026-10-19T00:00:00Z', tool: 'Bash', input_text: 'curl x', reason: 'r', rule: 'Bash(curl x)', phase: 'planning', session: 's-planning', status: 'open' }] });
   // a card a dead tbd left waiting (its asker's socket died with it)
   files['tickets/t_lost01/ticket.json'] = ticket('t_lost01', { state: 'backlog', waiting: { reason: 'approve', since: '2026-10-19T00:00:00Z' },
     approvals: [{ id: 'a_000001', at: '2026-10-19T00:00:00Z', kind: 'ask', tool: 'Bash', input_text: 'rm -rf x', status: 'pending' }] });
@@ -154,6 +158,17 @@ test('4a queue: 4 cards wait at most per ticket (a 5th is denied at once); unans
   c.close();
 });
 
+test('review L-tests: the run ends (Cancel) while its card waits → the card is gone, the asker gets no answer', async () => {
+  const c = await mcp('t_appr02');
+  let said = null;
+  c.ask({ command: 'rm -rf dist' }).then((d) => { said = d; });
+  const a = await pendingOne('t_appr02', 'rm -rf dist');
+  assert.equal((await tbd.api('POST', '/api/tickets/t_appr02/cancel')).status, 202);
+  await until(async () => (await approvals('t_appr02')).find((x) => x.id === a.id).status === 'gone', 15_000, 'card gone with its run');
+  assert.equal(said, null, 'its socket closed: nothing answered');
+  c.close();
+});
+
 test('4a boot: a card a dead tbd left waiting → lost, "could not ask you: board restarted", its wait cleared', async () => {
   const t = (await tbd.api('GET', '/api/tickets/t_lost01')).json.ticket;
   assert.deepEqual([t.approvals[0].status, t.approvals[0].note, t.waiting], ['lost', 'could not ask you: board restarted', null]);
@@ -181,6 +196,7 @@ test('4b stream: a classifier block → state.blocked with its tool input (permi
 test('4b Allow and retry: the classifier block → a blocked action card; bid of another ticket → 404; Allow → the same session resumes, its run holds the exact allow rule, the run after it does not', async () => {
   const b = await until(async () => (await tbd.api('GET', '/api/tickets/t_block1')).json.ticket.blocked_actions?.[0], 15_000, 'blocked action');
   assert.deepEqual([b.tool, b.input_text, b.reason, b.rule, b.status], ['Bash', CMD, '[Code from External]', `Bash(${CMD})`, 'open']);
+  assert.deepEqual([b.phase, b.session], ['planning', (await tbd.api('GET', '/api/tickets/t_block1')).json.ticket.lease.session], 'M3: the run it blocked');
   assert.equal(read(tbd, 't_block1').waiting.reason, 'blocked_action');
   assert.equal((await tbd.api('POST', `/api/tickets/t_appr01/blocked/${b.id}/allow`)).status, 404, 'IDOR: not this ticket\'s');
   const r = await tbd.api('POST', `/api/tickets/t_block1/blocked/${b.id}/allow`);
@@ -193,9 +209,16 @@ test('4b Allow and retry: the classifier block → a blocked action card; bid of
   assert.match(note, new RegExp(`Irfan allowed the Bash call that auto mode blocked \\(board id ${b.id}\\)\\. Retry that same call once, unchanged\\. Nothing else is newly allowed\\.`));
   assert.ok(!note.includes(CMD), 'the note holds no input text');
   assert.equal(read(tbd, 't_block1').allow_once, undefined, 'taken off the ticket as run 2 started');
-  await until(() => read(tbd, 't_block1').lease?.pid && !read(tbd, 't_block1').notes, 15_000, 'run 2 spoke');
+  await until(async () => { const k = (await tbd.api('GET', '/api/tickets/t_block1')).json.ticket; return k.lease?.pid && !k.notes; }, 15_000, 'run 2 spoke'); // M4: the route, never ticket.json
   assert.equal((await tbd.api('POST', '/api/tickets/t_block1/note', { text: 'go on' })).status, 202);
   assert.ok(!(await settings(3)).permissions.allow.includes(`Bash(${CMD})`), 'one run only');
+});
+
+test('review M3: a block of a run whose ticket moved on to the next phase → Allow 409 (Dismiss still works)', async () => {
+  const r = await tbd.api('POST', '/api/tickets/t_block3/blocked/b_000003/allow');
+  assert.equal(r.status, 409);
+  assert.match(r.text, /the blocked run is over: run it from your terminal, or Dismiss/);
+  assert.equal((await tbd.api('POST', '/api/tickets/t_block3/blocked/b_000003/dismiss')).status, 200);
 });
 
 test('4b Allow and retry, WebFetch (M2): no allow rule; the next run asks on the host rule; the exact same input → yes at once, no card; another URL on that host → a card', async (t) => {

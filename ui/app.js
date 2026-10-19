@@ -1372,28 +1372,37 @@ const marked = s => vis(s).replace(/\t/g, '→').replace(/ {4,}/g, m => `␣×${
 // M2: what Allow and Retry allows: a Bash call's exact rule; a WebFetch / MCP call only with this input, other calls its rule matches ask first
 const allows = b => (b.tool === 'Bash' ? `Allow this exact command for the next run: ${vis(b.rule)}`
   : `Allow this exact call once: ${vis(b.tool)} with the input above. Other ${vis(b.rule)} calls ask you first.`);
+// review M3: Allow only while the next run resumes the blocked session (lib/approvals.js resumes, the same check)
+const RESUMES = ['crash', 'interrupted', 'stalled', 'usage', 'paused', 'held', 'schema_fail'];
+const resumes = (k, b) => typeof b.session === 'string' && k.state === b.phase && k.lease?.phase === b.phase && k.lease.session === b.session
+  && (!k.lease.exit || (RESUMES.includes(k.lease.exit) && Number.isInteger(k.lease.pid)));
 function actionCards(id, k) {
   const list = v => (Array.isArray(v) ? v.filter(isObj) : []);
   const asks = list(k.approvals).filter(a => a.status === 'pending'), blocks = list(k.blocked_actions).filter(b => b.status === 'open');
   const past = list(k.approvals).filter(a => a.status !== 'pending').slice(-3);
   if (!asks.length && !blocks.length && !past.length) return null;
+  // L-a11y: an answered card is gone: focus the next card's first button, else the heading (refocus would take Close)
+  const answer = (role, sent, send) => post(id, null, null, role, sent, send).then(e => {
+    if (!e) ($('#drawer .notice[data-role^="approve-"] button, #drawer .notice[data-role^="blocked-"] button') ?? $('#ok-h'))?.focus();
+  });
   const card = (role, title, text, why, acts) => el('div', { class: 'notice', 'data-role': role }, el('p', null, el('strong', null, title)),
     el('pre', { class: 'log', tabindex: '0', 'aria-label': `${title}: the action` }, marked(text)), why && el('p', { class: 'hint' }, 'The agent says: ', vis(why)),
     el('div', { class: 'acts' }, ...acts));
-  return el('section', { class: 'part', 'aria-labelledby': 'ok-h' }, el('h3', { id: 'ok-h' }, 'Needs Your OK'),
+  return el('section', { class: 'part', 'aria-labelledby': 'ok-h' }, el('h3', { id: 'ok-h', tabindex: '-1' }, 'Needs Your OK'),
     ...asks.map(a => card(`approve-${a.id}`, `Approve? ${vis(a.tool)}`, a.too_long ? 'Too long to show: only No is possible.' : a.input_text, a.reason, [
-      !a.too_long && !a.hidden && actBtn(id, `yes-${a.id}`, () => post(id, null, null, `yes-${a.id}`, 'approve-yes',
+      !a.too_long && !a.hidden && actBtn(id, `yes-${a.id}`, () => answer(`yes-${a.id}`, 'approve-yes',
         () => api('POST', `/api/tickets/${encodeURIComponent(id)}/approvals/${encodeURIComponent(a.id)}`, { yes: true })), { cls: BTN1, sent: 'approve-yes' }),
-      actBtn(id, `no-${a.id}`, () => post(id, null, null, `no-${a.id}`, 'approve-no',
+      actBtn(id, `no-${a.id}`, () => answer(`no-${a.id}`, 'approve-no',
         () => api('POST', `/api/tickets/${encodeURIComponent(id)}/approvals/${encodeURIComponent(a.id)}`, { yes: false })), { sent: 'approve-no' }),
       a.hidden && el('span', { class: 'hint' }, 'It holds a carriage return or a long blank run that can hide part of it: only No.'),
       errLine(id, `yes-${a.id}`, `no-${a.id}`)])),
     ...blocks.map(b => card(`blocked-${b.id}`, `Blocked: ${vis(b.tool)}`, b.input_text, b.reason, [
-      b.rule && actBtn(id, `allow-${b.id}`, () => post(id, null, null, `allow-${b.id}`, 'allow-blocked',
+      b.rule && resumes(k, b) && actBtn(id, `allow-${b.id}`, () => answer(`allow-${b.id}`, 'allow-blocked',
         () => api('POST', `/api/tickets/${encodeURIComponent(id)}/blocked/${encodeURIComponent(b.id)}/allow`)), { cls: BTN1, sent: 'allow-blocked' }),
-      actBtn(id, `dismiss-${b.id}`, () => post(id, null, null, `dismiss-${b.id}`, 'dismiss-blocked',
+      actBtn(id, `dismiss-${b.id}`, () => answer(`dismiss-${b.id}`, 'dismiss-blocked',
         () => api('POST', `/api/tickets/${encodeURIComponent(id)}/blocked/${encodeURIComponent(b.id)}/dismiss`)), { sent: 'dismiss-blocked' }),
-      b.rule ? el('span', { class: 'hint' }, allows(b)) : el('span', { class: 'hint' }, 'The board cannot allow exactly this one: run it from your terminal.'),
+      el('span', { class: 'hint' }, !b.rule ? 'The board cannot allow exactly this one: run it from your terminal.'
+        : !resumes(k, b) ? 'The blocked run is over: run it from your terminal, or Dismiss.' : allows(b)),
       errLine(id, `allow-${b.id}`, `dismiss-${b.id}`)])),
     past.length > 0 && el('ul', { class: 'plist', 'aria-label': 'Earlier asks' }, ...past.map(a => el('li', null, `${vis(a.tool)}: ${ASKED[a.status] ?? vis(a.status)}`))));
 }
@@ -2783,6 +2792,7 @@ function renderSettings() { // a re-render keeps focus on the same control
 // sonnet run, up to 10 min). Page Tools off: the tb line. The lines are tbd's text (a live run's hold agent text):
 // textContent + vis only. The body is built apart: tb sends more keys (test/ui-parity reads literal bodies only).
 const TC_TONE = { ok: 'ok', warn: 'wait', fail: 'bad' };
+const tcSum = res => { const n = res.checks.filter(x => x.status === 'fail').length; return n ? `${n} of ${res.checks.length} checks failed.` : `No check failed (${res.checks.length}).`; };
 async function termRun(live) {
   const tc = ui.tc ??= {};
   if (tc.busy || (live && !tc.tag)) return;
@@ -2798,6 +2808,8 @@ async function termRun(live) {
   } catch (e) { tc.err = e.message; }
   tc.busy = null;
   renderSettings();
+  const said = $('#tc-said'); // L-a11y: the one live region for results (outside #settings, which every render replaces)
+  if (said && tc.res && !tc.err && !tc.cost) said.textContent = tcSum(tc.res);
 }
 async function liveOpen() {
   const tc = ui.tc ??= {};
@@ -2824,12 +2836,11 @@ function termCheckRows(row) {
       el('select', { class: 'input', 'data-role': 'term-live-tag', 'aria-label': 'Git tag for the live run', onchange: e => { tc.tag = e.target.value; tc.cost = null; renderSettings(); } },
         ...(tc.tags ?? []).map(n => el('option', { value: n, selected: n === tc.tag }, vis(n)))),
       btn('term-live-run', tc.busy === 'live' ? 'Running…' : tc.cost ? 'Run Live Check' : 'Check Cost', () => termRun(true), !!tc.cost),
-      btn('term-live-cancel', 'Cancel', () => { ui.tc = { res: tc.res, err: tc.err }; renderSettings(); }))));
+      btn('term-live-cancel', 'Cancel', () => { ui.tc = { res: tc.res, err: tc.err }; renderSettings(); $('#settings [data-role="term-live"]')?.focus(); }))));
   }
   if (tc.err) out.push(el('p', { class: 'err set-sub', role: 'alert' }, vis(tc.err)));
   if (tc.res) {
-    const n = tc.res.checks.filter(x => x.status === 'fail').length;
-    out.push(el('div', { class: 'card-pad' }, el('p', { class: 'hint', 'aria-live': 'polite' }, n ? `${n} of ${tc.res.checks.length} checks failed.` : `No check failed (${tc.res.checks.length}).`),
+    out.push(el('div', { class: 'card-pad' }, el('p', { class: 'hint' }, tcSum(tc.res)),
       el('ul', { class: 'tcheck', 'aria-label': 'Terminal check, one line each' }, ...tc.res.checks.map(x => el('li', null, dot(TC_TONE[x.status] ?? '', vis(x.status)), ' ', vis(`${x.name} · ${x.detail}`))))));
   }
   return out;
