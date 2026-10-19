@@ -22,8 +22,9 @@
 // No permissionDecision on a rewrite: the phase's permission rules still judge the rewritten command.
 // Best effort, split on shell operators without parsing quotes (redirects: outside quotes, D-0093): the sandbox is the
 // real wall (D35).
-// Full-access runs (plan full-access-runs Phase 3, TB_FULL_ACCESS=1; Irfan 2026-10-18): no ssh (the command words, a
-// .ssh path, GIT_SSH*, sshCommand) and no .env path outside the run's dir (~, $HOME, an absolute path not under the
+// Full-access runs (plan full-access-runs Phase 3, TB_FULL_ACCESS=1; Irfan 2026-10-18): no ssh (an ssh tool as the command
+// word of any simple command: sshWord; a .ssh path, GIT_SSH*, sshCommand, ssh://, rsync -e / --rsh ssh anywhere) and no .env
+// path outside the run's dir (~, $HOME, an absolute path not under the
 // hook's cwd, or a `..` part). A speed bump: lib/phase-settings.js fullAccessSandbox() is the wall. tb verbs: lib/verbs.js
 // MUTATING (every verb but the reads; a leaf module: nothing heavy loads before io.run's fail-closed path).
 const path = require('node:path');
@@ -31,8 +32,10 @@ const { run, deny } = require('./io');
 const { MUTATING } = require('../lib/verbs');
 
 const VERBS = MUTATING.join('|');
-// the ssh tools only as a command word (segment start, quote, VAR=x, or after a wrapper / xargs): `grep -rn ssh` passes
-const SSH = /(^|[^\w.-])\.ssh(?![\w-])|git_ssh|sshcommand|\bssh:\/\/|(^|[;&|(\n`'"]|\b(env|command|exec|nohup|timeout|nice|time|xargs|rtk)\s(\S+\s+)*?)\s*(\w+=\S*\s+)*(ssh|scp|sftp|ssh-add|ssh-agent|ssh-keygen)(?=[\s:'"`)]|$)/i;
+// ssh anywhere in the command: a .ssh path, GIT_SSH*, sshCommand, an ssh:// url, rsync's -e ssh / --rsh=ssh (linear: no
+// nested quantifier). The ssh tools as command words: sshWord (`grep -rn "ssh" docs` passes).
+const SSH_PATH = /(^|[^\w.-])\.ssh(?![\w-])|git_ssh|sshcommand|\bssh:\/\/|(^|\s)(-e|--rsh=?)\s*["']?ssh\b/i;
+const SSH_TOOLS = new Set(['ssh', 'scp', 'sftp', 'ssh-add', 'ssh-agent', 'ssh-keygen']);
 // full-access runs with a browser (TB_CHROME_SB): chrome-devtools-axi only through bin/tb-chrome (its Chrome can't start in the wall)
 const CHROME = /(^|[^\w.-])chrome-devtools-axi(?![\w-])/;
 const SSH_WHY = 'board runs never use ssh, scp or ssh keys (Irfan); work through the files in your worktree';
@@ -166,6 +169,30 @@ function head(t) {
     } else break;
   }
   return i;
+}
+
+// More words that run the next command, for the ssh check only (WRAP is head()'s for every rule), with their options that
+// take a separate value: `xargs -I {} ssh {}`, `sudo -u root ssh h`, `watch -n 1 ssh h`, `stdbuf -o L ssh h`.
+const RUNNERS = { xargs: ['-I', '-J', '-L', '-n', '-P', '-R', '-S', '-s', '-E', '-d', '-a'], sudo: ['-u', '-g', '-h', '-p', '-C', '-U', '-r', '-t', '-D', '-R', '-T'],
+  watch: ['-n'], stdbuf: ['-i', '-o', '-e'], setsid: [] };
+// Full access: an ssh tool (by basename, any case: APFS) as the command word of a simple command, past head()'s wrappers
+// and the RUNNERS, also inside `sh -c '…'` and eval (depth ≤ 3). Split + tokens: linear in the command's length.
+function sshWord(cmd, depth = 0) {
+  return cmd.split(SEP).some((seg, i) => {
+    if (i % 2) return false;
+    const t = tokens(seg);
+    let k = head(t);
+    for (let b; t[k] && Object.hasOwn(RUNNERS, (b = base(t[k].text))); k += head(t.slice(k))) {
+      k++;
+      while (t[k]?.text.startsWith('-')) k += RUNNERS[b].includes(t[k].text) ? 2 : 1;
+    }
+    const b = base(t[k]?.text ?? '').toLowerCase();
+    if (SSH_TOOLS.has(b)) return true;
+    if (depth >= 3) return false;
+    if (b === 'eval') return sshWord(t.slice(k + 1).map((x) => x.text).join(' '), depth + 1);
+    const c = SHELLS.has(b) ? t.findIndex((x, j) => j > k && /^-[a-z]*c[a-z]*$/i.test(x.text)) : -1;
+    return c > 0 && !!t[c + 1] && sshWord(t[c + 1].text, depth + 1);
+  });
 }
 
 // Index of `name` as the command word (direct, by path, or via npx/yarn/pnpm/bunx), else -1.
@@ -341,7 +368,7 @@ function heavyList(env) {
 // → {deny: reason} | {command: rewritten} | null (allow unchanged). cwd: the hook input's (full access: .env rule)
 function guard(command, env = process.env, cwd = '') {
   for (const [re, why] of rules(env)) if (re.test(command)) return { deny: `bash-guard: ${why}` };
-  if (env.TB_FULL_ACCESS === '1' && SSH.test(command)) return { deny: `bash-guard: ${SSH_WHY}` };
+  if (env.TB_FULL_ACCESS === '1' && (SSH_PATH.test(command) || sshWord(command))) return { deny: `bash-guard: ${SSH_WHY}` };
   if (env.TB_CHROME_SB && CHROME.test(command)) return { deny: `bash-guard: use ${env.TB_CODE ?? '<board>'}/bin/tb-chrome <command> by its full path, alone in its Bash call (no &&, ;, |, $(...), redirects): npx chrome-devtools-axi cannot start Chrome inside the sandbox wall` };
   if (env.TB_FULL_ACCESS === '1' && envOutside(command, cwd)) return { deny: `bash-guard: ${ENV_WHY}` };
   if (DB_PHASES.includes(env.TB_PHASE ?? '') && dbBad(command)) return { deny: `bash-guard: ${DB_WHY}` };

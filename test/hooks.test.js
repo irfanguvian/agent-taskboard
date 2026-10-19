@@ -152,12 +152,22 @@ test('bash-guard full-access-runs: tb verb list pinned from the CLI registry; ss
   const bumps = [['ssh git@github.com', /ssh/], ['cat ~/.ssh/id_ed25519', /ssh/], ['GIT_SSH_COMMAND="ssh -i k" git fetch', /ssh/],
     ['git -c core.sshCommand="ssh -i k" fetch', /ssh/], ['git clone ssh://git@github.com/x/y', /ssh/],
     ['timeout 5 ssh host', /ssh/], ['ls | xargs scp', /ssh/], ["sh -c 'ssh host'", /ssh/], ['cd x && FOO=1 sftp host', /ssh/],
+    // review of f1814d1: the ssh tools as the command word of any simple command (by path, after keywords and runners, in eval)
+    ...['/usr/bin/ssh host', 'echo x | /usr/bin/ssh h', 'cd /tmp && /usr/bin/scp a b:c', 'if ssh h; then :; fi', 'while ssh h; do :; done', '! ssh h', '{ ssh h; }',
+      'rsync -e ssh a b:c', 'rsync -e "ssh -p 22" a b:c', 'eval ssh h', 'eval "ssh h"', 'watch -n 1 ssh h', 'stdbuf -oL ssh h', 'sudo -u root ssh h', 'xargs -I {} ssh {}']
+      .map((c) => /** @type {[string, RegExp]} */ ([c, /ssh/])),
     ['cat ~/code/other/.env', /\.env file outside/], ['cat /Users/x/app/.env.local', /\.env file outside/], ['cat ../other/.env', /\.env file outside/], ['source $HOME/.env', /\.env file outside/]];
   for (const [cmd, why] of bumps) {
     assert.match(guard(cmd, full, '/wt')?.deny ?? 'allowed', why, cmd);
     assert.equal(guard(cmd, {}, '/wt'), null, `sandbox mode leaves it to the seatbelt: ${cmd}`);
   }
-  for (const cmd of ['cat .env.test', 'node --env-file=.env.test app.js', 'cat /wt/.env.test', 'grep -r sshd docs', 'grep -rn ssh docs', 'echo "use ssh keys"']) assert.equal(guard(cmd, full, '/wt'), null, cmd);
+  for (const cmd of ['cat .env.test', 'node --env-file=.env.test app.js', 'cat /wt/.env.test', 'grep -r sshd docs', 'grep -rn ssh docs', 'echo "use ssh keys"',
+    'grep -rn "ssh" docs', 'xargs grep -n ssh']) assert.equal(guard(cmd, full, '/wt'), null, cmd);
+  // no quadratic scan: a 100 KB heredoc of prose full of wrapper words stays far under io.run's 3 s fail-closed deadline
+  const prose = `cat <<'EOF'\n${'time to read the notes and then nice words follow here for a while '.repeat(1600)}\nEOF`;
+  const t0 = Date.now();
+  assert.equal(guard(prose, full, '/wt'), null);
+  assert.ok(Date.now() - t0 < 1000, `100 KB heredoc took ${Date.now() - t0} ms`);
   // Chrome in runs: with a browser (TB_CHROME_SB) chrome-devtools-axi goes through bin/tb-chrome; without one, left alone
   const br = { ...full, TB_CHROME_SB: '/tb/tickets/t_x/runs/2.chrome.sb', TB_CODE: '/code' };
   for (const cmd of ['npx -y chrome-devtools-axi open http://127.0.0.1:3000', 'chrome-devtools-axi snapshot', 'cd x && /g/bin/chrome-devtools-axi stop']) {

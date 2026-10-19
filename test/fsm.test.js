@@ -231,13 +231,20 @@ test('A10 + M5 C4 resume from blocked resets rework and fixes to 0 and clears bl
 });
 
 // full-access-runs Phase 5: t.asks counts per phase visit; t.continue (the answers for the asking session) lives through
-// clarify → its phase and a Blocked between, never into another phase
-test('Phase 5 move: asks kept into clarify, gone when the phase is left; t.continue kept to its phase and Blocked, dropped elsewhere', () => {
-  const g = { questions: () => true, no_blocking: () => true, answer_added: () => true };
+// clarify → its phase and a Blocked between, never into another phase. Review of f1814d1 (contract change; was: a phase
+// left for anything but clarify drops its count): a visit starts when the phase is entered from anything but clarify,
+// and a clarify that leaves for any state but its origin ends the origin's visit
+test('Phase 5 move: asks kept through ask + answer, reset when the phase is entered from elsewhere (Resume too) or its clarify leaves elsewhere; t.continue kept to its phase and Blocked, dropped elsewhere', () => {
+  const g = { questions: () => true, no_blocking: () => true, answer_added: () => true, working_gate: () => true };
   const t = ticket('review', 'code', { asks: { review: 2, qa: 1 } });
   assert.deepEqual(fsm.move(t, 'clarify', 'runner', g).asks, { review: 2, qa: 1 });
-  assert.deepEqual(fsm.move(t, 'qa', 'runner', g).asks, { qa: 1 });
-  const cont = { phase: 'review', session: 's', prompt: 'Irfan answered:\nQ1 x → y', round: 2, gen: 3 };
+  const q = ticket('clarify', 'code', { asks: { review: 2, qa: 1 }, clarify_origin: { phase: 'review' } });
+  assert.deepEqual(fsm.move(q, 'review', 'you', g).asks, { review: 2, qa: 1 }, 'the answer: the same visit');
+  assert.deepEqual(fsm.move(q, 'blocked', 'runner').asks, { qa: 1 }, 'its clarify left elsewhere: the visit ended');
+  assert.deepEqual(fsm.move(t, 'qa', 'runner', g).asks, { review: 2 }, 'qa entered from review: a new qa visit');
+  assert.deepEqual(fsm.move({ ...t, state: 'blocked', blocked_from: 'review' }, 'review', 'you', fsm.GUARDS).asks, { qa: 1 }, 'a Resume starts a new visit');
+  assert.deepEqual(fsm.move({ ...t, state: 'working' }, 'review', 'runner', g).asks, { qa: 1 });
+  const cont = { phase: 'review', session: 's', round: 2, gen: 3 };
   const c = ticket('clarify', 'code', { continue: cont });
   assert.deepEqual(fsm.move(c, 'review', 'you', g).continue, cont);
   assert.deepEqual(fsm.move({ ...c, state: 'review' }, 'blocked', 'runner').continue, cont);

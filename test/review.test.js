@@ -28,6 +28,7 @@ const CONFIG = {
   claude_bin: FAKE, max_concurrent: 4,
   memory: { min_free_gb: 0, phase_need_gb: { planning: 0, working: 0, review: 0, qa: 0 }, docker_reserved_gb: 0, start_at_warn_when_idle: true },
   disk: { warn_gb: 0, stop_gb: 0 },
+  interview: { lavish: false }, // Phase 5 asks reach clarify: never a page on the live lavish port (7781)
 };
 const SHA = 'c'.repeat(40); // a working result's commit: the fake gates read the real HEAD
 const gitEnv = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_OPTIONAL_LOCKS: '0' };
@@ -213,7 +214,8 @@ const askRun = (questions = [Q1]) => reviewRun({ verdict: 'block', questions });
 test('Phase 5 ask + resume (+): questions → clarify (origin review, round file); answer → review + t.continue; a resumed start refused as planted keeps it; Resume → --resume the asking session with the answers; t.continue gone at its first output line, before its result', async (t) => {
   const w = await reviewed(t, { sessions: [askRun(), { steps: [{ sleep_ms: 3000 }, { result: { structured_output: { verdict: 'pass', findings: [], closed: [], notes: ['kept the old endpoint'], declined: [] } } }] }] });
   const { tbd, id, k } = w;
-  await until(() => k().state === 'clarify', 60_000, 'review asks');
+  const mem = async () => (await tbd.api('GET', `/api/tickets/${id}`)).json?.ticket; // the daemon's view (store.save: disk first)
+  await until(async () => (await mem())?.state === 'clarify', 60_000, 'review asks');
   const session = w.dumps()[1].opts['--session-id'];
   assert.deepEqual([k().clarify_origin, k().asks], [{ phase: 'review', class: 'questions', session }, { review: 1 }]);
   const round = json(tk(tbd, id, 'rounds', '02-questions.json'));
@@ -223,7 +225,9 @@ test('Phase 5 ask + resume (+): questions → clarify (origin review, round file
   assert.equal(a.status, 200, JSON.stringify(a.json));
   await until(async () => { const m = (await tbd.api('GET', `/api/tickets/${id}`)).json?.ticket; return m?.state === 'blocked' && m.lease?.exit; }, 30_000, 'planted start → Blocked');
   const prompt = 'Irfan answered:\nQ1 Keep the old endpoint? → drop\n\nGo on with these answers and return your result.';
-  assert.deepEqual([k().continue?.phase, k().continue?.session, k().continue?.prompt], ['review', session, prompt], 'the answers survive a start that never spoke');
+  // review of f1814d1 (contract change; was: t.continue also kept the prompt): the round n only, the prompt is built from t.answers
+  const { gen, ...kept } = k().continue ?? {};
+  assert.deepEqual([kept, Number.isInteger(gen)], [{ phase: 'review', session, round: 2 }, true], 'the answers survive a start that never spoke');
   assert.equal(w.dumps().length, 2, 'the refused start spawned nothing');
   fs.rmSync(path.join(w.wt, 'CLAUDE.md'));
   assert.equal((await tbd.api('POST', `/api/tickets/${id}/resume`, {})).status, 202);
@@ -234,20 +238,26 @@ test('Phase 5 ask + resume (+): questions → clarify (origin review, round file
   assert.equal(d[2].opts['--resume'], session, 'the asking session goes on, never a fresh one');
   assert.equal(d[2].prompt, prompt);
   assert.deepEqual(k().answers.map((x) => [x.id, x.answer]), [['R2Q1', { pick: 'drop' }]]);
-  assert.equal(k().asks?.review, undefined, 'the review visit ended');
+  assert.equal(k().asks?.review, undefined, 'the Resume out of Blocked started a new review visit');
   assert.deepEqual(lines(tk(tbd, id, 'interventions.jsonl')).map((l) => [l.actor, l.verb]), [['cli', 'answer'], ['cli', 'resume']]);
 });
 
-test('Phase 5 cap (−): a 3rd ask in one review visit → refused "decide yourself", resumed with why; its result without questions → qa; no round file', async (t) => {
-  const w = await reviewed(t, { ticketOver: { asks: { review: 2 } }, sessions: [askRun(), reviewRun({})] });
+// review of f1814d1 (contract change; was: asks seeded on the ticket): the count survives ask → answer → resume, so two
+// real asks in one visit, then the 3rd is refused
+test('Phase 5 cap (−): two asks answered in one review visit, the 3rd → refused "decide yourself", resumed with why; its result without questions → qa; no 3rd round file', async (t) => {
+  const Q2 = { ...Q1, id: 'Q2', question: 'Page the list?' };
+  const w = await reviewed(t, { sessions: [askRun([Q1]), askRun([Q2]), askRun([{ ...Q1, id: 'Q3' }]), reviewRun({})] });
   const { tbd, id, k } = w;
+  for (const [n, q] of /** @type {[string, string][]} */ ([['02', 'Q1'], ['03', 'Q2']])) {
+    await until(async () => (await tbd.api('GET', `/api/tickets/${id}`)).json?.ticket?.state === 'clarify' && fs.existsSync(tk(tbd, id, 'rounds', `${n}-questions.json`)), 60_000, `ask ${q}`);
+    assert.equal((await tbd.api('POST', `/api/tickets/${id}/answer`, { answers: { [q]: { pick: 'keep' } } })).status, 200);
+  }
   await until(() => k().state === 'qa', 60_000, 'review → qa');
   const d = w.dumps();
-  assert.equal(d.length, 3);
-  assert.equal(d[2].opts['--resume'], d[1].opts['--session-id']);
-  assert.match(d[2].prompt, /you asked 2 times in this review visit already: decide yourself/);
-  assert.equal(fs.existsSync(tk(tbd, id, 'rounds', '02-questions.json')), false);
-  assert.equal(k().asks?.review, undefined);
+  assert.equal(d.length, 5);
+  assert.ok(d.slice(2).every((x) => x.opts['--resume'] === d[1].opts['--session-id']), 'one session all through the visit');
+  assert.match(d[4].prompt, /you asked 2 times in this review visit already: decide yourself/);
+  assert.equal(fs.existsSync(tk(tbd, id, 'rounds', '04-questions.json')), false);
 });
 
 test('Phase 5 ask (−): a question without an id → schema refusal, resumed once, refused again → Blocked; never clarify, no round file', async (t) => {

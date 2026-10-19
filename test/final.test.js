@@ -553,3 +553,29 @@ test('M5.3 FA M4: two next() calls back to back on a pass not squashed yet → t
   assert.equal(git(r.dir, 'rev-parse', b.branch), k.final.sha);
   assert.deepEqual(alerts.map((a) => a.title), ['Ready to close']);
 });
+
+// review of f1814d1 (MED 1): Irfan's answers to a final review's ask resume the asking session at once: no new visit, so the
+// final checks do not run again and the docs dirs a new visit's gate cleans stay for the session
+test('Phase 5 final ask (+): the final review writes its docs and asks → clarify; the answer → the same session resumes with it (one gate run, the docs still there) → pass → squash, waiting close', async (t) => {
+  const r = repo();
+  const id = 't_fask01';
+  const b = branch(r, id);
+  const Q = { id: 'Q1', question: 'Ship the old endpoint too?', why: 'two clients still call it', options: ['yes', 'no'], recommended: 'yes' };
+  const scenario = { steps: [WRITE, { result: { structured_output: out({ verdict: 'block', questions: [Q], summary: { ...SUMMARY, verdict: 'blocked' } }) } }],
+    resume_steps: [{ result: { structured_output: out() } }] }; // no WRITE: the resumed session's docs are the ones it wrote before the ask
+  const { tbd, k, mem, dumps, calls } = await boot(t, { tickets: { [id]: flow(id, r, b) }, tags: { [`acme/${id}`]: tag(r) }, files: qaFiles(id), scenarios: { [id]: scenario },
+    config: { ...CONFIG, interview: { lavish: false } } });
+  await until(async () => (await mem(id))?.state === 'clarify', 60_000, 'the final review asks'); // the daemon's view: an answer before it is 409
+  assert.equal(k(id).clarify_origin?.phase, 'final_gate');
+  assert.ok(fs.existsSync(path.join(b.wt, 'docs', 'verdicts', 'v.md')), 'the docs stay for the asking session');
+  const a = await tbd.api('POST', `/api/tickets/${id}/answer`, { answers: { Q1: { pick: 'no' } } });
+  assert.equal(a.status, 200, JSON.stringify(a.json));
+  await until(() => k(id).waiting?.reason === 'close', 60_000, 'resumed → pass → waiting close');
+  const runs = dumps().filter((x) => x.env.TB_PHASE === 'final_gate');
+  const first = runs.find((x) => x.opts['--session-id']);
+  const resumed = runs.filter((x) => x.opts['--resume']);
+  assert.deepEqual([runs.length, resumed.length, resumed[0]?.opts['--resume']], [2, 1, first?.opts['--session-id']], 'the asking session goes on, no schema retry');
+  assert.ok(resumed[0].prompt.startsWith('Irfan answered:\nQ1 Ship the old endpoint too? → no\n'), resumed[0].prompt);
+  assert.equal(calls().filter((c) => c.ticket === id && c.fn === 'final').length, 1, 'the final checks ran once: no new visit after the answer');
+  assert.deepEqual([k(id).final.verdict, typeof k(id).final.sha, k(id).continue], ['pass', 'string', undefined]);
+});

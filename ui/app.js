@@ -1160,6 +1160,9 @@ const SENT = { // button role → [label, label while sending, toast title, toas
   assign: ['Assign', 'Assigning…', 'Assigned', 'Planning starts when a run slot is free.'],
   answer: ['Send Answers', 'Sending…', 'Answers Sent', 'The planner plans the next round with them.'],
   'plan-now': ['Enough, Plan Now', 'Sending…', 'Planning Now', 'What you left open is the planner’s call.'],
+  // full-access-runs Phase 5: a review / qa / final gate ask's round: the answers go back into the asking session
+  'answer-on': ['Send Answers', 'Sending…', 'Answers Sent', 'The same session goes on with them.'],
+  'decide-now': ['Enough, Decide Yourself', 'Sending…', 'Answers Sent', 'The same session goes on; what you left open is its call.'],
   approve: ['Approve', 'Approving…', 'Approved', 'Setting up: branch, skills, setup command, child tickets.'],
   reject: ['Reject', 'Sending…', 'Rejected', 'The planner plans again with your comment.'],
   ask: ['Ask Me More', 'Sending…', 'Asked for More', 'The planner asks you questions first.'],
@@ -1695,18 +1698,22 @@ const answerOf = (a, x) => (a?.mode === 'pick' ? { pick: x.options[a.i] } : a?.m
   : a?.mode === 'recommended' || a?.mode === 'you_decide' ? { use: a.mode } : null);
 const answered = (d, r) => `${r.questions.filter(x => answerOf(d.a[x.id], x)).length} of ${r.questions.length} answered`;
 
+// Phase 5: an ask's round names its phase (tbd writes it, lib/planning.js askFrom): who decides what is left open and the
+// SENT roles of the answer buttons follow it; a planning round keeps the planner's copy
+const CALLER = { review: 'reviewer', qa: 'QA agent', final_gate: 'final reviewer' };
+const sentOf = r => (CALLER[r.phase] ? ['answer-on', 'decide-now'] : ['answer', 'plan-now']);
 function clarifyForm(id, r) {
-  const d = draftOf(id, r.n);
+  const d = draftOf(id, r.n), who = CALLER[r.phase] ?? 'planner', [ans, now] = sentOf(r);
   return el('section', { class: 'part you', 'aria-labelledby': 'cq-h' },
     el('h3', { id: 'cq-h' }, `Questions · Round ${r.n}`),
-    el('p', { class: 'hint' }, 'Answer each one, or press Enough, Plan Now: what you leave open is the planner’s call.'),
+    el('p', { class: 'hint' }, `Answer each one, or press ${SENT[now][0]}: what you leave open is the ${who}’s call.`),
     el('div', { class: 'acts' }, actBtn(id, 'lavish', () => post(id, 'lavish', {}), { sent: 'lavish' })),
     errLine(id, 'lavish'),
-    ...byTopic(r.questions).flatMap(([topic, qs]) => [topic && el('h4', null, vis(topic)), ...qs.map(([x, i]) => question(d, x, i))]),
+    ...byTopic(r.questions).flatMap(([topic, qs]) => [topic && el('h4', null, vis(topic)), ...qs.map(([x, i]) => question(d, x, i, who))]),
     d.errs._ && el('p', { class: 'err' }, d.errs._),
     el('div', { class: 'acts' },
-      actBtn(id, 'answer', () => sendAnswers(id, r, false), { cls: BTN1 }),
-      actBtn(id, 'plan-now', () => sendAnswers(id, r, true)),
+      actBtn(id, 'answer', () => sendAnswers(id, r, false), { cls: BTN1, sent: ans }),
+      actBtn(id, 'plan-now', () => sendAnswers(id, r, true), { sent: now }),
       el('span', { class: 'answered', 'data-count': '' }, answered(d, r))));
 }
 
@@ -1717,7 +1724,7 @@ function byTopic(qs) {
   return [...g];
 }
 
-function question(d, x, i) {
+function question(d, x, i, who = 'planner') {
   const a = d.a[x.id], name = `q${i}`, opts = Array.isArray(x.options) ? x.options : [];
   const set = v => { d.a[x.id] = { ...d.a[x.id], ...v }; delete d.errs[x.id]; };
   // checkmark rows (DESIGN §8: single choice): the radio draws a trailing check when picked
@@ -1737,26 +1744,26 @@ function question(d, x, i) {
     el('p', { class: 'why', id: `${name}-why` }, 'Why: ', vis(x.why)),
     ...opts.map((o, j) => radio('pick', j, vis(o), o === x.recommended && el('span', { class: 'rmark' }, 'Recommended'))),
     radio('recommended', null, 'Use Recommended', !opts.includes(x.recommended) && [': ', el('b', null, vis(x.recommended))]),
-    radio('you_decide', null, 'You Decide', el('span', { class: 'osub' }, 'The planner’s call')),
+    radio('you_decide', null, 'You Decide', el('span', { class: 'osub' }, `The ${who}’s call`)),
     radio('text', null, 'My Own Answer'),
     own,
     d.errs[x.id] && el('p', { class: 'err', id: `${name}-err` }, d.errs[x.id]));
 }
 
 async function sendAnswers(id, r, planNow) {
-  const d = draftOf(id, r.n), answers = Object.create(null);
+  const d = draftOf(id, r.n), answers = Object.create(null), [ans, now] = sentOf(r);
   d.errs = Object.create(null);
   for (const x of r.questions) {
     const v = answerOf(d.a[x.id], x);
     if (v) answers[x.id] = v;
-    else if (!planNow) d.errs[x.id] = 'Not answered yet. Answer it, or press Enough, Plan Now.';
+    else if (!planNow) d.errs[x.id] = `Not answered yet. Answer it, or press ${SENT[now][0]}.`;
   }
   const open = r.questions.findIndex(x => d.errs[x.id]);
   if (open >= 0) {
     redraw();
     return $(`#drawer [data-role^="q${open}-"]`)?.focus();
   }
-  const err = await post(id, 'answer', { answers, ...(planNow && { plan_now: true }) }, planNow ? 'plan-now' : 'answer');
+  const err = await post(id, 'answer', { answers, ...(planNow && { plan_now: true }) }, planNow ? 'plan-now' : 'answer', planNow ? now : ans);
   if (err == null) ui.drafts.delete(`${id}:${r.n}`); // only this ticket's draft
   else {
     answerErrors(d, r, err);
