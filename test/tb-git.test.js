@@ -27,6 +27,11 @@ test('tb-git words: fetch, pull, push, ls-remote in the bridge\'s shapes; an unk
   const refused = [[['fetch', 'origin', '--upload-pack=/bin/sh'], /fetch takes no --upload-pack/], [['push', 'origin'], /usage: tb-git push <remote> <branch>/],
     [['push', 'origin', 'main'], /push to the base branch main is refused/], [['clone', 'ext::sh -c touch% /tmp/x', 'd'], /clone takes an ssh or https URL/]];
   for (const [argv, why] of refused) assert.throws(() => parse(argv, run), why, argv.join(' '));
+  // Phase 4: a Task pushes only its own branches (git.json own), never the base
+  const task = { ...run, kind: 'task', own: ['feat', 'tb/t_x00001'] };
+  assert.deepEqual(parse(['push', 'origin', 'feat'], task), { verb: 'push', remote: 'origin', branch: 'feat' });
+  assert.throws(() => parse(['push', 'origin', 'other'], task), /push only this Task's branch feat or tb\/t_x00001, not other/);
+  assert.throws(() => parse(['push', 'origin', 'main'], task), /push to the base branch main is refused/);
   const caller = { ...process.env };
   Object.assign(process.env, { GIT_SSH_COMMAND: '/bin/sh -c "touch /tmp/x"', SSH_AUTH_SOCK: '/tmp/agent.sock', GIT_CONFIG_COUNT: '1' });
   try {

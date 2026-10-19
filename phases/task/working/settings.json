@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": ["Read", "Glob", "Grep", "Edit(/${WORKTREE}/**)", "Bash"]
+  },
+  "attribution": { "commit": "", "pr": "" },
+  "sandbox": {
+    "filesystem": {
+      "allowRead": ["${TB_CODE}", "${NODE_HOME}", "~/.npm", "~/Library/Caches/ms-playwright"],
+      "allowWrite": ["~/.npm/_logs"]
+    },
+    "network": { "allowLocalBinding": true, "allowedDomains": ["registry.npmjs.org"] }
+  }
+}

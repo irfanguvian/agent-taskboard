@@ -189,6 +189,8 @@
 .task + .task { border-top: var(--hairline) solid var(--line); }
 .task .facts > dt, .task .facts > dd { padding-top: 2px; padding-bottom: 2px; border-top: 0; }
 .steps { display: grid; gap: 4px; padding-left: 20px; list-style: decimal; color: var(--fg-muted); }
+/* board-terminal-parity Phase 4: a Task plan's steps are the plan itself, not a task's detail */
+.plan > .steps { gap: 8px; color: var(--fg); }
 .src { color: var(--fg-muted); }
 .src.you { color: var(--fg); }
 .src.planner { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }

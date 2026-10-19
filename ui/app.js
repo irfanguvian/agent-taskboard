@@ -15,7 +15,7 @@ const FLOW_COLS = [
 ];
 const YOU = new Set(['clarify', 'plan_approval', 'blocked']); // states that wait on Irfan
 // board-terminal-parity Phase 2 task 4: a run's Approve card or auto mode's block waits on him too (ticket.waiting)
-const needsYou = f => YOU.has(f.state) || f.waiting?.reason === 'approve' || f.waiting?.reason === 'blocked_action';
+const needsYou = f => YOU.has(f.state) || f.waiting?.reason === 'approve' || f.waiting?.reason === 'blocked_action' || f.waiting?.reason === 'you'; // Phase 4: a Task's result
 const AGENT = ['planning', 'working', 'review', 'qa', 'final_gate']; // phases with agent runs (fsm.AGENT)
 const NOW_LIMIT = 3, DONE_SHOWN = 15, GB = 2 ** 30, MB = 2 ** 20, DASH = '—';
 
@@ -36,7 +36,9 @@ const ui = { drag: null, editing: null, tray: null, promote: null, pick: { kind:
 
 // board-terminal-parity 6.2: the New Flow and Promote kinds are the built ones tbd names (GET /api/state system.kinds)
 const kinds = () => (Array.isArray(state?.system?.kinds) ? state.system.kinds : []);
-const kindLabel = k => String(k).charAt(0).toUpperCase() + String(k).slice(1);
+// board-terminal-parity Phase 4: while Task tickets are on (system.kinds holds task), Code and Task say how they differ
+const KIND_WORDS = Object.assign(Object.create(null), { code: 'Code — copy of the repo, checks, review', task: 'Task — your folder, like the terminal' });
+const kindLabel = k => (kinds().includes('task') && KIND_WORDS[k]) || String(k).charAt(0).toUpperCase() + String(k).slice(1);
 // Page Tools (Settings → Terminal): on, the page runs Check Setup, Clean Up, Add Tag and Open in Terminal itself
 const pageTools = () => ui.cfg?.config?.terminal?.page_tools === true;
 
@@ -797,7 +799,8 @@ const wordPill = (w, other = 'gray', hue = WORD_HUE[String(w ?? '').toLowerCase(
 };
 
 // what a flow waits on, as row and drawer name it: qa:<tag> while another ticket of its tag holds QA (C9)
-const waitLabel = (w, tag) => (w?.reason === 'qa_lock' ? `qa:${tag}` : w?.reason === 'blocked_action' ? 'blocked action' : w?.reason);
+const waitLabel = (w, tag) => (w?.reason === 'qa_lock' ? `qa:${tag}` : w?.reason === 'blocked_action' ? 'blocked action'
+  : w?.reason === 'you' ? 'your turn' : w?.reason === 'folder_busy' ? 'folder busy' : w?.reason === 'task_changed' ? 'folder changed' : w?.reason); // Phase 4: a Task's waits
 // One flow, one table row (DESIGN §8 Table): the whole row opens the inspector. The row holds the one click handler; the
 // title is a real button (keyboard, screen readers) whose click bubbles to it. ponytail: no ::after over the row, which
 // needs a <tr> as containing block (engine-dependent); a click handler has no such ceiling.
@@ -984,12 +987,13 @@ function drawerBody(f, ticket, error) {
           el('h3', { id: 'as-h' }, 'Assign'),
           el('p', { class: 'hint' }, 'Assign starts planning: the planner reads the code, then asks you questions or writes a plan.'),
           el('div', { class: 'acts' }, actBtn(f.id, 'assign', () => post(f.id, 'assign'), { cls: BTN1 })),
-          errLine(f.id, 'assign'), sandboxPart(f.id, k)),
+          errLine(f.id, 'assign'), k.kind !== 'task' && sandboxPart(f.id, k)), // Phase 4 F: a Task never takes a locked run
         st === 'planning' && k.reject_comment && el('p', { class: 'hint' }, 'Your comment on the last plan: ', el('q', null, k.reject_comment)),
         st === 'planning' && k.must_ask && el('p', { class: 'hint' }, 'You asked for more: the planner asks you questions before it plans.'),
-        st === 'clarify' && (k.clarify_origin?.phase === 'working' ? askPanel(f.id, k, ui.ask)
+        st === 'clarify' && (k.clarify_origin?.phase === 'working' && k.kind !== 'task' ? askPanel(f.id, k, ui.ask) // Phase 4: a Task's asks are planning rounds
           : r?.kind === 'questions' && Array.isArray(r.questions) ? clarifyForm(f.id, r) : el('p', { class: 'hint' }, 'No open questions found.')),
         st === 'plan_approval' && (plan || el('p', { class: 'hint' }, 'No plan found.')),
+        k.kind === 'task' && st === 'working' && k.waiting?.reason === 'you' && youCard(f.id, k),
         ['review', 'qa', 'final_gate'].includes(st) && stageActs(f.id, k),
         pushView(f.id, k, tg),
       ],
@@ -1030,6 +1034,8 @@ function drawerBody(f, ticket, error) {
 // (data-since). Agent text (task titles, model, what it does, subagent names) as text only (vis).
 const STEPS = [['planning', 'Planning'], ['clarify', 'Questions'], ['plan_approval', 'Plan Approval'], ['working', 'Working'],
   ['review', 'Review'], ['qa', 'QA'], ['final_gate', 'Final Check'], ['done', 'Done']];
+// Phase 4: a Task's steps (no review, QA or final check); its clarify lights the step it asked from
+const TASK_STEPS = [['planning', 'Questions'], ['plan_approval', 'Plan'], ['working', 'Working'], ['done', 'Done']];
 const kilo = n => (n >= 1000 ? `${Math.round(n / 1000)}k` : String(n));
 const sep = parts => parts.filter(Boolean).flatMap((p, i) => (i ? [' · ', p] : [p])); // a run of facts joined by ' · '
 // marks in a row: [text, done | now | next, extra]; done: a check + "done" for screen readers, now: the accent dot +
@@ -1039,9 +1045,11 @@ const track = (cls, label, items) => el('ol', { class: cls, 'aria-label': label 
     at === 'done' ? icon('check') : el('i', { class: `dot${at === 'now' ? ' hue-lavender' : ''}`, 'aria-hidden': 'true' }),
     el('span', null, text, at === 'done' && el('span', { class: 'sr-only' }, ', done')), extra)));
 function progress(id, k) {
-  const st = k.state, steps = STEPS.filter(([s]) => s !== 'qa' || k.kind !== 'brainstorm');
+  const st = k.state, isTask = k.kind === 'task', steps = isTask ? TASK_STEPS : STEPS.filter(([s]) => s !== 'qa' || k.kind !== 'brainstorm');
   const at = s => steps.findIndex(([x]) => x === s);
-  const from = st === 'blocked' ? k.blocked_from : st, cur = at(from); // backlog, cancelled: -1, nothing lit
+  let from = st === 'blocked' ? k.blocked_from : st;
+  if (isTask && from === 'clarify') from = k.clarify_origin?.phase === 'working' ? 'working' : 'planning';
+  const cur = at(from); // backlog, cancelled: -1, nothing lit
   const upto = from === 'clarify' && at(k.clarify_origin?.phase) > cur ? at(k.clarify_origin.phase) : cur; // asked from working on (or blocked there): the steps before it stay done
   const phase = from === 'clarify' ? k.clarify_origin?.phase : from;
   const w = isObj(k.work) ? k.work : {}, by = new Map((Array.isArray(w.tasks) ? w.tasks : []).filter(isObj).map(x => [x.id, x.status]));
@@ -1066,9 +1074,11 @@ function nowCard(id, k, w) {
   const start = l?.started_at ?? r?.started_at, took = Date.parse(l?.ended_at) - Date.parse(start);
   const model = [r?.model ?? l?.model, r?.effort].filter(Boolean).map(vis).join(' · ');
   const idle = r?.liveness && r.liveness !== 'thinking' && r.liveness !== 'tool' ? LIVE[r.liveness]?.[1] : null; // a slot, retry or Approve wait
+  const dirty = k.kind === 'task' ? k.task?.base?.dirty : null; // Phase 4: files Irfan had changed before the Task started
   return el('div', { class: 'card now-card', role: 'group', 'aria-label': 'Now' },
     el('p', { class: 'now-stage' }, sep([stateLabel(phase), phase === 'working' && n >= 0 && `task ${n + 1} of ${tasks.length}`, title && vis(title)])),
     model && el('p', { class: 'hint' }, model),
+    Number.isInteger(dirty) && dirty > 0 && el('p', { class: 'hint' }, `${dirty} ${dirty === 1 ? 'file was' : 'files were'} already uncommitted`),
     live ? el('p', null, doing || idle || 'Thinking or writing', doing && r.tool_at && [' · ', el('span', { 'data-since': r.tool_at }, span(r.tool_at))])
       : el('p', null, `Last run · ended: ${vis(l.exit ?? DASH)}`),
     subs.length > 0 && el('ul', { class: 'now-subs', 'aria-label': 'Subagents' }, ...subs.map(s => el('li', null,
@@ -1430,6 +1440,7 @@ const SENT = { // button role → [label, label while sending, toast title, toas
   'answer-on': ['Send Answers', 'Sending…', 'Answers Sent', 'The same session goes on with them.'],
   'decide-now': ['Enough, Decide Yourself', 'Sending…', 'Answers Sent', 'The same session goes on; what you left open is its call.'],
   approve: ['Approve', 'Approving…', 'Approved', 'Setting up: branch, skills, setup command, child tickets.'],
+  'task-approve': ['Approve', 'Approving…', 'Approved', 'The same session starts the work in your folder.'], // Phase 4: a Task has no setup
   reject: ['Reject', 'Sending…', 'Rejected', 'The planner plans again with your comment.'],
   ask: ['Ask Me More', 'Sending…', 'Asked for More', 'The planner asks you questions first.'],
   // P5 (working): every one is a two-click action (armed first)
@@ -1454,6 +1465,10 @@ const SENT = { // button role → [label, label while sending, toast title, toas
   hold: ['Pause and Copy', 'Pausing…', 'Pausing', 'The run stops; then the command to resume it shows here.'],
   handback: ['Hand Back', 'Handing Back…', 'Handed Back', 'The board resumes the same session.'],
   'pass-check': ['Check SHA', 'Checking…', '', ''],
+  // board-terminal-parity Phase 4: a Task's Waits-for-you card
+  'task-done': ['Done', 'Closing…', 'Flow Done', 'Your folder is free for the next Task.'],
+  'task-send': ['Send', 'Sending…', 'Sent', 'The same session goes on with your message.'],
+  'commit-push': ['Commit and Push', 'Sending…', 'Commit Sent', 'The same session commits only the listed files, then pushes.'],
 };
 const WAIT = {
   setup: 'Setting up the approved plan: branch, env files, skills, the setup command, child tickets.',
@@ -1477,8 +1492,12 @@ const WAIT = {
   lane_setup: 'Setting up the lane clones. Nothing to approve; it goes on by itself.',
   // M5.3 C12 C13: squashed, waiting on Irfan
   close: 'Waits for close: the final gate passed and the squash is made. Close it, push it, or send it back below.',
+  // board-terminal-parity Phase 4: a Task (task_changed: waiting.why lists each change with its undo step)
+  you: 'The Task finished: your turn. Read what it did below, then press Done, send it a message, or Commit and Push.',
+  folder_busy: 'Another Task works in this folder, a folder inside it, or a folder around it. It starts by itself when that one ends.',
+  task_changed: 'Blocked: your folder changed since the Task started. Look at each change below (each line says how to undo it), then Cancel and start a new Task.',
 };
-const BLOCKS = ['infra', 'integrity', 'config', 'work', 'scope', 'rework', 'qa', 'db'];
+const BLOCKS = ['infra', 'integrity', 'config', 'work', 'scope', 'rework', 'qa', 'db', 'task_changed'];
 const code = s => el('code', null, vis(s));
 const none = () => el('p', { class: 'hint' }, 'None.');
 
@@ -1732,6 +1751,42 @@ function pushView(id, k, tag) {
       armBtn(id, 'push', 'push', () => post(id, 'push'), { cls: k.state === 'done' ? BTN1 : BTN2, disabled: off })),
     isObj(k.push) && el('p', { class: k.push.state === 'failed' ? 'err' : 'hint' }, 'Last push: ', pushText(k.push, k)),
     errLine(id, 'push', 'push-close'));
+}
+
+// board-terminal-parity Phase 4: a Task waits for you (waiting you). What it did (task_result: summary, done-when, commit
+// message), then Done (POST …/close), Send (…/note: the same session goes on) and Commit and Push (…/push, two clicks;
+// tbd commits only the listed files). push_to null: why not (push_why); Git Bridge off: disabled. A 409 "the files
+// changed" re-reads the ticket (post): the card then shows tbd's fresh list. Agent text and git's names as text only (vis).
+function youCard(id, k) {
+  const t = isObj(k.task_result) ? k.task_result : {}, p = isObj(t.push_to) ? t.push_to : null, key = `you:${id}`;
+  const strs = v => (Array.isArray(v) ? v.filter(x => typeof x === 'string') : []);
+  const files = strs(p?.files), left = strs(p?.left), ahead = Number.isInteger(p?.ahead) ? p.ahead : 0, n = files.length;
+  const bridge = ui.cfg?.config?.terminal?.git_bridge === true, can = !!p && bridge && n > 0;
+  const box = el('textarea', { id: 'ys', class: 'input', rows: 2, maxLength: 10000, 'data-role': 'send-text', oninput: e => ui.notes.set(key, e.target.value) });
+  box.value = ui.notes.get(key) ?? '';
+  const send = async () => {
+    const text = box.value.trim();
+    if (text && !(await post(id, 'note', { text }, 'task-send'))) ui.notes.delete(key);
+  };
+  const where = p && [code(p.branch ?? ''), p.new_branch === true && ' (a new branch)', ' and push to ', code(p.remote ?? '')];
+  return el('section', { class: 'part you', 'aria-labelledby': 'yu-h' },
+    el('h3', { id: 'yu-h' }, 'Your Turn'),
+    t.summary && el('p', { class: 'summary' }, vis(t.summary)),
+    typeof t.done_when_met === 'boolean' && el('p', null, `Done when met: ${t.done_when_met ? 'yes' : 'no'}`),
+    t.commit_message && [el('h4', null, 'Commit Message'), el('pre', { class: 'log', tabindex: '0', 'aria-label': 'Commit message' }, vis(t.commit_message))],
+    el('div', { class: 'acts' }, actBtn(id, 'task-done', () => post(id, 'close', {}, 'task-done'), { cls: can ? BTN2 : BTN1 })),
+    el('div', { class: 'field' }, el('label', { for: 'ys' }, 'Message to the Agent'), box),
+    el('div', { class: 'acts' }, actBtn(id, 'task-send', send)),
+    errLine(id, 'task-done', 'task-send'),
+    p ? [el('h4', null, `Files to Commit · ${n}`),
+      n ? el('ul', { class: 'plist' }, ...files.map(f => el('li', null, code(f)))) : none(),
+      ahead > 0 && el('p', { class: 'hint' }, `${ahead} ${ahead === 1 ? 'commit was' : 'commits were'} already on this branch: the push sends ${ahead === 1 ? 'it' : 'them'} too.`),
+      left.length > 0 && el('p', { class: 'hint' }, 'Not committed (you had changed them before): ', ...sep(left.map(code))),
+      !bridge && el('p', { class: 'hint' }, 'Commit and Push needs Git Bridge: turn it on in Settings → Terminal.'),
+      armed(id, 'commit-push') && el('p', { class: 'notice' }, el('span', null, `Commit ${n === 1 ? 'this file' : `these ${n} files`} to `, ...where, '?')),
+      el('div', { class: 'acts' }, armBtn(id, 'commit-push', 'commit-push', () => post(id, 'push', undefined, 'commit-push'), { cls: can ? BTN1 : BTN2, disabled: !can })),
+      errLine(id, 'commit-push')]
+      : t.push_why && el('p', { class: 'hint' }, 'No Commit and Push here: ', vis(t.push_why)));
 }
 
 // D9: tbd checks the sha (GET …/pass?sha: every M15 check, nothing written); the confirm shows the full sha + its subject
@@ -2036,7 +2091,8 @@ const answered = (d, r) => `${r.questions.filter(x => answerOf(d.a[x.id], x)).le
 // Phase 5: an ask's round names its phase (tbd writes it, lib/planning.js askFrom): who decides what is left open and the
 // SENT roles of the answer buttons follow it; a planning round keeps the planner's copy
 const CALLER = { review: 'reviewer', qa: 'QA agent', final_gate: 'final reviewer' };
-const sentOf = r => (CALLER[r.phase] ? ['answer-on', 'decide-now'] : ['answer', 'plan-now']);
+// Phase 4: a Task's answers always go back into the asking session (planning or working)
+const sentOf = r => (CALLER[r.phase] || ui.ticket?.kind === 'task' ? ['answer-on', 'decide-now'] : ['answer', 'plan-now']);
 function clarifyForm(id, r) {
   const d = draftOf(id, r.n), who = CALLER[r.phase] ?? 'planner', [ans, now] = sentOf(r);
   return el('section', { class: 'part you', 'aria-labelledby': 'cq-h' },
@@ -2139,6 +2195,9 @@ function planView(id, k, r) {
   return el('section', { class: `part plan${open ? ' you' : ''}`, 'aria-labelledby': 'pl-h' },
     el('h3', { id: 'pl-h' }, open ? `Plan to Approve · Round ${r.n}` : 'Approved Plan'),
     el('p', { class: 'summary' }, vis(r.summary)),
+    // board-terminal-parity Phase 4: a Task's plan is its steps and when it is done; the rest below is a Code plan's
+    k.kind === 'task' ? [el('h4', null, 'Steps'), Array.isArray(r.steps) && r.steps.length ? el('ol', { class: 'steps' }, ...r.steps.map(s => el('li', null, vis(s)))) : none(),
+      el('h4', null, 'Done When'), list(r.done_when, vis)] : [
     el('h4', null, 'Acceptance Criteria'),
     list(r.acceptance, a => [el('span', { class: 'did' }, vis(a.id)), ' ', vis(a.text), ' ', el('span', { class: `ac${a.type === 'new' ? ' new' : ''}` }, vis(a.type))]),
     el('h4', null, 'Tasks'),
@@ -2149,7 +2208,7 @@ function planView(id, k, r) {
     Array.isArray(r.skills) && r.skills.length ? el('p', { class: 'toks' }, ...r.skills.map(code)) : none(),
     r.ui && [el('h4', null, 'UI'), el('p', { class: 'ctext' }, vis(r.ui))],
     el('h4', null, 'Child Tickets'),
-    list(r.children, c => [el('strong', null, vis(c.title)), c.blocked_by?.length ? ` · waits for ${c.blocked_by.map(vis).join(', ')}` : '', el('span', { class: 'ctext' }, vis(c.text))]),
+    list(r.children, c => [el('strong', null, vis(c.title)), c.blocked_by?.length ? ` · waits for ${c.blocked_by.map(vis).join(', ')}` : '', el('span', { class: 'ctext' }, vis(c.text))])],
     el('h4', null, 'Decisions'),
     decs.length ? [el('p', { class: 'hint' }, tally), el('table', { class: 'table dtable' },
       el('caption', { class: 'sr-only' }, 'Decisions and their source'),
@@ -2190,7 +2249,7 @@ function planActs(id, k, r) {
 // what was there before it).
 function approve(id, n) {
   if (Date.now() - (ui.shown.get(`${id}:${n}`) ?? 0) < 400) return;
-  post(id, 'approve', ui.round?.n === undefined ? undefined : { n: ui.round.n }); // L7: the round shown; tbd refuses (409) when a newer one came
+  post(id, 'approve', ui.round?.n === undefined ? undefined : { n: ui.round.n }, 'approve', ui.ticket?.kind === 'task' ? 'task-approve' : 'approve'); // L7: the round shown; tbd refuses (409) when a newer one came
 }
 
 function sendReject(id, r, ask) {
@@ -2494,6 +2553,11 @@ function openNew(mode = 'reminder', typed = '') {
     loadTags();
     sk.wire(f.ctl.text, f.ctl.tag);
     f.ctl.start.addEventListener('change', e => safe(() => localStorage.setItem('tb-start-now', e.target.checked ? '1' : '0')));
+    // Phase 4 F: a Task never takes a locked run (tbd refuses it): the box hides and clears while Kind is Task
+    const lock = f.nodes[specs.findIndex(sp => sp.k === 'sandbox')];
+    const lockFor = () => { lock.hidden = f.ctl.kind.value === 'task'; if (lock.hidden) f.ctl.sandbox.checked = false; };
+    f.ctl.kind.addEventListener('change', lockFor);
+    lockFor();
   }
   const typedIn = sp => sp.kind !== 'select' && sp.kind !== 'check' && f.ctl[sp.k].value.trim();
   const seg = el('div', { class: 'seg', role: 'group', 'aria-label': 'Item type' }, ...[['reminder', 'Reminder'], ['flow', 'Flow']].map(([m, l]) =>

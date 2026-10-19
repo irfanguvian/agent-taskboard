@@ -16,6 +16,7 @@ const { createSlots } = require('./lib/slots');
 const { createRunner } = require('./lib/runner');
 const planning = require('./lib/planning'); // registers the code/planning handler + seed (P4)
 const working = require('./lib/working'); // registers the code/working handler, seed + next hook (P5)
+require('./lib/task'); // registers task/planning + task/working (board-terminal-parity Phase 4)
 require('./lib/review'); // registers the code/review handler, seed + next hook (M5 C3)
 require('./lib/qa'); // registers the code/qa handler, seed + next hook (M5 C5)
 require('./lib/final'); // registers the code/final_gate handler, seed + next hook, tells working.js a final gate's result (M5 C10-C13)

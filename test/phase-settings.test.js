@@ -45,6 +45,9 @@ const EXPECTED = {
   // gh and PRs are gone); code/final_gate reads with review's git and writes its two docs under the docs dirs only (C11)
   'code/final_gate': [[...GIT, W(`${CTX.WORKTREE}/docs/verdicts`), W(`${CTX.WORKTREE}/docs/verification`)], [`${CTX.WORKTREE}/docs/verdicts`, `${CTX.WORKTREE}/docs/verification`]],
   'code/context': [[...GIT, W(`${CTX.WORKTREE}/.learning`)], [`${CTX.WORKTREE}/.learning`]], // module context refresh
+  // board-terminal-parity Phase 4 (contract edit): a Task plans read-only (+ git status), works like code/working
+  'task/planning': [[...GIT, 'Bash(git status *)'], []],
+  'task/working': [[...RO, W(CTX.WORKTREE), 'Bash'], [CTX.WORKTREE]],
 };
 const all = () => Object.keys(EXPECTED).map((k) => [k, render(...k.split('/'), CTX)]);
 // S1: Claude config at any depth (and top level) of every root an agent can write
@@ -65,7 +68,9 @@ test('phase-settings: one template per §5/§6 phase, allow == table, prompt.md 
         // M5.2 (contract change; was settings.json only): code/qa is built (D9: prompt.md + result.schema.json + settings.json)
         'code/qa': ['prompt.md', 'result.schema.json', 'settings.json'],
         // M5.3 (new phase dir): code/final_gate is built (D9: prompt.md + result.schema.json + settings.json)
-        'code/final_gate': ['prompt.md', 'result.schema.json', 'settings.json'] };
+        'code/final_gate': ['prompt.md', 'result.schema.json', 'settings.json'],
+        // board-terminal-parity Phase 4 (contract edit; new phase dirs): task/planning + task/working are built
+        'task/planning': ['prompt.md', 'result.schema.json', 'settings.json'], 'task/working': ['prompt.md', 'result.schema.json', 'settings.json'] };
       assert.deepEqual(fs.readdirSync(path.join(REPO, 'phases', kind, phase)), want[`${kind}/${phase}`] ?? ['settings.json'], `${kind}/${phase}`);
     }
   }
@@ -92,7 +97,7 @@ test('phase-settings: §3b deny paths + D35c reads + S1 Claude config on every p
     for (const rule of must) assert.ok(s.permissions.deny.includes(rule), `${k}: missing ${rule}`);
     // committing phases write the tag repo's shared .git from their worktree: no tag deny there (smoke: commit works,
     // main checkout still unwritable); every other phase denies the tag path
-    const committing = k === 'code/working' || k === 'code/qa';
+    const committing = k === 'code/working' || k === 'code/qa' || k === 'task/working'; // Phase 4 contract edit: task/working = code/working's template
     assert.equal(s.permissions.deny.includes(W(CTX.TAG_PATH)), !committing, `${k}: tag path deny`);
     assert.ok(!s.permissions.allow.some((r) => r.includes(CTX.TAG_PATH)), `${k}: tag path allowed`);
     // deny beats allow: no deny rule may cover the worktree or out/ (spec §9's blanket ~/.taskboard deny did)
@@ -121,7 +126,7 @@ test('phase-settings: hooks wired by absolute path; sandbox kept on, localhost o
     assert.equal(sb.enabled && sb.failIfUnavailable && !sb.allowUnsandboxedCommands && !sb.autoAllowBashIfSandboxed, true, k);
     // P4 L8 (contract change; was [TB_HOME] only): a TB_HOME that is not the live ~/.taskboard denies the live one too
     assert.deepEqual(sb.filesystem.denyRead, [H, path.join(os.homedir(), '.taskboard')], k);
-    const bashPhase = k === 'code/working' || k === 'code/qa';
+    const bashPhase = k === 'code/working' || k === 'code/qa' || k === 'task/working'; // Phase 4 contract edit: task/working = code/working's template
     // tbx, node, npm; M5 S4 (contract change; was none): code/qa reads the one DB CLI file, not ~/bin
     const reopen = bashPhase ? [REPO, '/u/.nvm/v24', '~/.npm', '~/Library/Caches/ms-playwright', ...(k === 'code/qa' ? ['~/bin/postgres-irfan-axi'] : [])] : [];
     // H2.7 (contract change; was without the tag objects): the clone reads the tag repo's objects through its alternates

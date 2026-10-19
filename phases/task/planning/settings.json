@@ -1,0 +1,4 @@
+{
+  "permissions": { "allow": ["Read", "Glob", "Grep", "Bash(git log *)", "Bash(git show *)", "Bash(git diff *)", "Bash(git status *)"], "deny": ["Edit(/${TAG_PATH}/**)"] },
+  "sandbox": { "filesystem": { "denyWrite": ["${TAG_PATH}"] } }
+}

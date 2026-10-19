@@ -26,8 +26,11 @@ const KINDS = ['code', 'research', 'brainstorm', 'design'];
 const ACTIVE = ['backlog', 'planning', 'clarify', 'plan_approval', 'working', 'review', 'qa', 'final_gate'];
 const PHASES = ['planning', 'working', 'review', 'qa', 'final_gate'];
 // Spec §4 + plan §3b written out by hand (not derived from fsm.TABLE). Value: '*' every kind,
-// 'qa' every kind but brainstorm, 'bs' brainstorm only.
+// 'qa' every kind but brainstorm, 'bs' brainstorm only, 'task' task only (board-terminal-parity Phase 4 contract edit:
+// Send / Commit and Push resume a Task's session, Done ends it).
 const SPEC = {
+  'working>working:you': 'task',
+  'working>done:you': 'task',
   'backlog>planning:you': '*',
   'planning>clarify:runner': '*',
   'clarify>planning:you': '*',
@@ -68,7 +71,7 @@ const SPEC = {
 for (const s of ACTIVE) SPEC[`${s}>blocked:runner`] = '*';
 for (const p of PHASES) SPEC[`blocked>${p}:you`] = p === 'qa' ? 'qa' : '*';
 for (const s of [...ACTIVE, 'blocked']) SPEC[`${s}>cancelled:you`] = '*';
-const allows = (key, kind) => SPEC[key] === '*' || (SPEC[key] === 'qa' && kind !== 'brainstorm') || (SPEC[key] === 'bs' && kind === 'brainstorm');
+const allows = (key, kind) => SPEC[key] === '*' || (SPEC[key] === 'qa' && kind !== 'brainstorm') || (SPEC[key] === 'bs' && kind === 'brainstorm') || (SPEC[key] === 'task' && kind === 'task');
 
 const guardsOf = (row) => [].concat(row.guard ?? []);
 const yes = Object.fromEntries(fsm.TABLE.flatMap(guardsOf).map((g) => [g, () => true]));
