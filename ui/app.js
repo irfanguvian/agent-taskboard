@@ -1370,7 +1370,7 @@ function notice(id, w) {
 const ASKED = { yes: 'Yes', no: 'No', timeout: 'Timed out: No', gone: 'The run went away', lost: 'Could not ask you: board restarted' };
 const marked = s => vis(s).replace(/\t/g, '→').replace(/ {4,}/g, m => `␣×${m.length}`).replace(/\r/g, '␍').replace(/\n/g, '⏎\n');
 // M2: what Allow and Retry allows: a Bash call's exact rule; a WebFetch / MCP call only with this input, other calls its rule matches ask first
-const allows = b => (b.tool === 'Bash' ? `Allow this exact call once: ${vis(b.rule)}`
+const allows = b => (b.tool === 'Bash' ? `Allow this exact command for the next run: ${vis(b.rule)}`
   : `Allow this exact call once: ${vis(b.tool)} with the input above. Other ${vis(b.rule)} calls ask you first.`);
 function actionCards(id, k) {
   const list = v => (Array.isArray(v) ? v.filter(isObj) : []);

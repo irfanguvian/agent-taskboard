@@ -45,7 +45,7 @@ const CHROME = /(^|[^\w.-])chrome-devtools-axi(?![\w-])/;
 // submodule update --remote, a --git-dir <d> before the verb, and any -c / --config-env setting credential.*, url.* or
 // alias.* (a helper, a URL rewrite, an alias that hides fetch). L6: tb-git named any other way than its plain form → denied.
 const TB_GIT_CALL = /^\s*(\/[\w./-]+)\/bin\/tb-git(\s+[\w.:@/+=,~-]+)*\s*$/;
-const GIT_NET = /\bgit(\s+-[Cc]\s+\S+|\s+--[\w-]+((=|\s+)\S+)?)*\s+(fetch|pull|push|clone|remote\s+update|submodule\s+update\b[^;&|\n]*\s--remote)\b|\bgit\b[^;&|\n]*(\s-c\s*|--config-env[=\s]+)['"]?(credential|url|alias)\./i;
+const GIT_NET = /\bgit(\s+-[Cc]\s+\S+|\s+--[\w-]+(?:=\S+|\s+(?!-)\S+)?)*\s+(fetch|pull|push|clone|remote\s+update|submodule\s+update\b[^;&|\n]*\s--remote)\b|\bgit\b[^;&|\n]*(\s-c\s*|--config-env[=\s]+)['"]?(credential|url|alias)\./i;
 const SSH_WHY = 'board runs never use ssh, scp or ssh keys (Irfan); work through the files in your worktree';
 const ENV_WHY = 'board runs read no .env file outside this worktree (Irfan); use only the env files the tag copied in';
 // a word naming a .env file outside the run's dir (cwd: the hook input's)

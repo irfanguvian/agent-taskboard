@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/bash -p
 # The board's git bridge (board-terminal-parity Phase 2 task 5): lib/tbgit.js. A board run calls it by this full path,
 # alone in its Bash call (sandbox.excludedCommands); anywhere else it refuses. Like bin/tb-chrome, node is the board's
 # own: TB_NODE (tbd's process.execPath in the run env), never one found on PATH (security review L1); no PATH lookup here

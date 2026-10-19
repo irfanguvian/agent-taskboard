@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
 # Board-run browser checks: chrome-devtools-axi outside claude's seatbelt (Chrome's singleton socket in the user temp
 # dir can't be made inside it) but under the run's own wall: TB_CHROME_SB, the profile tbd wrote from the run's sandbox
 # block (lib/phase-settings.js chromeProfile: no ssh keys, .env, credentials or other tickets; only node, Chrome and the
