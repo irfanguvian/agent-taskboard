@@ -1466,7 +1466,7 @@ const SENT = { // button role → [label, label while sending, toast title, toas
   handback: ['Hand Back', 'Handing Back…', 'Handed Back', 'The board resumes the same session.'],
   'pass-check': ['Check SHA', 'Checking…', '', ''],
   // board-terminal-parity Phase 4: a Task's Waits-for-you card
-  'task-done': ['Done', 'Closing…', 'Flow Done', 'Your folder is free for the next Task.'],
+  'task-done': ['Done', 'Closing…', 'Flow Done', 'Your folder is free for the next Task. After a Commit and Push it stays on the Task\'s branch (tb/<id>).'],
   'task-send': ['Send', 'Sending…', 'Sent', 'The same session goes on with your message.'],
   'commit-push': ['Commit and Push', 'Sending…', 'Commit Sent', 'The same session commits only the listed files, then pushes.'],
 };

@@ -69,7 +69,7 @@ const settings = (tbd, id, n) => JSON.parse(fs.readFileSync(path.join(tbd.tbHome
 test('Task whole path: plan → approve resumes run 1 session → waits for you with task_result → Send resumes it again → Done; run settings (test 3); switch off: kind task refused with today\'s text', async (t) => {
   const dir = repo();
   const p = fs.realpathSync(dir);
-  const tbd = await boot(t, [result(PLAN), result(DONE), result(DONE)], dir);
+  const tbd = await boot(t, [result(PLAN), result(DONE), result(DONE), result(DONE)], dir, { ...TERMINAL, git_bridge: true });
   const id = await create(tbd);
   await until(() => read(tbd, id).state === 'plan_approval', 30_000, 'plan_approval');
   const s1 = tbd.dump(1);
@@ -104,6 +104,19 @@ test('Task whole path: plan → approve resumes run 1 session → waits for you 
   assert.equal(s3.opts['--resume'], session);
   assert.match(s3.prompt, /^Irfan says:\nalso say hi/);
   await until(() => read(tbd, id).waiting?.reason === 'you' && read(tbd, id).lease?.exit === 'result' && read(tbd, id).round > k.round, 30_000, 'waiting you again');
+  // Commit and Push (code review MED): the Task's own branch made, the same session told to commit exactly its files, the
+  // grant bound to that run's gen at its start
+  const cp = await tbd.api('POST', `/api/tickets/${id}/push`);
+  assert.equal(cp.status, 202, cp.text);
+  assert.deepEqual([cp.json.task, cp.json.branch, cp.json.remote, cp.json.files], [true, `tb/${id}`, 'origin', ['README.md']]);
+  await until(() => tbd.dump(4), 30_000, 'run 4');
+  assert.equal(tbd.dump(4).opts['--resume'], session);
+  assert.match(tbd.dump(4).prompt, new RegExp(`Commit exactly these files to tb/${id}: .*README\\.md`));
+  const g = read(tbd, id);
+  assert.equal(g.push_grant?.gen, g.lease.gen, 'the grant is bound to the run that commits');
+  assert.equal(g.push_grant.branch, `tb/${id}`);
+  assert.equal(git(dir, 'symbolic-ref', '--short', 'HEAD'), `tb/${id}`, 'the folder is on the Task\'s branch, README.md still uncommitted');
+  await until(() => read(tbd, id).waiting?.reason === 'you' && read(tbd, id).round > g.round - 1 && read(tbd, id).lease?.exit === 'result' && read(tbd, id).lease.gen === g.lease.gen, 30_000, 'waiting you after the commit run');
   const c = await tbd.api('POST', `/api/tickets/${id}/close`, {});
   assert.equal(c.status, 200, c.text);
   assert.equal(read(tbd, id).state, 'done');
@@ -174,6 +187,20 @@ test('Task S1 on Done: another branch moved to a commit adding .claude/settings.
   assert.equal(k.waiting?.reason, 'task_changed');
   assert.match(k.waiting.why, /refs\/heads\/other/);
   assert.ok(k.waiting.why.includes(`git update-ref refs/heads/other ${old}`), k.waiting.why);
+});
+
+// code review HIGH: claude makes <cwd>/.claude/.cc-writes on every sandboxed Bash (D-0031); in a plain folder that must
+// not read as planted config, while a real .claude/settings.json still does
+test('plain-folder Task S1: claude\'s own .claude/.cc-writes is not a change; a .claude/settings.json is', async () => {
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(ROOT, 'plain-')));
+  fs.writeFileSync(path.join(dir, 'notes.md'), 'x\n');
+  const task = require('../lib/task');
+  const t = { id: 't_plain1', worktree: dir };
+  const { base } = await task.baseline(t);
+  fs.mkdirSync(path.join(dir, '.claude', '.cc-writes'), { recursive: true });
+  assert.deepEqual(await task.check({ ...t, task: { base } }), []);
+  fs.writeFileSync(path.join(dir, '.claude', 'settings.json'), '{"hooks":{}}');
+  assert.equal((await task.check({ ...t, task: { base } })).length, 1, 'a real .claude config is a change');
 });
 
 test('unclone never removes a folder that is not TB_HOME/worktrees/<id> (a Task\'s worktree is Irfan\'s folder)', async () => {
