@@ -37,7 +37,7 @@ const fsm = require('../lib/fsm');
 const { createMonitor } = require('../lib/monitor');
 const { createRunner } = require('../lib/runner');
 const { RESUME_PROMPT } = require('../lib/spawn');
-const { SCHEMA_PROMPT, liveness } = require('../lib/recovery');
+const { SCHEMA_PROMPT, liveness, continuePrompt } = require('../lib/recovery');
 const sh = require('../lib/sh');
 
 before(() => store.init());
@@ -1102,4 +1102,14 @@ test('M7 QT1 quiet: a wall jump with no OS wake yet (held: its sleep_ms not in) 
   await w.step(15_000);
   await written();
   assert.deepEqual(quietOf(a), []);
+});
+
+// full-access-runs Phase 5 (re-review): Irfan's answers for the asking session, from t.answers rows of the answered round
+// only (R2 is not R21), each line with the question's own id (q), the recommended text for "use recommended"
+test('Phase 5 continuePrompt: the answered round\'s rows only, the question ids as asked, recommended spelled out, you decide', () => {
+  const row = (id, q, answer, more = {}) => ({ id, q, question: `${q}?`, answer, ...more });
+  const t = { continue: { phase: 'review', session: 's', round: 2, gen: 1 }, answers: [
+    row('R1Q1', 'Q1', { pick: 'old' }), row('R2Qkeep', 'keep', { pick: 'yes' }), row('R2Q2', '2', { use: 'recommended' }, { recommended: '20' }),
+    row('R2Q3', 'Q3', { use: 'you_decide' }), row('R2Q4', 'Q4', { text: 'my own' }), row('R21Q1', 'Q1', { pick: 'later' })] };
+  assert.equal(continuePrompt(t), 'Irfan answered:\nkeep keep? → yes\n2 2? → 20\nQ3 Q3? → you decide\nQ4 Q4? → my own\n\nGo on with these answers and return your result.');
 });

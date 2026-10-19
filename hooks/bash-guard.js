@@ -23,7 +23,8 @@
 // Best effort, split on shell operators without parsing quotes (redirects: outside quotes, D-0093): the sandbox is the
 // real wall (D35).
 // Full-access runs (plan full-access-runs Phase 3, TB_FULL_ACCESS=1; Irfan 2026-10-18): no ssh (an ssh tool as the command
-// word of any simple command: sshWord; a .ssh path, GIT_SSH*, sshCommand, ssh://, rsync -e / --rsh ssh anywhere) and no .env
+// word of any simple command, the command of find -exec, rsync -e / --rsh, an interpreter's -c / -e string: sshWord; a .ssh
+// path, GIT_SSH*, sshCommand, ssh:// anywhere) and no .env
 // path outside the run's dir (~, $HOME, an absolute path not under the
 // hook's cwd, or a `..` part). A speed bump: lib/phase-settings.js fullAccessSandbox() is the wall. tb verbs: lib/verbs.js
 // MUTATING (every verb but the reads; a leaf module: nothing heavy loads before io.run's fail-closed path).
@@ -32,9 +33,9 @@ const { run, deny } = require('./io');
 const { MUTATING } = require('../lib/verbs');
 
 const VERBS = MUTATING.join('|');
-// ssh anywhere in the command: a .ssh path, GIT_SSH*, sshCommand, an ssh:// url, rsync's -e ssh / --rsh=ssh (linear: no
-// nested quantifier). The ssh tools as command words: sshWord (`grep -rn "ssh" docs` passes).
-const SSH_PATH = /(^|[^\w.-])\.ssh(?![\w-])|git_ssh|sshcommand|\bssh:\/\/|(^|\s)(-e|--rsh=?)\s*["']?ssh\b/i;
+// ssh anywhere in the command: a .ssh path, GIT_SSH*, sshCommand, an ssh:// url (linear: no nested quantifier). The ssh
+// tools as command words: sshWord (`grep -rn "ssh" docs`, `grep -e ssh docs` pass).
+const SSH_PATH = /(^|[^\w.-])\.ssh(?![\w-])|git_ssh|sshcommand|\bssh:\/\//i;
 const SSH_TOOLS = new Set(['ssh', 'scp', 'sftp', 'ssh-add', 'ssh-agent', 'ssh-keygen']);
 // full-access runs with a browser (TB_CHROME_SB): chrome-devtools-axi only through bin/tb-chrome (its Chrome can't start in the wall)
 const CHROME = /(^|[^\w.-])chrome-devtools-axi(?![\w-])/;
@@ -157,8 +158,8 @@ function cut(cmd) {
 }
 
 // Index of the command word: past keywords, VAR=value (quoted values are one token) and wrappers with their options.
-function head(t) {
-  let i = 0;
+// i: where the simple command starts in t (default its first token).
+function head(t, i = 0) {
   while (i < t.length) {
     const b = base(t[i].text);
     if (/^\w+=/.test(t[i].text)) i++;
@@ -172,27 +173,51 @@ function head(t) {
 }
 
 // More words that run the next command, for the ssh check only (WRAP is head()'s for every rule), with their options that
-// take a separate value: `xargs -I {} ssh {}`, `sudo -u root ssh h`, `watch -n 1 ssh h`, `stdbuf -o L ssh h`.
-const RUNNERS = { xargs: ['-I', '-J', '-L', '-n', '-P', '-R', '-S', '-s', '-E', '-d', '-a'], sudo: ['-u', '-g', '-h', '-p', '-C', '-U', '-r', '-t', '-D', '-R', '-T'],
-  watch: ['-n'], stdbuf: ['-i', '-o', '-e'], setsid: [] };
+// take a separate value: `xargs -I {} ssh {}`, `sudo -u root ssh h`, `watch -n 1 ssh h`, `stdbuf -o L ssh h`. RUNNER_ARGS:
+// plain words before the command (script's typescript file).
+const RUNNERS = {
+  xargs: ['-I', '-J', '-L', '-n', '-P', '-R', '-S', '-s', '-E', '-d', '-a', '--max-args', '--max-procs', '--max-lines', '--max-chars', '--delimiter', '--arg-file', '--process-slot-var'],
+  sudo: ['-u', '-g', '-h', '-p', '-C', '-U', '-r', '-t', '-D', '-R', '-T', '--user', '--group', '--host', '--prompt', '--close-from', '--chdir', '--role', '--type', '--other-user'],
+  watch: ['-n', '--interval'], stdbuf: ['-i', '-o', '-e'], setsid: [], caffeinate: ['-t', '-w'], arch: ['-arch'], script: ['-F', '-t'],
+  parallel: ['-j', '-S', '-P', '-n', '-N', '-L', '-I', '-d', '-a', '-E', '--jobs', '--sshlogin', '--max-args', '--arg-file', '--delimiter'],
+};
+const RUNNER_ARGS = { script: 1 };
+const FIND_EXEC = new Set(['-exec', '-execdir', '-ok', '-okdir']);
+const INTERP = /^(python[\d.]*|perl|ruby|node|osascript)$/; // their -c / -e / --eval string is code: tested for the words
+const SSH_TEXT = /\b(ssh|scp|sftp)\b/i;
+const sshFirst = (s) => SSH_TOOLS.has(base(String(s ?? '').trim().split(/\s/)[0]).toLowerCase()); // `-e "ssh -p 22"`
 // Full access: an ssh tool (by basename, any case: APFS) as the command word of a simple command, past head()'s wrappers
-// and the RUNNERS, also inside `sh -c '…'` and eval (depth ≤ 3). Split + tokens: linear in the command's length.
+// and the RUNNERS, also as find's -exec / -execdir / -ok / -okdir command, rsync's -e / --rsh, in an interpreter's code
+// string, inside `sh -c '…'` and eval (depth ≤ 3). Cut outside quotes (cut(); null: at every SEP, fail closed: a heredoc
+// body is read as commands too), then tokens: linear in the command's length (find: at most 50 -exec words checked, then
+// refused).
 function sshWord(cmd, depth = 0) {
-  return cmd.split(SEP).some((seg, i) => {
+  return (cut(cmd) ?? cmd.split(SEP)).some((seg, i) => {
     if (i % 2) return false;
     const t = tokens(seg);
-    let k = head(t);
-    for (let b; t[k] && Object.hasOwn(RUNNERS, (b = base(t[k].text))); k += head(t.slice(k))) {
-      k++;
-      while (t[k]?.text.startsWith('-')) k += RUNNERS[b].includes(t[k].text) ? 2 : 1;
-    }
-    const b = base(t[k]?.text ?? '').toLowerCase();
-    if (SSH_TOOLS.has(b)) return true;
-    if (depth >= 3) return false;
-    if (b === 'eval') return sshWord(t.slice(k + 1).map((x) => x.text).join(' '), depth + 1);
-    const c = SHELLS.has(b) ? t.findIndex((x, j) => j > k && /^-[a-z]*c[a-z]*$/i.test(x.text)) : -1;
-    return c > 0 && !!t[c + 1] && sshWord(t[c + 1].text, depth + 1);
+    return wordAt(t, head(t), depth);
   });
+}
+// the simple command at index k of tokens t (head() already applied)
+function wordAt(t, k, depth) {
+  for (let b; t[k] && Object.hasOwn(RUNNERS, (b = base(t[k].text))); k = head(t, k)) {
+    k++;
+    while (t[k]?.text.startsWith('-')) k += RUNNERS[b].includes(t[k].text) ? 2 : 1;
+    k += RUNNER_ARGS[b] ?? 0;
+  }
+  const b = base(t[k]?.text ?? '').toLowerCase();
+  if (SSH_TOOLS.has(b)) return true;
+  const rest = t.slice(k + 1);
+  if (b === 'rsync') {
+    return rest.some((x, j) => (/^-[a-z]*e$/i.test(x.text) || x.text === '--rsh' ? sshFirst(rest[j + 1]?.text) : /^(-e|--rsh=)/i.test(x.text) && sshFirst(x.text.replace(/^(-e|--rsh=)/i, ''))));
+  }
+  if (INTERP.test(b)) return rest.some((x, j) => /^(-[a-z]*[ce]|--eval|--print)$/i.test(x.text) && SSH_TEXT.test(rest[j + 1]?.text ?? ''));
+  if (depth >= 3) return false;
+  if (b === 'eval') return sshWord(rest.map((x) => x.text).join(' '), depth + 1);
+  let n = 0;
+  if (b === 'find') return rest.some((x, j) => FIND_EXEC.has(x.text) && (++n > 50 || wordAt(rest, head(rest, j + 1), depth + 1)));
+  const c = SHELLS.has(b) ? rest.findIndex((x) => /^-[a-z]*c[a-z]*$/i.test(x.text)) : -1;
+  return c >= 0 && !!rest[c + 1] && sshWord(rest[c + 1].text, depth + 1);
 }
 
 // Index of `name` as the command word (direct, by path, or via npx/yarn/pnpm/bunx), else -1.

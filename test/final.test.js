@@ -579,3 +579,32 @@ test('Phase 5 final ask (+): the final review writes its docs and asks → clari
   assert.equal(calls().filter((c) => c.ticket === id && c.fn === 'final').length, 1, 'the final checks ran once: no new visit after the answer');
   assert.deepEqual([k(id).final.verdict, typeof k(id).final.sha, k(id).continue], ['pass', 'string', undefined]);
 });
+
+// re-review of 157f080: the instant resume needs the tested HEAD; HEAD moved after the ask → a new visit: the final checks
+// run again at the new HEAD and their start cleans the docs dirs, then the answers still reach the asking session
+test('Phase 5 final ask (−): HEAD moved after the ask → no instant resume: a new visit (2nd gate run, tested_sha = the new HEAD, docs cleaned before the session goes on) → pass', async (t) => {
+  const r = repo();
+  const id = 't_fask02';
+  const b = branch(r, id);
+  const Q = { id: 'Q1', question: 'Ship the old endpoint too?', why: 'two clients still call it', options: ['yes', 'no'], recommended: 'yes' };
+  const scenario = { steps: [WRITE, { result: { structured_output: out({ verdict: 'block', questions: [Q], summary: { ...SUMMARY, verdict: 'blocked' } }) } }],
+    // the resumed session first looks for the doc it wrote before the ask (fake_exec status 1: gone), then writes both again
+    resume_steps: [{ exec: ['/bin/sh', '-c', 'test -e docs/verdicts/v.md'] }, WRITE, { result: { structured_output: out() } }] };
+  const { tbd, k, mem, dumps, calls } = await boot(t, { tickets: { [id]: flow(id, r, b) }, tags: { [`acme/${id}`]: tag(r) }, files: qaFiles(id), scenarios: { [id]: scenario },
+    config: { ...CONFIG, interview: { lavish: false } } });
+  await until(async () => (await mem(id))?.state === 'clarify', 60_000, 'the final review asks');
+  fs.writeFileSync(path.join(b.wt, 'src', 'users.js'), 'module.exports = { byId: (id) => ({ id }), all: () => [] };\n');
+  git(b.wt, 'add', 'src/users.js');
+  git(b.wt, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'moved after the ask');
+  const moved = git(b.wt, 'rev-parse', 'HEAD');
+  const a = await tbd.api('POST', `/api/tickets/${id}/answer`, { answers: { Q1: { pick: 'no' } } });
+  assert.equal(a.status, 200, JSON.stringify(a.json));
+  await until(() => k(id).waiting?.reason === 'close', 60_000, 'new visit → resumed → pass → waiting close');
+  assert.equal(calls().filter((c) => c.ticket === id && c.fn === 'final').length, 2, 'the final checks ran again: a new visit');
+  assert.equal(k(id).final.tested_sha, moved);
+  const runs = dumps().filter((x) => x.env.TB_PHASE === 'final_gate');
+  const resumed = runs.find((x) => x.opts['--resume']);
+  assert.equal(resumed?.opts['--resume'], runs.find((x) => x.opts['--session-id'])?.opts['--session-id'], 'the answers still go to the asking session');
+  const looked = lines(tk(tbd, id, k(id).lease.log)).find((e) => e.subtype === 'fake_exec'); // the resumed run's log (the last lease)
+  assert.equal(looked?.status, 1, 'the new visit\'s gate cleaned the docs before the session went on');
+});

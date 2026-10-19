@@ -154,7 +154,12 @@ test('bash-guard full-access-runs: tb verb list pinned from the CLI registry; ss
     ['timeout 5 ssh host', /ssh/], ['ls | xargs scp', /ssh/], ["sh -c 'ssh host'", /ssh/], ['cd x && FOO=1 sftp host', /ssh/],
     // review of f1814d1: the ssh tools as the command word of any simple command (by path, after keywords and runners, in eval)
     ...['/usr/bin/ssh host', 'echo x | /usr/bin/ssh h', 'cd /tmp && /usr/bin/scp a b:c', 'if ssh h; then :; fi', 'while ssh h; do :; done', '! ssh h', '{ ssh h; }',
-      'rsync -e ssh a b:c', 'rsync -e "ssh -p 22" a b:c', 'eval ssh h', 'eval "ssh h"', 'watch -n 1 ssh h', 'stdbuf -oL ssh h', 'sudo -u root ssh h', 'xargs -I {} ssh {}']
+      'rsync -e ssh a b:c', 'rsync -e "ssh -p 22" a b:c', 'eval ssh h', 'eval "ssh h"', 'watch -n 1 ssh h', 'stdbuf -oL ssh h', 'sudo -u root ssh h', 'xargs -I {} ssh {}',
+      // re-review: find's command, an interpreter's code string, more runners and long options, rsync's -e / --rsh forms
+      'find . -exec ssh {} \\;', 'find . -execdir scp {} h: \\;', 'find . -ok ssh {} \\;', 'find . -okdir sftp {} \\;', "find . -name x -exec sh -c 'ssh $0' {} \\;",
+      `python3 -c "import os; os.system('ssh h')"`, "perl -e 'system(\"sftp h\")'", "ruby -e '`ssh h`'", `node -e "require('child_process').execSync('scp a b:c')"`, `osascript -e 'do shell script "ssh h"'`,
+      'caffeinate -i ssh h', 'script -q /dev/null ssh h', 'arch -x86_64 ssh h', 'parallel -j 2 ssh {} ::: a b', 'xargs --max-args 1 ssh', 'sudo --user x ssh h',
+      'rsync -avze ssh a b:c', 'rsync --rsh=ssh a b:c', 'rsync --rsh "/usr/bin/ssh -i k" a b:c']
       .map((c) => /** @type {[string, RegExp]} */ ([c, /ssh/])),
     ['cat ~/code/other/.env', /\.env file outside/], ['cat /Users/x/app/.env.local', /\.env file outside/], ['cat ../other/.env', /\.env file outside/], ['source $HOME/.env', /\.env file outside/]];
   for (const [cmd, why] of bumps) {
@@ -162,7 +167,7 @@ test('bash-guard full-access-runs: tb verb list pinned from the CLI registry; ss
     assert.equal(guard(cmd, {}, '/wt'), null, `sandbox mode leaves it to the seatbelt: ${cmd}`);
   }
   for (const cmd of ['cat .env.test', 'node --env-file=.env.test app.js', 'cat /wt/.env.test', 'grep -r sshd docs', 'grep -rn ssh docs', 'echo "use ssh keys"',
-    'grep -rn "ssh" docs', 'xargs grep -n ssh']) assert.equal(guard(cmd, full, '/wt'), null, cmd);
+    'grep -rn "ssh" docs', 'xargs grep -n ssh', 'grep -e ssh docs', 'grep -e "ssh" -r .', "find . -name '*ssh*'", 'find . -exec grep -l ssh {} \\;', 'echo "a; ssh h"']) assert.equal(guard(cmd, full, '/wt'), null, cmd);
   // no quadratic scan: a 100 KB heredoc of prose full of wrapper words stays far under io.run's 3 s fail-closed deadline
   const prose = `cat <<'EOF'\n${'time to read the notes and then nice words follow here for a while '.repeat(1600)}\nEOF`;
   const t0 = Date.now();
