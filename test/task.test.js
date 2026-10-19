@@ -42,11 +42,16 @@ function repo() {
   return dir;
 }
 // scenarios: [result per invocation]; terminal: config.terminal override
-async function boot(t, scenarios, dir, terminal = TERMINAL) {
+// bare: Irfan's global safe.bareRepository=explicit in the harness HOME (security review HIGH 1: a Task needs it)
+async function boot(t, scenarios, dir, terminal = TERMINAL, bare = true) {
+  const root = fs.mkdtempSync(path.join(ROOT, 'tbd-'));
+  fs.mkdirSync(path.join(root, 'home'), { recursive: true });
+  if (bare) fs.writeFileSync(path.join(root, 'home', '.gitconfig'), '[safe]\n\tbareRepository = explicit\n');
   const scn = fs.mkdtempSync(path.join(ROOT, 'scn-'));
   scenarios.forEach((s, i) => fs.writeFileSync(path.join(scn, `${i + 1}.json`), JSON.stringify(s)));
   const dumps = fs.mkdtempSync(path.join(ROOT, 'dump-'));
   const tbd = await startTbd({
+    root,
     files: { 'config.json': { ...CONFIG, terminal }, 'tags.json': { acme: { type: 'git', path: dir, base: 'main' } } },
     env: { NODE_OPTIONS: RUN_SPY, TEST_REAL_HANDLERS: '1', FAKE_CLAUDE_SCENARIO_DIR: scn, FAKE_CLAUDE_DUMP_DIR: dumps },
   });
@@ -108,6 +113,12 @@ test('Task whole path: plan → approve resumes run 1 session → waits for you 
   assert.equal(r.status, 400);
   assert.equal(r.json.error, 'kind must be one of code, research, brainstorm, design');
   assert.ok(!(await off.api('GET', '/api/state')).json.system.kinds.includes('task'));
+  // security review HIGH 1: without safe.bareRepository=explicit in Irfan's git config a Task never starts
+  const bare = await boot(t, [], repo(), TERMINAL, false);
+  const id2 = (await bare.api('POST', '/api/flows', { text: 'x', kind: 'task', tag: 'acme' })).json.ticket.id;
+  const a = await bare.api('POST', `/api/tickets/${id2}/assign`);
+  assert.equal(a.status, 409);
+  assert.match(a.json.error, /git config --global safe\.bareRepository explicit/);
 });
 
 test('Task lock: a second Task on the same folder waits folder_busy with no run while the first holds it; it starts once the first is cancelled', async (t) => {

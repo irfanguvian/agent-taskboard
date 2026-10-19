@@ -36,7 +36,7 @@ test('Phase 4 grantOk: another gen, branch or a file outside the grant → card;
   const id = 't_tact01';
   fs.mkdirSync(path.join(home, 'tickets', id), { recursive: true });
   fs.writeFileSync(path.join(home, 'tickets', id, 'ticket.json'), JSON.stringify({
-    id, type: 'ticket', kind: 'task', state: 'working', title: 'x', text: 'x', worktree: repo, git_dir: g, common_dir: g,
+    id, type: 'ticket', kind: 'task', state: 'working', title: 'x', text: 'x', worktree: repo, git_dir: g, common_dir: g, base_sha: head,
     clone: { real: true, config: util.realHash(/** @type {string[]} */ (await util.realConfig(g))), alternates: null },
     push_grant: { remote: 'origin', branch: 'feat', at: '2026-10-19T00:00:00.000Z', gen: 3, head, files: ['cart.js'] },
   }));
