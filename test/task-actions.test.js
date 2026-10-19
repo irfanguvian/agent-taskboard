@@ -52,6 +52,7 @@ test('Phase 4 grantOk: another gen, branch or a file outside the grant → card;
 
   assert.equal(await ask({ gen: 4 }), 'card', 'another run of the ticket');
   assert.equal(await ask({ branch: 'other' }), 'card', 'another branch');
+  git('update-ref', 'refs/remotes/origin/x', more); // security re-check HIGH: a remote-tracking ref the agent wrote is not the remote
   assert.equal(await ask({ sha: more }), 'card', 'the push also carries price.js: not the Task\'s file');
   scan = { ok: false, why: 'leak', msg: 'a denylisted word' };
   assert.deepEqual(await ask({}), { deny: 'leak: a denylisted word' }, 'the scan comes before the grant');
