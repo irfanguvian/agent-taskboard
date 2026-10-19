@@ -341,3 +341,18 @@ test('chromeProfile: the run wall as a seatbelt profile (real sandbox-exec): all
     fs.rmSync(`${os.tmpdir()}/chromesb-${process.pid}`, { force: true });
   }
 });
+
+// board-terminal-parity Phase 2 (run secrets rule): TB_HOME/run-secrets/<run>/ (the folder MCP file and its env) lies
+// under BASE's TB_HOME read deny; tb-chrome's profile, built from the wall, re-opens only the run's own dirs
+test('chromeProfile text: the run-secrets dir stays read-denied (TB_HOME denied, no allow rule re-opens it)', () => {
+  const { fullAccess, chromeProfile } = require('../lib/phase-settings');
+  const s = fullAccess(render('code', 'working', CTX), { phase: 'working', learning: null, wall: true, worktree: CTX.WORKTREE });
+  const sb = chromeProfile(s.sandbox, { home: '/u', cwd: CTX.WORKTREE, node: CTX.TB_NODE, ports: [] }).split('\n');
+  const secret = `${H}/run-secrets/t_abc123-2/mcp.json`;
+  const covers = (l) => [...l.matchAll(/\((subpath|literal|regex) ("(?:[^"\\]|\\.)*")\)/g)].some(([, k, v]) => {
+    const p = JSON.parse(v);
+    return k === 'regex' ? new RegExp(p).test(secret) : k === 'subpath' ? secret.startsWith(`${p}/`) : secret === p;
+  });
+  assert.ok(sb.some((l) => l.startsWith('(deny file-read* ') && l.includes(`(subpath ${JSON.stringify(H)})`)));
+  assert.deepEqual(sb.filter((l) => l.startsWith('(allow file-read') && covers(l)), []);
+});

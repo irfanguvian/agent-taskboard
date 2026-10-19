@@ -396,3 +396,22 @@ test('M5 C9 qa_lock: two qa tickets of one tag (max_concurrent 3) → one runs, 
   assert.ok(at('t_qaw001', 'started_at') < at(first, 'ended_at'), 'acme/web ran beside it');
   assert.deepEqual([k('t_qaj001').waiting?.reason, k('t_qaj001').lease], ['qa_lock', null], 'a final gate job of acme/job holds it all along');
 });
+
+// board-terminal-parity Phase 2 (run secrets rule): a run's folder MCP file lives in TB_HOME/run-secrets/<id>-<n>/ while
+// the run does and goes at its end; the boot sweep removes what no live lease names
+test('run secrets: folder_mcp → TB_HOME/run-secrets/<id>-<n>/mcp.json while the run lives (lease.mcp_stdio 1), removed at its end; a stale dir from before the boot is swept', async (t) => {
+  const home = fs.mkdtempSync(path.join(ROOT, 'home-'));
+  const folder = fs.mkdtempSync(path.join(ROOT, 'folder-'));
+  fs.writeFileSync(path.join(home, '.claude.json'), JSON.stringify({ projects: { [folder]: { mcpServers: { fx: { command: '/bin/echo' } } } } }));
+  const terminal = { bash_all_steps: false, folder_mcp: true, git_bridge: false, auto_mode: false, task_tickets: false, page_tools: false, approve_min: 10 };
+  const tbd = await boot(t, { t_mcps01: { tag: 'acme/f', scenario: { steps: [{ sleep_ms: 2500 }, { result: { structured_output: {} } }] } } }, {
+    config: { terminal }, env: { HOME: home }, files: { 'tags.json': { acme: {}, 'acme/f': { path: folder, type: 'folder' } }, 'run-secrets/t_gone01-3/mcp.json': '{}' },
+  });
+  const file = path.join(tbd.tbHome, 'run-secrets', 't_mcps01-1', 'mcp.json');
+  await until(() => fs.existsSync(file), 15_000, 'run secrets file');
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), { mcpServers: { fx: { command: '/bin/echo' } } });
+  assert.equal((await until(() => read(tbd, 't_mcps01').lease?.pid && read(tbd, 't_mcps01').lease, 15_000, 'lease saved')).mcp_stdio, 1);
+  await until(() => !fs.existsSync(path.join(tbd.tbHome, 'run-secrets', 't_gone01-3')), 10_000, 'stale dir swept');
+  await until(() => read(tbd, 't_mcps01').lease?.exit, 20_000, 'run ended');
+  assert.equal(fs.existsSync(path.dirname(file)), false, 'removed at the run end');
+});

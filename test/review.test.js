@@ -45,15 +45,15 @@ const F = (id, over = {}) => ({ id, severity: 'HIGH', confidence: 'high', where:
 
 // One code ticket per tbd, approved for real (POST approve → setup → working) with one task T1 that changes src/users.js:
 // run 1 = T1's session, then the review runs (sessions[0] = run 2, ...). → tbd, id, base, dumps().
-/** @param {any} t @param {{sessions: any[], ticketOver?: any, extra?: any}} o */
-async function reviewed(t, { sessions, ticketOver = {}, extra = {} }) {
+/** @param {any} t @param {{sessions: any[], ticketOver?: any, extra?: any, config?: any, gitignore?: string}} o (config: over CONFIG) */
+async function reviewed(t, { sessions, ticketOver = {}, extra = {}, config = {}, gitignore = 'node_modules/\n.env.test\n' }) {
   const id = 't_rev001';
   const dir = fs.mkdtempSync(path.join(ROOT, 'repo-'));
   git(dir, 'init', '-q', '-b', 'main');
   fs.writeFileSync(path.join(dir, 'package.json'), '{"scripts": {"test": "node --test"}}\n');
   fs.mkdirSync(path.join(dir, 'src'));
   fs.writeFileSync(path.join(dir, 'src', 'users.js'), 'module.exports = {};\n');
-  fs.writeFileSync(path.join(dir, '.gitignore'), 'node_modules/\n.env.test\n');
+  fs.writeFileSync(path.join(dir, '.gitignore'), gitignore);
   git(dir, 'add', '.');
   git(dir, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'init');
   fs.writeFileSync(path.join(dir, '.env.test'), 'SECRET=1\n');
@@ -69,7 +69,7 @@ async function reviewed(t, { sessions, ticketOver = {}, extra = {} }) {
     allowed_schema_changes: [], allowed_api_changes: [], skills: [], ui: null, children: [], facts: ['src/users.js: the users module'], decisions: [],
   };
   const files = {
-    'config.json': CONFIG,
+    'config.json': { ...CONFIG, ...config },
     'tags.json': { acme: {}, 'acme/api': { type: 'git', path: dir, base: 'main', env_files: ['.env.test'], checks: { unit: 'npm test' } } },
     [`tickets/${id}/ticket.json`]: ticket(id, { state: 'plan_approval', tag: 'acme/api', title: 'users work', base_sha: base, worktree: wt, round: 3, ...ticketOver }),
     [`tickets/${id}/rounds/01-plan.json`]: plan,
@@ -269,4 +269,25 @@ test('Phase 5 ask (−): a question without an id → schema refusal, resumed on
   assert.match(w.dumps()[2].prompt, /\/questions\/0: missing "id"/);
   assert.equal(fs.existsSync(tk(tbd, id, 'rounds', '02-questions.json')), false);
   assert.equal(lines(tk(tbd, id, 'events.jsonl')).some((e) => e.to === 'clarify'), false);
+});
+
+// board-terminal-parity Phase 2 task 2: with bash_all_steps on a full-access review has bare Bash, so tbd checks it left
+// the worktree as it found it (escaped(), as planning). The baseline at the visit's start is not its: here the tag's env
+// file, not gitignored, copied in untracked before working (the working gate lets env files be)
+const BASH_ALL = { terminal: { bash_all_steps: true, folder_mcp: false, git_bridge: false, auto_mode: false, task_tickets: false, page_tools: false, approve_min: 10 } };
+test('Phase 2 task 2: bash_all_steps on, a review that edits a tracked file → Blocked (result not taken, one alert); the untracked env file it started with is not named', async (t) => {
+  const edit = { steps: [{ exec: ['/bin/sh', '-c', 'echo edit >> src/users.js'] }, ...reviewRun({}).steps] };
+  const w = await reviewed(t, { sessions: [edit], config: BASH_ALL, gitignore: 'node_modules/\n' });
+  await until(() => w.k().state === 'blocked' && w.k().lease?.exit, 60_000, 'review → blocked, its lease ended'); // the move and the lease end: two writes
+  const l = w.k().lease;
+  assert.deepEqual([l.phase, l.escaped, l.error], ['review', true, 'worktree changed during review (it is read-only):  M src/users.js']);
+  assert.deepEqual(reviews(w.tbd, w.id), [], 'the result is not taken');
+  assert.deepEqual(lines(path.join(w.tbd.tbHome, 'test-alerts.jsonl')).map((a) => a.title), ['Review changed its worktree']);
+});
+
+test('Phase 2 task 2: bash_all_steps on, a review starting with an untracked leftover (the env file) and changing nothing → not Blocked, its pass taken → qa', async (t) => {
+  const w = await reviewed(t, { sessions: [reviewRun({})], config: BASH_ALL, gitignore: 'node_modules/\n' });
+  await until(() => w.k().state === 'qa', 60_000, 'review → qa');
+  assert.deepEqual([fs.existsSync(path.join(w.wt, '.env.test')), execFileSync('/usr/bin/git', ['-C', w.wt, 'status', '--porcelain'], { encoding: 'utf8', env: gitEnv }), reviews(w.tbd, w.id)],
+    [true, '?? .env.test\n', ['01.json']], 'the leftover was there all along');
 });

@@ -848,6 +848,22 @@ describe('e2e: POST /api/doctor and tb doctor on a real tbd', () => {
     }
   });
 
+  test('board-terminal-parity: terminal.* switches on are listed, never a warn; another changed key still warns alone', async () => {
+    const { DEFAULTS } = realStore;
+    const terminal = { ...DEFAULTS.terminal, page_tools: true };
+    for (const [file, want] of [
+      [{ terminal }, { name: 'config', ok: true, detail: 'no key in config.json differs from a code default; terminal switches: page_tools true' }],
+      [{ terminal, max_concurrent: 2 }, { name: 'config', ok: true, warn: true, detail: '1 key(s) differ from the code defaults: max_concurrent: 2 (default 3)' }],
+    ]) {
+      const own = await startTbd({ files: { 'config.json': file } });
+      try {
+        assert.deepEqual((await own.api('POST', '/api/doctor', {})).json.checks.find((x) => x.name === 'config'), want);
+      } finally {
+        await own.stop();
+      }
+    }
+  });
+
   test('tb doctor: exit 1 and a fail row on API-key login; exit 0 once it is the subscription', async () => {
     const authFile = path.join(t.tbHome, 'auth.json');
     fs.writeFileSync(authFile, JSON.stringify(AUTH.apiKey));

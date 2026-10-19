@@ -608,3 +608,21 @@ test('Phase 5 final ask (−): HEAD moved after the ask → no instant resume: a
   const looked = lines(tk(tbd, id, k(id).lease.log)).find((e) => e.subtype === 'fake_exec'); // the resumed run's log (the last lease)
   assert.equal(looked?.status, 1, 'the new visit\'s gate cleaned the docs before the session went on');
 });
+
+// board-terminal-parity Phase 2 task 2: with bash_all_steps on the final review has bare Bash, so tbd checks it changed
+// nothing but its two docs (escaped(), as planning; lib/docs.js keeps the docs): its docs → taken; an untracked file
+// beside them (which the judge, tracked files only, lets pass) → Blocked, the result not taken
+test('Phase 2 task 2: bash_all_steps on, a final review that writes its two docs → taken (waiting close); one that also leaves notes.txt → Blocked', async (t) => {
+  const r = repo();
+  const [a, b] = ['t_finba1', 't_finba2'];
+  const [ba, bb] = [branch(r, a), branch(r, b)];
+  const NOTES = { exec: ['/bin/sh', '-c', '[ "$TB_PHASE" = final_gate ] || exit 0; echo x > notes.txt'] };
+  const terminal = { bash_all_steps: true, folder_mcp: false, git_bridge: false, auto_mode: false, task_tickets: false, page_tools: false, approve_min: 10 };
+  const { k, alerts } = await boot(t, {
+    tickets: { [a]: flow(a, r, ba), [b]: flow(b, r, bb) }, tags: { [`acme/${a}`]: tag(r), [`acme/${b}`]: tag(r) }, files: { ...qaFiles(a), ...qaFiles(b) },
+    scenarios: { [a]: review(out()), [b]: { steps: [WRITE, NOTES, { result: { structured_output: out() } }] } }, config: { ...CONFIG, terminal },
+  });
+  await until(() => k(a).waiting?.reason === 'close' && k(b).state === 'blocked' && k(b).lease?.exit, 60_000, 'a waiting close, b blocked'); // b: the move and the lease end are two writes
+  assert.deepEqual([k(b).lease.escaped, k(b).lease.error, k(b).final?.verdict], [true, 'worktree changed during the final review (it is read-only): ?? notes.txt', undefined]);
+  assert.deepEqual(alerts().filter((x) => x.message.startsWith(b)).map((x) => x.title), ['Final review changed its worktree']);
+});

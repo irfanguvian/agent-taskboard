@@ -55,9 +55,11 @@ function el(tag, attrs, ...kids) {
     else if (k in e && typeof v !== 'string') e[k] = v;
     else e.setAttribute(k, v === true ? '' : v);
   }
-  e.append(...kids.flat().filter(k => k != null && k !== false));
+  e.append(...nodes(kids));
   return e;
 }
+// children as el() takes them: arrays flattened, null / undefined / false dropped (replaceChildren would print them as text)
+const nodes = (...kids) => kids.flat(Infinity).filter(k => k != null && k !== false);
 // Bidi controls and zero-width chars in agent text: stripped (run errors) or shown as [U+202E] (plan, questions,
 // titles), never applied or hidden, so a file name or test_cmd reads the way it runs.
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/; // lib/runner.js's: a claude session id
@@ -394,14 +396,14 @@ function renderToday() {
   // highlight card or Open Reminders by data-role)
   const a = document.activeElement, inHero = !!a?.closest?.('#hero'), at = [...document.querySelectorAll('#nextUp .rcheck')].indexOf(a);
   const role = a?.closest?.('#highlights, #nextUp') && a.dataset.role;
-  $('#hero').replaceChildren(
+  $('#hero').replaceChildren(...nodes(
     el('h2', { id: 'focus-h', class: 'eyebrow' }, 'Do This Now'),
     el('p', { class: 't-title hero-title' }, top ? top.title : 'Nothing in Now.'),
     top ? metaOf(top) : el('p', { class: 'hero-note' }, 'Pull one up from Next.'),
     top?.note && el('p', { class: 'hero-note' }, top.note),
     el('div', { class: 'hero-acts' }, top
       ? el('button', { type: 'button', class: 'btn', 'data-role': 'focus-done', onclick: () => move(top.id, 'done', 0) }, 'Mark Done')
-      : el('a', { class: 'btn btn-gray', href: '#reminders' }, 'Open Reminders')));
+      : el('a', { class: 'btn btn-gray', href: '#reminders' }, 'Open Reminders'))));
 
   const you = state.flows.filter(f => YOU.has(f.state)).length;
   const late = state.reminders.filter(isLate).length, due = state.reminders.filter(isDue).length;
@@ -1116,7 +1118,7 @@ function renderRunBox() {
   const box = $('#runbox');
   if (!box || !ui.open) return;
   const foc = drawerFocus(), scroll = logScroll();
-  box.replaceChildren(...runBox(ui.open, ui.ticket));
+  box.replaceChildren(...nodes(runBox(ui.open, ui.ticket)));
   refocus(foc);
   rescroll(scroll);
 }

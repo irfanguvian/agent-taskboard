@@ -65,7 +65,7 @@ async function attempt({ config = CONFIG, resume = true, ticket = {}, env = {}, 
     });
     await s.ready;
     await s.done;
-    return { d: JSON.parse(fs.readFileSync(path.join(dump, '1.json'), 'utf8')), ticketDir, dump };
+    return { d: JSON.parse(fs.readFileSync(path.join(dump, '1.json'), 'utf8')), ticketDir, dump, mcp: s.mcp_stdio };
   } catch (err) {
     return { err, ticketDir, dump };
   }
@@ -531,7 +531,7 @@ test('Phase 4 finalModel: final_distinct false (default) keeps the configured fi
 });
 
 // Phase 1 fact (2.1.302 -p skips AGENTS.md beside a CLAUDE.md): full access appends the base commit's AGENTS.md
-test('AGENTS.md beside CLAUDE.md at the base commit: a full-access run gets the base version in its system prompt (not a worktree edit); a sandbox run or a repo without CLAUDE.md does not', async () => {
+test('AGENTS.md beside CLAUDE.md at the base commit: a full-access run gets the base version in its system prompt (a worktree edit: refused as planted); a sandbox run or a repo without CLAUDE.md does not', async () => {
   const mk = (files) => {
     const wt = fs.mkdtempSync(path.join(ROOT, 'wt-'));
     const git = (...a) => execFileSync('/usr/bin/git', ['-C', wt, ...a], { env: GENV, encoding: 'utf8' }).trim();
@@ -543,10 +543,13 @@ test('AGENTS.md beside CLAUDE.md at the base commit: a full-access run gets the 
   };
   const sys = async (ticket) => fs.readFileSync(path.join((await run({ resume: false, ticket })).ticketDir, 'runs/2.system.md'), 'utf8');
   const both = mk({ 'CLAUDE.md': '# repo\n', 'AGENTS.md': 'agents canary OSPREY\n' });
-  fs.writeFileSync(path.join(both.worktree, 'AGENTS.md'), 'planted by an earlier run\n');
   const full = await sys(both);
   assert.ok(full.endsWith('\n# AGENTS.md (repo root, at the base commit)\n\nagents canary OSPREY\n'), full.slice(-200));
-  assert.equal(full.includes('planted by an earlier run'), false);
+  // board-terminal-parity Phase 2 task 1 (contract change; was: a worktree edit runs, the prompt keeping the base
+  // version): an AGENTS.md changed since base is agent-planted config, so the run is refused
+  fs.writeFileSync(path.join(both.worktree, 'AGENTS.md'), 'planted by an earlier run\n');
+  refused(await attempt({ resume: false, ticket: both }), /has AGENTS\.md: agent-planted config/);
+  fs.writeFileSync(path.join(both.worktree, 'AGENTS.md'), 'agents canary OSPREY\n');
   assert.equal((await sys({ ...both, sandbox: true })).includes('# AGENTS.md'), false, 'sandbox: the locked run unchanged');
   assert.equal((await sys(mk({ 'AGENTS.md': 'agents only\n' }))).includes('# AGENTS.md'), false, 'no CLAUDE.md: claude loads AGENTS.md itself');
 });
@@ -621,4 +624,103 @@ test('full-access wall on: seatbelt on (fail closed), ~/.ssh + .env* + ~/.config
   assert.equal(settingsOf(locked.ticketDir).sandbox.filesystem.denyRead.includes('~/.ssh'), false, 'the locked run is not widened');
   assert.equal(fs.readFileSync(path.join(locked.ticketDir, 'runs/2.system.md'), 'utf8').includes('chrome-devtools-axi'), false);
   assert.deepEqual(['excludedCommands' in settingsOf(locked.ticketDir).sandbox, fs.existsSync(path.join(locked.ticketDir, 'runs/2.chrome.sb'))], [false, false]);
+});
+
+// ---- board-terminal-parity Phase 2: containment, ~/.zshenv, Bash in every step, folder MCP ---------------------------
+const TERM = { bash_all_steps: false, folder_mcp: false, git_bridge: false, auto_mode: false, task_tickets: false, page_tools: false, approve_min: 10 };
+const PLAN_CONFIG = { ...CONFIG, max_turns: { ...CONFIG.max_turns, planning: 5 }, liveness: { wall_min: { ...CONFIG.liveness.wall_min, planning: 30 } }, models: { ...CONFIG.models, planning: { model: 'opus' } } };
+const commitAll = (git) => { git('add', '-A'); git('-c', 'user.name=t', '-c', 'user.email=t@example.invalid', 'commit', '-qm', 'base'); return git('rev-parse', 'HEAD'); };
+
+test('Phase 2 task 1: .mcp.json + AGENTS.md Edit- and write-denied at any depth, ~/.claude.json* + ~/.zshenv read-denied (wall + Read rule); S1 refuses an untracked .mcp.json (a changed AGENTS.md: the AGENTS.md test), a tracked one at base runs', async () => {
+  const f = fullFixture();
+  const wt = fs.mkdtempSync(path.join(ROOT, 'wt-'));
+  const git = (...a) => execFileSync('/usr/bin/git', ['-C', wt, ...a], { env: GENV, encoding: 'utf8' }).trim();
+  git('init', '-q');
+  fs.writeFileSync(path.join(wt, '.mcp.json'), '{"mcpServers":{}}\n');
+  fs.writeFileSync(path.join(wt, 'AGENTS.md'), '# agents\n');
+  const ticket = { worktree: wt, base_sha: commitAll(git) };
+  const opts = { resume: false, config: { ...CONFIG, full_access_wall: true }, ticket, tag: { path: f.tag }, env: { HOME: f.home } };
+  const s = settingsOf((await run(opts)).ticketDir); // tracked at base: runs
+  for (const n of ['.mcp.json', 'AGENTS.md']) {
+    for (const p of [`${wt}/${n}`, `${wt}/**/${n}`, `${f.tag}/**/${n}`]) assert.ok(s.permissions.deny.includes(`Edit(/${p})`) && s.sandbox.filesystem.denyWrite.includes(p), p);
+  }
+  for (const p of ['~/.claude.json*', '~/.zshenv']) assert.ok(s.sandbox.filesystem.denyRead.includes(p) && s.permissions.deny.includes(`Read(${p})`), p);
+  fs.mkdirSync(path.join(wt, 'sub'));
+  fs.writeFileSync(path.join(wt, 'sub', '.mcp.json'), '{"mcpServers":{"x":{"command":"/bin/sh"}}}\n');
+  refused(await attempt(opts), /has sub\/\.mcp\.json: agent-planted config/);
+});
+
+test('Phase 2 task 1b: ~/.zshenv exports reach a full-access run as runs/<n>.zdot/.zshenv (ZDOTDIR) minus secret-like names, PATH merged with the run\'s bin first; a locked run gets none', async () => {
+  const f = fullFixture();
+  fs.writeFileSync(path.join(f.home, '.zshenv'), 'export FOO_TOKEN=x\nexport MYTOOL_HOME=/y\nexport QUOTE_HOME="it\'s"\nexport PATH="/opt/x:$PATH"\n');
+  const { d, ticketDir } = await run({ resume: false, tag: { path: f.tag }, env: { HOME: f.home } });
+  const zdot = path.join(ticketDir, 'runs/2.zdot');
+  assert.equal(d.env.ZDOTDIR, zdot);
+  const bin = path.join(__dirname, '..', 'bin');
+  const want = ["export MYTOOL_HOME='/y'", "export QUOTE_HOME='it'\\''s'", `export PATH='${[bin, '/opt/x', ...process.env.PATH.split(':').filter((p) => p !== bin)].join(':')}'`];
+  assert.deepEqual(fs.readFileSync(path.join(zdot, '.zshenv'), 'utf8').split('\n').filter(Boolean).sort(), want.sort());
+  assert.equal(fs.statSync(path.join(zdot, '.zshenv')).mode & 0o777, 0o600);
+  // what the run's zsh reads (ZDOTDIR): the value comes back whole
+  assert.equal(execFileSync('/bin/zsh', ['-c', 'printf %s "$QUOTE_HOME"'], { env: { PATH: '/usr/bin:/bin', HOME: f.home, ZDOTDIR: zdot }, encoding: 'utf8' }), "it's");
+  const locked = await run({ resume: false, ticket: { sandbox: true }, tag: { path: f.tag }, env: { HOME: f.home } });
+  assert.deepEqual(['ZDOTDIR' in locked.d.env, fs.existsSync(path.join(locked.ticketDir, 'runs/2.zdot'))], [false, false]);
+});
+
+test('Phase 2 task 2: bash_all_steps on → a read-only phase gets bare Bash (no bash / node / npx deny) and, in a plain folder, the board note says tbd cannot check it; off → today\'s', async () => {
+  const f = fullFixture();
+  const tag = { path: f.tag, type: 'folder' };
+  const on = await run({ phase: 'planning', config: { ...PLAN_CONFIG, terminal: { ...TERM, bash_all_steps: true } }, resume: false, tag, env: { HOME: f.home } });
+  const s = settingsOf(on.ticketDir);
+  assert.ok(s.permissions.allow.includes('Bash'));
+  for (const r of ['Bash(bash:*)', 'Bash(node:*)', 'Bash(npx:*)']) assert.equal(s.permissions.deny.includes(r), false, r);
+  const note = /\nthis step only reads: tbd cannot check a plain folder for changes, so change no file in it\n/;
+  assert.match(fs.readFileSync(path.join(on.ticketDir, 'runs/2.system.md'), 'utf8'), note);
+  const off = await run({ phase: 'planning', config: { ...PLAN_CONFIG, terminal: TERM }, resume: false, tag, env: { HOME: f.home } });
+  assert.deepEqual([settingsOf(off.ticketDir).permissions.allow.includes('Bash'), settingsOf(off.ticketDir).permissions.deny.includes('Bash(node:*)')], [false, true]);
+  assert.doesNotMatch(fs.readFileSync(path.join(off.ticketDir, 'runs/2.system.md'), 'utf8'), note);
+});
+
+test('Phase 2 task 3: folder_mcp → the folder\'s servers (local scope + enabled .mcp.json at base_sha, repo keys only once trusted) in TB_HOME/run-secrets/<id>-<n>/mcp.json (0600) via --mcp-config, mcp__<normalized> rules, the repo + allowedTools lists filtered into bare-Bash phases only; off → no file, allow unchanged', async () => {
+  const f = fullFixture();
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(ROOT, 'mcp-')));
+  const repo = path.join(root, 'repo'); // the tag's main checkout
+  const wt = path.join(root, 'wt');
+  const git = (...a) => execFileSync('/usr/bin/git', ['-C', repo, ...a], { env: GENV, encoding: 'utf8' }).trim();
+  fs.mkdirSync(path.join(repo, '.claude'), { recursive: true });
+  git('init', '-q', '-b', 'main');
+  const srv = (x) => ({ command: '/bin/echo', args: [x] });
+  fs.writeFileSync(path.join(repo, '.mcp.json'), JSON.stringify({ mcpServers: { 'srv-a': srv('a'), 'srv-b': srv('b') } }));
+  fs.writeFileSync(path.join(repo, '.claude', 'settings.json'), JSON.stringify({ enabledMcpjsonServers: ['srv-a', 'srv-b', 'srv-c'], permissions: { allow: ['Bash(npm run x)', 'Bash', 'Edit(//elsewhere/**)'] } }));
+  const base_sha = commitAll(git);
+  fs.writeFileSync(path.join(repo, '.mcp.json'), JSON.stringify({ mcpServers: { 'srv-a': srv('a'), 'srv-b': srv('b'), 'srv-c': srv('c') } })); // not committed
+  fs.writeFileSync(path.join(repo, '.claude', 'settings.local.json'), JSON.stringify({ permissions: { allow: ['Bash(npm run y)', 'WebFetch(domain:example.com)'] } }));
+  const common_dir = path.join(repo, '.git');
+  const ticket = { worktree: wt, base_sha, common_dir, ...(await require('../lib/util').cloneAt(common_dir, wt, base_sha)) };
+  const entry = (trusted) => fs.writeFileSync(path.join(f.home, '.claude.json'), JSON.stringify({ projects: { [repo]: {
+    hasTrustDialogAccepted: trusted, disabledMcpjsonServers: ['srv-b'], allowedTools: ['Read(x)', 'mcp__srv__t', 'mcp__*'],
+    mcpServers: { 'local.srv': srv('l'), web: { type: 'http', url: 'https://example.invalid/mcp' } } } } }));
+  entry(true);
+  const tag = { path: repo };
+  const config = { ...CONFIG, terminal: { ...TERM, folder_mcp: true } };
+  const secretsOf = (ticketDir) => path.join(path.dirname(path.dirname(ticketDir)), 'run-secrets', 't_spawn1-2');
+  const on = await run({ resume: false, config, ticket, tag, env: { HOME: f.home } });
+  const file = path.join(secretsOf(on.ticketDir), 'mcp.json');
+  assert.equal(on.d.opts['--mcp-config'], file);
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')).mcpServers, { 'local.srv': srv('l'), web: { type: 'http', url: 'https://example.invalid/mcp' }, 'srv-a': srv('a') });
+  assert.deepEqual([fs.statSync(file).mode & 0o777, fs.statSync(path.dirname(file)).mode & 0o777, on.mcp], [0o600, 0o700, 2], 'two stdio servers (admission)');
+  const allow = settingsOf(on.ticketDir).permissions.allow;
+  for (const r of ['mcp__local_srv', 'mcp__web', 'mcp__srv-a', 'mcp__srv__t', 'Bash(npm run x)', 'Bash(npm run y)']) assert.ok(allow.includes(r), r);
+  for (const r of ['mcp__srv-b', 'mcp__srv-c', 'mcp__*', 'Edit(//elsewhere/**)', 'Read(x)', 'WebFetch(domain:example.com)']) assert.equal(allow.includes(r), false, r);
+  assert.equal(allow.filter((r) => r === 'Bash').length, 1);
+  // a read-only phase (bash_all_steps off): the server rules, none of the imports
+  const plan = settingsOf((await run({ phase: 'planning', resume: false, config: { ...PLAN_CONFIG, terminal: config.terminal }, ticket, tag, env: { HOME: f.home } })).ticketDir).permissions.allow;
+  assert.deepEqual([plan.includes('mcp__srv-a'), plan.includes('Bash(npm run x)'), plan.includes('mcp__srv__t')], [true, false, false]);
+  // not trusted: the repo's enable keys do not count (srv-a was enabled only there)
+  entry(false);
+  const untrusted = await run({ resume: false, config, ticket, tag, env: { HOME: f.home } });
+  assert.deepEqual(Object.keys(JSON.parse(fs.readFileSync(path.join(secretsOf(untrusted.ticketDir), 'mcp.json'), 'utf8')).mcpServers).sort(), ['local.srv', 'web']);
+  // switch off: no file, the phase's own mcp.json, no mcp__ rule
+  const off = await run({ resume: false, config: { ...CONFIG, terminal: TERM }, ticket, tag, env: { HOME: f.home } });
+  assert.deepEqual([fs.existsSync(secretsOf(off.ticketDir)), off.d.opts['--mcp-config'], settingsOf(off.ticketDir).permissions.allow.some((r) => r.startsWith('mcp__') || r === 'Bash(npm run x)')],
+    [false, path.join(PHASES, 'code/working/mcp.json'), false]);
 });
