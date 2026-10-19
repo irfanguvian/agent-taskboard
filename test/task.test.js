@@ -77,7 +77,7 @@ test('Task whole path: plan → approve resumes run 1 session → waits for you 
   const session = s1.opts['--session-id'];
   fs.writeFileSync(path.join(dir, 'README.md'), 'hello\nworld\n'); // the agent's edit (fake claude edits nothing)
   assert.equal((await tbd.api('POST', `/api/tickets/${id}/approve`, {})).status, 202);
-  await until(() => read(tbd, id).waiting?.reason === 'you', 30_000, 'waiting you');
+  await until(() => read(tbd, id).waiting?.reason === 'you' && read(tbd, id).lease?.exit === 'result', 30_000, 'waiting you, run ended');
   const s2 = tbd.dump(2);
   assert.equal(s2.opts['--resume'], session);
   assert.match(s2.prompt, /Irfan approved your plan/);
@@ -171,7 +171,7 @@ test('Task S1 on Done: another branch moved to a commit adding .claude/settings.
   const id = await create(tbd);
   await until(() => read(tbd, id).state === 'plan_approval', 30_000, 'plan_approval');
   assert.equal((await tbd.api('POST', `/api/tickets/${id}/approve`, {})).status, 202);
-  await until(() => read(tbd, id).waiting?.reason === 'you', 30_000, 'waiting you');
+  await until(() => read(tbd, id).waiting?.reason === 'you' && read(tbd, id).lease?.exit === 'result', 30_000, 'waiting you, run ended');
   const old = git(dir, 'rev-parse', 'other');
   // a commit on `other` without touching the work tree (a temp index)
   const idx = path.join(ROOT, `idx-${id}`);
@@ -192,6 +192,7 @@ test('Task S1 on Done: another branch moved to a commit adding .claude/settings.
 // code review HIGH: claude makes <cwd>/.claude/.cc-writes on every sandboxed Bash (D-0031); in a plain folder that must
 // not read as planted config, while a real .claude/settings.json still does
 test('plain-folder Task S1: claude\'s own .claude/.cc-writes is not a change; a .claude/settings.json is', async () => {
+  process.env.TB_HOME = fs.mkdtempSync(path.join(ROOT, 'tbhome-')); // never the real ~/.taskboard
   const dir = fs.realpathSync(fs.mkdtempSync(path.join(ROOT, 'plain-')));
   fs.writeFileSync(path.join(dir, 'notes.md'), 'x\n');
   const task = require('../lib/task');

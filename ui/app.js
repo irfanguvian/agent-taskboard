@@ -993,7 +993,7 @@ function drawerBody(f, ticket, error) {
         st === 'clarify' && (k.clarify_origin?.phase === 'working' && k.kind !== 'task' ? askPanel(f.id, k, ui.ask) // Phase 4: a Task's asks are planning rounds
           : r?.kind === 'questions' && Array.isArray(r.questions) ? clarifyForm(f.id, r) : el('p', { class: 'hint' }, 'No open questions found.')),
         st === 'plan_approval' && (plan || el('p', { class: 'hint' }, 'No plan found.')),
-        k.kind === 'task' && st === 'working' && k.waiting?.reason === 'you' && youCard(f.id, k),
+        k.kind === 'task' && st === 'working' && k.waiting?.reason === 'you' && !!k.lease?.exit && youCard(f.id, k), // the run's end saved: Done never meets a live run
         ['review', 'qa', 'final_gate'].includes(st) && stageActs(f.id, k),
         pushView(f.id, k, tg),
       ],
