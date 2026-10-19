@@ -88,6 +88,15 @@ test('AC6 plan_approval, blocked, waiting manual / needs_scope / memory (D-0079)
   assert.equal(s.sounds(), 5);
 });
 
+// board-terminal-parity Phase 2 task 4: an Approve card and an auto-mode block wait on Irfan (ticket.waiting): a ping each
+test('Phase 2 task 4: waiting approve / blocked_action each ping at once', async (t) => {
+  const s = setup(t, '2026-10-07T03:00:00Z');
+  const k = await s.flow('Ticket A');
+  await move(k.id, { state: 'working', waiting: { reason: 'approve', since: '2026-10-07T03:00:00Z' } });
+  await move(k.id, { waiting: { reason: 'blocked_action', since: '2026-10-07T03:00:00Z' } });
+  assert.deepEqual([s.banners().map((b) => b.title), s.sounds()], [['Approve an action', 'Auto mode blocked an action'], 2]);
+});
+
 // D-0079. ps rss KB: Chrome 1.0 + 0.4 GB (main + a helper app inside its bundle), claude 0.8, Spotify 0.2, trustd 0.1.
 const PS = [
   '1048576 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome',

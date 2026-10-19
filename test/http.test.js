@@ -203,6 +203,15 @@ test('C14 C13 POST /api/tickets/:id/push | close: cookie without X-TB-CSRF → 4
   }
 });
 
+// board-terminal-parity Phase 2 task 4: with terminal.auto_mode and git_bridge off (the code default) the card routes are
+// not there (404), whatever the ticket
+test('Phase 2 task 4: switches off → POST …/approvals/:aid and …/blocked/:bid/allow answer 404', async () => {
+  for (const p of ['/api/tickets/t_zzzzzz/approvals/a_000001', '/api/tickets/t_zzzzzz/blocked/b_000001/allow']) {
+    const r = await tbd.api('POST', p, p.includes('approvals') ? { yes: true } : undefined);
+    assert.deepEqual([r.status, /are off|is off/.test(r.json.error)], [404, true], p);
+  }
+});
+
 // full-access-runs Phase 8: Settings (GET / POST /api/config) and the Sandbox switch; a cookie caller needs X-TB-CSRF.
 // No phase built (empty TB_PHASES_DIR): the working ticket only waits, no run starts.
 test('Phase 8 POST /api/config: cookie without X-TB-CSRF → 403, with it → 200 and GET reflects it; claude_bin → 400; POST …/sandbox: on from the page in backlog, off from the page → 200 (board-terminal-parity 6.3), off with the token → 200, a working ticket → 409 (page too); Phase 9 hold with no run → 409, note / hold / handback CSRF, note limits (10 000 chars, 10 waiting, not on a done flow)', async (t) => {

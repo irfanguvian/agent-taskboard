@@ -39,6 +39,11 @@ const SSH_PATH = /(^|[^\w.-])\.ssh(?![\w-])|git_ssh|sshcommand|\bssh:\/\//i;
 const SSH_TOOLS = new Set(['ssh', 'scp', 'sftp', 'ssh-add', 'ssh-agent', 'ssh-keygen']);
 // full-access runs with a browser (TB_CHROME_SB): chrome-devtools-axi only through bin/tb-chrome (its Chrome can't start in the wall)
 const CHROME = /(^|[^\w.-])chrome-devtools-axi(?![\w-])/;
+// board-terminal-parity Phase 2 task 5 (TB_GIT_RUN: the git bridge is on): a plain `<TB_CODE>/bin/tb-git <words>` call (no
+// shell operator, quote or expansion: excludedCommands runs exactly it outside the wall, and tb-git checks every word)
+// passes as is; git's network verbs any other way have no keys: pointed at tb-git
+const TB_GIT_CALL = /^\s*(\/[\w./-]+)\/bin\/tb-git(\s+[\w.:@/+=,~-]+)*\s*$/;
+const GIT_NET = /\bgit(\s+-[Cc]\s+\S+|\s+--[\w-]+(=\S+)?)*\s+(fetch|pull|push|clone)\b/;
 const SSH_WHY = 'board runs never use ssh, scp or ssh keys (Irfan); work through the files in your worktree';
 const ENV_WHY = 'board runs read no .env file outside this worktree (Irfan); use only the env files the tag copied in';
 // a word naming a .env file outside the run's dir (cwd: the hook input's)
@@ -392,6 +397,8 @@ function heavyList(env) {
 
 // → {deny: reason} | {command: rewritten} | null (allow unchanged). cwd: the hook input's (full access: .env rule)
 function guard(command, env = process.env, cwd = '') {
+  if (env.TB_GIT_RUN && env.TB_CODE && TB_GIT_CALL.exec(command)?.[1] === env.TB_CODE) return null;
+  if (env.TB_GIT_RUN && GIT_NET.test(command)) return { deny: `bash-guard: git fetch, pull, push and clone go through ${env.TB_CODE ?? '<board>'}/bin/tb-git <verb> …, called by its full path, alone in its Bash call (no &&, ;, |, $(...), redirects); plain git has no keys here` };
   for (const [re, why] of rules(env)) if (re.test(command)) return { deny: `bash-guard: ${why}` };
   if (env.TB_FULL_ACCESS === '1' && (SSH_PATH.test(command) || sshWord(command))) return { deny: `bash-guard: ${SSH_WHY}` };
   if (env.TB_CHROME_SB && CHROME.test(command)) return { deny: `bash-guard: use ${env.TB_CODE ?? '<board>'}/bin/tb-chrome <command> by its full path, alone in its Bash call (no &&, ;, |, $(...), redirects): npx chrome-devtools-axi cannot start Chrome inside the sandbox wall` };

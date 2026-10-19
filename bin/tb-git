@@ -1,0 +1,5 @@
+#!/usr/bin/env node
+'use strict';
+// The board's git bridge (board-terminal-parity Phase 2 task 5): lib/tbgit.js. A board run calls it by this full path,
+// alone in its Bash call (sandbox.excludedCommands); anywhere else it refuses.
+require('../lib/tbgit').main(process.argv.slice(2));

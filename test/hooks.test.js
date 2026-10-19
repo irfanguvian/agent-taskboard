@@ -141,8 +141,9 @@ test('bash-guard full-access-runs: tb verb list pinned from the CLI registry; ss
   assert.deepEqual([...VERBS].sort(), /^commands: (.*)$/m.exec(help)?.[1].split(', ').sort());
   assert.doesNotMatch(fs.readFileSync(path.join(REPO, 'lib', 'verbs.js'), 'utf8'), /require\(/);
   assert.deepEqual([...fs.readFileSync(path.join(HOOKS, 'bash-guard.js'), 'utf8').matchAll(/require\('([^']+)'\)/g)].map((m) => m[1]), ['node:path', './io', '../lib/verbs']);
-  // full-access-runs Phase 8 + 9 (contract change: the list gains config, handback, hold, note, set-sandbox)
-  assert.deepEqual([...MUTATING].sort(), ['add', 'answer', 'approve', 'assign', 'cancel', 'close', 'config', 'doctor', 'done', 'eval', 'gc', 'handback', 'hold', 'lavish',
+  // full-access-runs Phase 8 + 9 (contract change: the list gains config, handback, hold, note, set-sandbox);
+  // board-terminal-parity Phase 2 task 4 (contract change: + allow-blocked, approve-action)
+  assert.deepEqual([...MUTATING].sort(), ['add', 'allow-blocked', 'answer', 'approve', 'approve-action', 'assign', 'cancel', 'close', 'config', 'doctor', 'done', 'eval', 'gc', 'handback', 'hold', 'lavish',
     'move', 'new', 'note', 'notify-test', 'open', 'pass', 'promote', 'push', 'reject', 'restart', 'resume', 'rework', 'rm', 'scope', 'set', 'set-sandbox', 'tag']);
   for (const cmd of ['tb push t_x', 'tb close t_x', 'tb rework t_x --feedback y', 'tb lavish t_x', 'tb eval golden --real --yes', 'tb open --print', 'tb note t_x hi', 'tb set-sandbox t_x off']) {
     assert.match(guard(cmd, {})?.deny ?? 'allowed', /not agent commands/, cmd);
@@ -183,6 +184,17 @@ test('bash-guard full-access-runs: tb verb list pinned from the CLI registry; ss
   assert.equal(guard('npx -y chrome-devtools-axi snapshot', full, '/wt'), null, 'no browser in this run: nothing to point at');
   assert.match(guard('rtk git log --output=/tmp/x', { TB_PHASE: 'review' })?.deny ?? 'allowed', /review only reads/);
   assert.equal(guard('rtk git log -3', { TB_PHASE: 'review' }), null);
+});
+
+// board-terminal-parity Phase 2 task 5 (TB_GIT_RUN set: the git bridge on): a plain <TB_CODE>/bin/tb-git call passes as
+// is (the git push rule would deny its words); compound, another path, or plain git's network verbs → pointed at tb-git
+test('bash-guard git bridge: a plain tb-git call by its full path passes; compound, another tb-git path or plain git fetch / push → denied, naming tb-git; bridge off → today\'s push rule', () => {
+  const env = { TB_GIT_RUN: '/h/run-secrets/t_x-1/git.json', TB_CODE: '/code/tb', TB_FULL_ACCESS: '1' };
+  for (const c of ['/code/tb/bin/tb-git push origin feat', '/code/tb/bin/tb-git clone git@github.com:a/b.git sub']) assert.equal(guard(c, env), null, c);
+  for (const c of ['/code/tb/bin/tb-git push origin feat; git push origin main', 'cd x && /code/tb/bin/tb-git fetch', '/tmp/bin/tb-git push origin feat', 'git push origin feat', 'git -C . fetch origin']) {
+    assert.match(guard(c, env)?.deny ?? 'allowed', /go through \/code\/tb\/bin\/tb-git/, c);
+  }
+  assert.match(guard('/code/tb/bin/tb-git push origin feat', { TB_CODE: '/code/tb' })?.deny ?? 'allowed', /agents never push/);
 });
 
 test('bash-guard hook I/O: deny and rewrite JSON per hooks docs, other tool_input fields kept, bad input allowed', async () => {

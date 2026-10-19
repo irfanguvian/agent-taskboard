@@ -46,8 +46,8 @@ const CONFIG = {
 };
 
 // One spawn.start into a fresh temp dir; err set when it refused (then nothing may have been spawned).
-async function attempt({ config = CONFIG, resume = true, ticket = {}, env = {}, files = {}, phase = 'working', tag = undefined } = {}) {
-  const dir = fs.mkdtempSync(path.join(ROOT, 'run-'));
+async function attempt({ config = CONFIG, resume = true, ticket = {}, env = {}, files = {}, phase = 'working', tag = undefined, root = ROOT } = {}) {
+  const dir = fs.mkdtempSync(path.join(root, 'run-'));
   const tbHome = path.join(dir, 'tbhome');
   const ticketDir = path.join(tbHome, 'tickets', 't_spawn1');
   const dump = path.join(dir, 'dump');
@@ -644,7 +644,7 @@ test('Phase 2 task 1: .mcp.json + AGENTS.md Edit- and write-denied at any depth,
   for (const n of ['.mcp.json', 'AGENTS.md']) {
     for (const p of [`${wt}/${n}`, `${wt}/**/${n}`, `${f.tag}/**/${n}`]) assert.ok(s.permissions.deny.includes(`Edit(/${p})`) && s.sandbox.filesystem.denyWrite.includes(p), p);
   }
-  for (const p of ['~/.claude.json*', '~/.zshenv']) assert.ok(s.sandbox.filesystem.denyRead.includes(p) && s.permissions.deny.includes(`Read(${p})`), p);
+  for (const p of ['~/.claude.json*', '~/.zshenv', '~/.zshrc', '~/.zprofile', '~/.zlogin']) assert.ok(s.sandbox.filesystem.denyRead.includes(p) && s.permissions.deny.includes(`Read(${p})`), p);
   fs.mkdirSync(path.join(wt, 'sub'));
   fs.writeFileSync(path.join(wt, 'sub', '.mcp.json'), '{"mcpServers":{"x":{"command":"/bin/sh"}}}\n');
   refused(await attempt(opts), /has sub\/\.mcp\.json: agent-planted config/);
@@ -652,7 +652,7 @@ test('Phase 2 task 1: .mcp.json + AGENTS.md Edit- and write-denied at any depth,
 
 test('Phase 2 task 1b: ~/.zshenv exports reach a full-access run as runs/<n>.zdot/.zshenv (ZDOTDIR) minus secret-like names, PATH merged with the run\'s bin first; a locked run gets none', async () => {
   const f = fullFixture();
-  fs.writeFileSync(path.join(f.home, '.zshenv'), 'export FOO_TOKEN=x\nexport MYTOOL_HOME=/y\nexport QUOTE_HOME="it\'s"\nexport PATH="/opt/x:$PATH"\n');
+  fs.writeFileSync(path.join(f.home, '.zshenv'), 'export FOO_TOKEN=x\nexport GH_PAT=p\nexport DB_MAIN="postgres://u:pw@h/db"\nexport MYTOOL_HOME=/y\nexport QUOTE_HOME="it\'s"\nexport PATH="/opt/x:$PATH"\n');
   const { d, ticketDir } = await run({ resume: false, tag: { path: f.tag }, env: { HOME: f.home } });
   const zdot = path.join(ticketDir, 'runs/2.zdot');
   assert.equal(d.env.ZDOTDIR, zdot);
@@ -723,4 +723,29 @@ test('Phase 2 task 3: folder_mcp → the folder\'s servers (local scope + enable
   const off = await run({ resume: false, config: { ...CONFIG, terminal: TERM }, ticket, tag, env: { HOME: f.home } });
   assert.deepEqual([fs.existsSync(secretsOf(off.ticketDir)), off.d.opts['--mcp-config'], settingsOf(off.ticketDir).permissions.allow.some((r) => r.startsWith('mcp__') || r === 'Bash(npm run x)')],
     [false, path.join(PHASES, 'code/working/mcp.json'), false]);
+});
+
+// board-terminal-parity Phase 2 task 4a: auto_mode on (full access) → auto mode, host prompts through the approve tool,
+// the ask list, server `tb` = nc on the run's own socket (absolute, bound before the spawn), claude's MCP idle timeout
+// past approve_min; switch off or a locked run → today's dontAsk line
+test('Phase 2 task 4a: auto_mode → --permission-mode auto --permission-prompts host --permission-prompt-tool mcp__tb__approve, permissions.ask = the ask list, mcp server tb = /usr/bin/nc -U <run-secrets>/a.sock (bound), MCP_TOOL_TIMEOUT; off or a locked run → dontAsk, none', async () => {
+  const f = fullFixture();
+  const approvals = require('../lib/approvals');
+  const config = { ...CONFIG, terminal: { ...TERM, auto_mode: true, approve_min: 7 } };
+  const short = fs.mkdtempSync('/tmp/s'); // the socket path stays under macOS's 104 bytes (os.tmpdir() + this harness's dirs: over)
+  after(() => fs.rmSync(short, { recursive: true, force: true }));
+  const on = await run({ resume: false, config, tag: { path: f.tag }, env: { HOME: f.home }, root: short });
+  assert.deepEqual([on.d.opts['--permission-mode'], on.d.opts['--permission-prompts'], on.d.opts['--permission-prompt-tool']], ['auto', 'host', 'mcp__tb__approve']);
+  assert.deepEqual(settingsOf(on.ticketDir).permissions.ask, approvals.askRules());
+  const dir = path.join(path.dirname(path.dirname(on.ticketDir)), 'run-secrets', 't_spawn1-2');
+  assert.equal(on.d.opts['--mcp-config'], path.join(dir, 'mcp.json'));
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(dir, 'mcp.json'), 'utf8')).mcpServers.tb, { type: 'stdio', command: '/usr/bin/nc', args: ['-U', path.join(dir, 'a.sock')] });
+  assert.ok(fs.statSync(path.join(dir, 'a.sock')).isSocket(), 'bound before the spawn');
+  approvals.close('t_spawn1-2'); // the runner's run end
+  assert.equal(on.d.env.MCP_TOOL_TIMEOUT, String(8 * 60_000));
+  for (const o of [{ config: { ...CONFIG, terminal: TERM } }, { config, ticket: { sandbox: true } }]) {
+    const r = await run({ resume: false, tag: { path: f.tag }, env: { HOME: f.home }, ...o });
+    assert.deepEqual([r.d.opts['--permission-mode'], r.d.opts['--permission-prompts'], r.d.opts['--permission-prompt-tool'], settingsOf(r.ticketDir).permissions.ask, r.d.env.MCP_TOOL_TIMEOUT],
+      ['dontAsk', 'none', undefined, undefined, undefined], JSON.stringify(o.ticket ?? 'off'));
+  }
 });

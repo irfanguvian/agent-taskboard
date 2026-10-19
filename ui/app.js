@@ -14,6 +14,8 @@ const FLOW_COLS = [
   ['done', 'Done'], ['blocked', 'Blocked'],
 ];
 const YOU = new Set(['clarify', 'plan_approval', 'blocked']); // states that wait on Irfan
+// board-terminal-parity Phase 2 task 4: a run's Approve card or auto mode's block waits on him too (ticket.waiting)
+const needsYou = f => YOU.has(f.state) || f.waiting?.reason === 'approve' || f.waiting?.reason === 'blocked_action';
 const AGENT = ['planning', 'working', 'review', 'qa', 'final_gate']; // phases with agent runs (fsm.AGENT)
 const NOW_LIMIT = 3, DONE_SHOWN = 15, GB = 2 ** 30, MB = 2 ** 20, DASH = '—';
 
@@ -405,7 +407,7 @@ function renderToday() {
       ? el('button', { type: 'button', class: 'btn', 'data-role': 'focus-done', onclick: () => move(top.id, 'done', 0) }, 'Mark Done')
       : el('a', { class: 'btn btn-gray', href: '#reminders' }, 'Open Reminders'))));
 
-  const you = state.flows.filter(f => YOU.has(f.state)).length;
+  const you = state.flows.filter(needsYou).length;
   const late = state.reminders.filter(isLate).length, due = state.reminders.filter(isDue).length;
   const unit = n => (n === 1 ? 'reminder' : 'reminders');
   const card = (hue, ic, label, period, n, u, go) => el('button', { type: 'button', class: `card hl-card hue-${hue}`, 'data-role': `hl-${ic}`, onclick: go },
@@ -790,7 +792,7 @@ const wordPill = (w, other = 'gray', hue = WORD_HUE[String(w ?? '').toLowerCase(
 };
 
 // what a flow waits on, as row and drawer name it: qa:<tag> while another ticket of its tag holds QA (C9)
-const waitLabel = (w, tag) => (w?.reason === 'qa_lock' ? `qa:${tag}` : w?.reason);
+const waitLabel = (w, tag) => (w?.reason === 'qa_lock' ? `qa:${tag}` : w?.reason === 'blocked_action' ? 'blocked action' : w?.reason);
 // One flow, one table row (DESIGN §8 Table): the whole row opens the inspector. The row holds the one click handler; the
 // title is a real button (keyboard, screen readers) whose click bubbles to it. ponytail: no ::after over the row, which
 // needs a <tr> as containing block (engine-dependent); a click handler has no such ceiling.
@@ -827,9 +829,9 @@ function onRun(e) {
 // done and cancelled; All = every flow but cancelled. Rows: needs you, running, backlog, then done; newest update first.
 const isRunning = f => AGENT.includes(f.state) || !!ui.runs.get(f.id)?.live;
 const isOver = f => f.state === 'done' || f.state === 'cancelled';
-const FSEGS = [['all', 'All', f => f.state !== 'cancelled'], ['you', 'Needs You', f => YOU.has(f.state)], ['running', 'Running', isRunning], ['done', 'Done', isOver]];
+const FSEGS = [['all', 'All', f => f.state !== 'cancelled'], ['you', 'Needs You', needsYou], ['running', 'Running', isRunning], ['done', 'Done', isOver]];
 const FEMPTY = { all: 'Nothing open. Finished and cancelled flows are under Done.', you: 'Nothing needs you right now.', running: 'No running flows.', done: 'Nothing finished yet.' };
-const rank = f => (YOU.has(f.state) ? 0 : isRunning(f) ? 1 : isOver(f) ? 3 : 2);
+const rank = f => (needsYou(f) ? 0 : isRunning(f) ? 1 : isOver(f) ? 3 : 2);
 function flowsTable() {
   const [key, label, keep] = FSEGS.find(s => s[0] === ui.fview) ?? FSEGS[0];
   const rows = state.flows.filter(keep).sort((a, b) => rank(a) - rank(b) || String(b.updated_at ?? '').localeCompare(String(a.updated_at ?? ''))); // ISO UTC: text order is time order
@@ -963,6 +965,7 @@ function drawerBody(f, ticket, error) {
         tab('overview', 'Overview'), tab('activity', 'Activity', live && ', run live'), tab('reports', 'Reports', reports && ', has reports'))),
     el('div', { class: 'pane', 'data-pane': 'overview', role: 'tabpanel', id: 'ipane-overview', 'aria-labelledby': 'itab-overview' },
       ticket && [
+        actionCards(f.id, k),
         notice(f.id, k.waiting),
         st === 'backlog' && el('section', { class: 'part', 'aria-labelledby': 'as-h' },
           el('h3', { id: 'as-h' }, 'Assign'),
@@ -1250,6 +1253,11 @@ $('#drawer').addEventListener('close', () => {
 // ---------- planning in the drawer (P4 AC5): Assign, Clarify form, plan + decision sources, Approve / Reject, children ----------
 // POST /api/tickets/:id/{assign,answer,approve,reject}, same guards as tb. Agent text (questions, plan) is shown via vis().
 const SENT = { // button role → [label, label while sending, toast title, toast text]
+  // board-terminal-parity Phase 2 task 4: the Approve cards and auto mode's blocks (actionCards)
+  'approve-yes': ['Yes Once', 'Sending…', 'Allowed Once', 'The run does exactly this action.'],
+  'approve-no': ['No', 'Sending…', 'Refused', 'The run is told: Irfan said no.'],
+  'allow-blocked': ['Allow and Retry', 'Sending…', 'Allowed Once', 'The same session retries exactly this action.'],
+  'dismiss-blocked': ['Dismiss', 'Sending…', 'Dismissed', 'The card is gone; the action stays blocked.'],
   assign: ['Assign', 'Assigning…', 'Assigned', 'Planning starts when a run slot is free.'],
   answer: ['Send Answers', 'Sending…', 'Answers Sent', 'The planner plans the next round with them.'],
   'plan-now': ['Enough, Plan Now', 'Sending…', 'Planning Now', 'What you left open is the planner’s call.'],
@@ -1318,13 +1326,14 @@ function actBtn(id, role, onclick, { cls = BTN2, label = undefined, sent = role,
 const errLine = (id, ...roles) => ui.err?.id === id && roles.includes(ui.err.role) && el('p', { class: 'err' }, ui.err.text);
 
 // A refusal shows inline (ui.err) and as a toast: the toast region is the one that speaks it. → null when tbd took it,
-// else the refusal text (ui.err may be gone by then: a click elsewhere during the re-read resets it).
-async function post(id, op, body, role = op, sent = role) {
+// else the refusal text (ui.err may be gone by then: a click elsewhere during the re-read resets it). send: a call of its
+// own instead of POST …/<op> (board-terminal-parity Phase 2 task 4: a card's route names its card id too)
+async function post(id, op, body, role = op, sent = role, send = () => api('POST', `/api/tickets/${encodeURIComponent(id)}/${op}`, body)) {
   ui.busy.set(id, role);
   ui.err = null;
   redraw();
   try {
-    await api('POST', `/api/tickets/${encodeURIComponent(id)}/${op}`, body);
+    await send();
     toast(SENT[sent][3], { kind: 'info', title: SENT[sent][2] });
     return null;
   } catch (e) {
@@ -1350,6 +1359,35 @@ function notice(id, w) {
       'a check fails on base_sha itself, before any change. Fix main first (main stays green), then approve again.'),
     why && el('pre', { class: 'log', 'data-role': 'wait-error', tabindex: '0', 'aria-label': 'Error output, last part' }, vis(why)),
     w.reason === 'setup_failed' && el('div', { class: 'acts' }, actBtn(id, 'approve', () => approve(id), { cls: BTN1, label: 'Approve Again' })));
+}
+
+// board-terminal-parity Phase 2 task 4, at the top of Overview: each waiting Approve card (tool, the input exactly as the
+// run will do it, the agent's words: Yes Once / No; too long to show: No only) and each open auto-mode block (Allow and
+// Retry when tbd can allow exactly it, Dismiss), then how the last asks ended. Agent text as text only (vis).
+const ASKED = { yes: 'Yes', no: 'No', timeout: 'Timed out: No', gone: 'The run went away', lost: 'Could not ask you: board restarted' };
+function actionCards(id, k) {
+  const list = v => (Array.isArray(v) ? v.filter(isObj) : []);
+  const asks = list(k.approvals).filter(a => a.status === 'pending'), blocks = list(k.blocked_actions).filter(b => b.status === 'open');
+  const past = list(k.approvals).filter(a => a.status !== 'pending').slice(-3);
+  if (!asks.length && !blocks.length && !past.length) return null;
+  const card = (role, title, text, why, acts) => el('div', { class: 'notice', 'data-role': role }, el('p', null, el('strong', null, title)),
+    el('pre', { class: 'log', tabindex: '0', 'aria-label': `${title}: the action` }, vis(text)), why && el('p', { class: 'hint' }, 'Why: ', vis(why)),
+    el('div', { class: 'acts' }, ...acts));
+  return el('section', { class: 'part', 'aria-labelledby': 'ok-h' }, el('h3', { id: 'ok-h' }, 'Needs Your OK'),
+    ...asks.map(a => card(`approve-${a.id}`, `Approve? ${vis(a.tool)}`, a.too_long ? 'Too long to show: only No is possible.' : a.input_text, a.reason, [
+      !a.too_long && actBtn(id, `yes-${a.id}`, () => post(id, null, null, `yes-${a.id}`, 'approve-yes',
+        () => api('POST', `/api/tickets/${encodeURIComponent(id)}/approvals/${encodeURIComponent(a.id)}`, { yes: true })), { cls: BTN1, sent: 'approve-yes' }),
+      actBtn(id, `no-${a.id}`, () => post(id, null, null, `no-${a.id}`, 'approve-no',
+        () => api('POST', `/api/tickets/${encodeURIComponent(id)}/approvals/${encodeURIComponent(a.id)}`, { yes: false })), { sent: 'approve-no' }),
+      errLine(id, `yes-${a.id}`, `no-${a.id}`)])),
+    ...blocks.map(b => card(`blocked-${b.id}`, `Blocked: ${vis(b.tool)}`, b.input_text, b.reason, [
+      b.rule && actBtn(id, `allow-${b.id}`, () => post(id, null, null, `allow-${b.id}`, 'allow-blocked',
+        () => api('POST', `/api/tickets/${encodeURIComponent(id)}/blocked/${encodeURIComponent(b.id)}/allow`)), { cls: BTN1, sent: 'allow-blocked' }),
+      actBtn(id, `dismiss-${b.id}`, () => post(id, null, null, `dismiss-${b.id}`, 'dismiss-blocked',
+        () => api('POST', `/api/tickets/${encodeURIComponent(id)}/blocked/${encodeURIComponent(b.id)}/dismiss`)), { sent: 'dismiss-blocked' }),
+      !b.rule && el('span', { class: 'hint' }, 'The board cannot allow exactly this one: run it from your terminal.'),
+      errLine(id, `allow-${b.id}`, `dismiss-${b.id}`)])),
+    past.length > 0 && el('ul', { class: 'plist', 'aria-label': 'Earlier asks' }, ...past.map(a => el('li', null, `${vis(a.tool)}: ${ASKED[a.status] ?? vis(a.status)}`))));
 }
 
 // Parent, blockers and children from the board's flow list: no request per ticket. A row: title and what it waits on,

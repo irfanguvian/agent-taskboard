@@ -356,3 +356,34 @@ test('chromeProfile text: the run-secrets dir stays read-denied (TB_HOME denied,
   assert.ok(sb.some((l) => l.startsWith('(deny file-read* ') && l.includes(`(subpath ${JSON.stringify(H)})`)));
   assert.deepEqual(sb.filter((l) => l.startsWith('(allow file-read') && covers(l)), []);
 });
+
+// board-terminal-parity Phase 2 task 5: bin/tb-git's git under a profile built from the run's own wall (spike h's git.sb
+// the baseline). Real sandbox-exec + the real git binary (xcrun -f git), fake HOME: Irfan's ssh key and the worktree
+// readable, the repo writable; refused: another .env, TB_HOME (its run secrets too), the clone's .git/config, a planted
+// CLAUDE.md, a HOME write, any program but git (a shell).
+test('gitProfile: the run wall for tb-git (real sandbox-exec + real git): ssh key + worktree read, repo write; .env, TB_HOME + run secrets, .git/config, CLAUDE.md, HOME writes, a shell refused', () => {
+  const { execFileSync, spawnSync } = require('node:child_process');
+  const { fullAccess, gitProfile } = require('../lib/phase-settings');
+  const realGit = fs.realpathSync(execFileSync('/usr/bin/xcrun', ['-f', 'git'], { encoding: 'utf8' }).trim());
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'gitsb-')));
+  const home = path.join(root, 'home');
+  const tbh = path.join(home, '.taskboard');
+  const wt = path.join(tbh, 'worktrees', 't_g1');
+  for (const d of [path.join(home, '.ssh'), path.join(wt, '.git'), path.join(tbh, 'run-secrets', 't_g1-2'), path.join(tbh, 'tickets', 't_g1')]) fs.mkdirSync(d, { recursive: true });
+  for (const [f, c] of [[path.join(home, '.ssh', 'id_ed25519'), 'KEY'], [path.join(tbh, 'token'), 'TOK'], [path.join(tbh, 'run-secrets', 't_g1-2', 'git.json'), '{}'],
+    [path.join(wt, 'a.txt'), 'a'], [path.join(wt, '.env'), 'S=1'], [path.join(wt, '.git', 'config'), '']]) fs.writeFileSync(f, c);
+  const ctx = { ...CTX, WORKTREE: wt, TICKET_DIR: path.join(tbh, 'tickets', 't_g1'), OUT_DIR: path.join(tbh, 'tickets', 't_g1', 'out'), TB_HOME: tbh, SKILLS_DIR: path.join(tbh, 'tickets', 't_g1', 'skills'), TAG_GIT: undefined };
+  const s = fullAccess(render('code', 'working', ctx), { phase: 'working', learning: null, wall: true, worktree: wt });
+  const sb = path.join(root, 'git.sb');
+  fs.writeFileSync(sb, gitProfile(s.sandbox, { home, cwd: wt, git: realGit }));
+  const run = (file, ...a) => (spawnSync('/usr/bin/sandbox-exec', ['-f', sb, file, ...a], { cwd: wt, env: { HOME: home, PATH: '/usr/bin:/bin', GIT_CONFIG_NOSYSTEM: '1' } }).status === 0 ? 'ok' : 'fail');
+  const rd = (p) => run(realGit, 'hash-object', p);
+  const wr = (p) => run(realGit, 'config', '--file', p, 'x.y', 'z');
+  try {
+    assert.deepEqual([rd(`${home}/.ssh/id_ed25519`), rd(`${wt}/a.txt`), wr(`${wt}/b.cfg`)], ['ok', 'ok', 'ok']);
+    assert.deepEqual([rd(`${wt}/.env`), rd(`${tbh}/token`), rd(`${tbh}/run-secrets/t_g1-2/git.json`), wr(`${wt}/.git/config`), wr(`${wt}/CLAUDE.md`), wr(`${home}/x.cfg`), run('/bin/sh', '-c', 'true')],
+      ['fail', 'fail', 'fail', 'fail', 'fail', 'fail', 'fail']);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

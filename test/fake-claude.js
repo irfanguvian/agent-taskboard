@@ -19,10 +19,10 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 
 const VALUE_FLAGS = new Set(['--session-id', '--resume', '--setting-sources', '--settings', '--append-system-prompt-file',
-  '--add-dir', '--mcp-config', '--tools', '--disallowedTools', '--permission-mode', '--permission-prompts', '--model',
+  '--add-dir', '--mcp-config', '--tools', '--disallowedTools', '--permission-mode', '--permission-prompts', '--permission-prompt-tool', '--model',
   '--effort', '--fallback-model', '--max-turns', '--json-schema', '--output-format']);
 const BOOL_FLAGS = new Set(['-p', '--print', '--strict-mcp-config', '--verbose', '--include-partial-messages']);
-const ENV_KEEP = /^(CLAUDE_|ANTHROPIC_|GIT_|GH_|BASH_|TB_)|^(GITHUB_TOKEN|SSH_AUTH_SOCK|ZDOTDIR|DISABLE_AUTOUPDATER|DISABLE_OMC|LEARNING_DIR|CAVEMAN_DEFAULT_MODE|TBD_SOCK|TBX_RUN|PATH|NODE_OPTIONS)$/;
+const ENV_KEEP = /^(CLAUDE_|ANTHROPIC_|GIT_|GH_|BASH_|TB_|MCP_)|^(GITHUB_TOKEN|SSH_AUTH_SOCK|ZDOTDIR|DISABLE_AUTOUPDATER|DISABLE_OMC|LEARNING_DIR|CAVEMAN_DEFAULT_MODE|TBD_SOCK|TBX_RUN|PATH|NODE_OPTIONS)$/;
 const ENV_SECRET = /TOKEN|_KEY$|^SSH_AUTH_SOCK$/; // D31: dump presence only, never the value
 
 const warn = (msg) => fs.writeSync(2, `fake-claude: ${msg}\n`);
