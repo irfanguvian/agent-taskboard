@@ -524,11 +524,13 @@ test('UX6: the flow sheet with title + fix-of posts {text, title, kind, tag, fix
   const ctx = sandbox({ '#sheet .sheet': sheet, '#sheet': scrim });
   const run = (code) => vm.runInContext(code, ctx);
   const n = trust(ctx);
-  run(`state = { reminders: [], flows: [{ id: "t_a1", title: "Earlier flow", state: "done" }], system: {}, calendar: {} }; ui.tags = ["acme/api"];`);
+  // board-terminal-parity 6.2: the kinds are the built ones tbd names (system.kinds)
+  run(`state = { reminders: [], flows: [{ id: "t_a1", title: "Earlier flow", state: "done" }], system: { kinds: ["code"] }, calendar: {} }; ui.tags = ["acme/api"];`);
   run('openNew("flow")'); // calm UI: the New sheet (N / New) replaced the composer line and its More… sheet
-  assert.deepEqual(find(sheet, (x) => x.tag === 'label').map((l) => txt(l)), ['Goal for the Agent', 'Short Title', 'Kind', 'Tag', 'Fix Of', 'Sandbox: locked run, for untrusted input (--sandbox)']);
+  assert.deepEqual(find(sheet, (x) => x.tag === 'label').map((l) => txt(l)), ['Goal for the Agent', 'Short Title', 'Kind', 'Tag', 'Fix Of',
+    'Locked run: for untrusted text (an issue, a pasted log). Fewer tools, slower.', 'Start Now']); // board-terminal-parity 6.3 words, 6.1 Start Now
   const ids = find(sheet, (x) => x.tag === 'label').map((l) => l.attrs.for);
-  assert.deepEqual(ids.map((id) => find(sheet, (x) => x.attrs.id === id).length), [1, 1, 1, 1, 1, 1], 'each label points at one control');
+  assert.deepEqual(ids.map((id) => find(sheet, (x) => x.attrs.id === id).length), [1, 1, 1, 1, 1, 1, 1], 'each label points at one control');
   assert.deepEqual(find(byName(sheet, 'fix_of'), (x) => x.tag === 'option').map((o) => o.attrs.value), ['', 't_a1']);
   byName(sheet, 'text').value = 'Make the list sortable';
   byName(sheet, 'tag').value = 'acme/api';
@@ -545,6 +547,10 @@ test('UX6: the flow sheet with title + fix-of posts {text, title, kind, tag, fix
   byName(sheet, 'sandbox').checked = true; // full access is the default; the box asks for today's locked run (tb new --sandbox)
   await sheet.onsubmit({ preventDefault() {} });
   assert.deepEqual(n.calls.filter((c) => c.method === 'POST').at(-1).body, { text: 'Make the list sortable', kind: 'code', tag: 'acme/api', sandbox: true }, 'sandbox box → sandbox: true');
+  byName(sheet, 'sandbox').checked = false;
+  byName(sheet, 'start').checked = true; // board-terminal-parity 6.1: Start Now asks tbd to assign it at once (tb new --start)
+  await sheet.onsubmit({ preventDefault() {} });
+  assert.deepEqual(n.calls.filter((c) => c.method === 'POST').at(-1).body, { text: 'Make the list sortable', kind: 'code', tag: 'acme/api', start: true }, 'Start Now → start: true');
 
   byName(sheet, 'text').value = '   ';
   const before = n.calls.length;
@@ -612,7 +618,7 @@ test('calm UI: New Flow posts once while its add is in flight (a second submit, 
     if (init.method === 'POST') { posts.push([url, JSON.parse(init.body)]); await new Promise((r) => { land = r; }); }
     return { ok: true, status: 200, json: async () => ({}) };
   };
-  run('state = { reminders: [], flows: [], system: {}, calendar: {} };');
+  run('state = { reminders: [], flows: [], system: { kinds: ["code"] }, calendar: {} };'); // board-terminal-parity 6.2: tbd names the kinds
   run('openNew("flow")');
   sheet.requestSubmit = () => sheet.onsubmit({ preventDefault() {} }); // the browser's: a submit event
   byRole(sheet, 'sheet-add').isConnected = true;
@@ -768,9 +774,9 @@ test('D-0172: Copy puts the exact command on the clipboard; without one the prev
 });
 
 // full-access-runs Phase 9 + 8 (taint): the held run box builds its resume line only from shq() (the worktree) and a
-// session id that passes UUID_RE; while held no Resume / Restart, one Hand Back; a backlog flow's Sandbox off is a command
-// to copy (the page never posts it); the tag-add form's skills-off field
-test('Phase 9 held run box: "cd <shq(worktree)> && claude --resume <uuid>" arrives as plain words in a real shell, Hand Back, no Resume / Restart; no uuid → no line; Phase 8 sandbox off = a copy command; tag add --skills-off', () => {
+// session id that passes UUID_RE; while held no Resume / Restart, one Hand Back; a backlog flow's Sandbox turns off from
+// the page too (board-terminal-parity 6.3: it posts {on: false}); the tag-add form's skills-off field
+test('Phase 9 held run box: "cd <shq(worktree)> && claude --resume <uuid>" arrives as plain words in a real shell, Hand Back, no Resume / Restart; no uuid → no line; sandbox off from the page (board-terminal-parity 6.3); tag add --skills-off', async () => {
   const ctx = sandbox();
   const run = (code) => vm.runInContext(code, ctx);
   run('state = { reminders: [], flows: [], system: {}, calendar: {} };');
@@ -792,9 +798,14 @@ test('Phase 9 held run box: "cd <shq(worktree)> && claude --resume <uuid>" arriv
   assert.deepEqual(['hold', 'resume', 'restart', 'note-text'].map((r) => !!byRole(live, r)), [true, true, true, true], 'a live run: Pause and Copy, the note box');
   noMarkup(walk(held));
 
+  // board-terminal-parity 6.3: the page turns it off too (POST …/sandbox {on: false}, backlog only): no copy command
   const on = run('el("div", null, sandboxPart("t_sbx001", { sandbox: true }))');
-  assert.equal(txt(byRole(on, 'sandbox-cmd')), "tb set-sandbox 't_sbx001' off");
-  assert.equal(byRole(on, 'sandbox').attrs.disabled, '', 'the page cannot turn it off');
+  assert.equal(byRole(on, 'sandbox-cmd'), undefined);
+  assert.equal(byRole(on, 'sandbox').attrs.disabled, undefined, 'the page can turn it off');
+  const sb = trust(ctx);
+  byRole(on, 'sandbox').handlers.change[0]({ target: { checked: false } });
+  await tick();
+  assert.deepEqual(sb.calls.filter((c) => c.method === 'POST').map((c) => [c.url, c.body]), [['/api/tickets/t_sbx001/sandbox', { on: false }]]);
   const off = run('el("div", null, sandboxPart("t_sbx001", {}))');
   assert.deepEqual([byRole(off, 'sandbox-cmd'), byRole(off, 'sandbox').attrs.disabled], [undefined, undefined]);
   // the tag-add form's --skills-off field (cli.js CHECK['skills-off']: plain names, comma-separated)

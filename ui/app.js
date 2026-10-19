@@ -14,7 +14,6 @@ const FLOW_COLS = [
   ['done', 'Done'], ['blocked', 'Blocked'],
 ];
 const YOU = new Set(['clarify', 'plan_approval', 'blocked']); // states that wait on Irfan
-const KINDS = ['code', 'research', 'brainstorm', 'design'];
 const AGENT = ['planning', 'working', 'review', 'qa', 'final_gate']; // phases with agent runs (fsm.AGENT)
 const NOW_LIMIT = 3, DONE_SHOWN = 15, GB = 2 ** 30, MB = 2 ** 20, DASH = '—';
 
@@ -22,13 +21,20 @@ let state = null; // { reminders, flows, system, calendar } after first load
 let es = null; // the one EventSource
 let trusted = false; // tbd proved itself and the stream has not dropped since: only then do requests carry the cookie
 let wait = 1000; // reconnect backoff, ms (max 30 s)
-const ui = { drag: null, editing: null, tray: null, promote: null, pick: { kind: KINDS[0], tag: '' }, dirty: false, tags: [], tagDefs: {}, tagsLoaded: false, locked: false,
+const ui = { drag: null, editing: null, tray: null, promote: null, pick: { kind: '', tag: '' }, dirty: false, tags: [], tagDefs: {}, tagsLoaded: false, locked: false,
   runs: new Map(), open: null, ticket: null, log: null, act: null, arm: null, // runs: id → `run` event; open: the drawer's flow id + its ticket, log tail, last action, Cancel / Approve armed
   round: null, plan: null, drafts: new Map(), busy: new Map(), err: null, // the open ticket's newest planning round and frozen plan, Clarify / Reject drafts (`${id}:${n}` → draft), planning action in flight (id → role), its refusal
   csrf: null, ask: null, gates: null, ivs: null, fb: null, pass: null, phase: new Map(), // P5: synchronizer token, the open working ask, gate / intervention pages + a feedback file (on demand), the pass check, Resume's phase pick (id → phase)
   q: '', hl: null, days: 30, follow: null, // M7: reminder search (lowercase), the Health view's data + its days, the drawer's log Follow
   fview: 'all', rfilter: null, tab: 'overview', day: null, // calm UI: Flows segment (all|you|running|done), Reminders filter from a Today highlight (overdue|today), inspector tab (overview|activity|reports), the date of the last render (midnight)
-  cfg: null, cfgErr: null, notes: new Map() }; // full-access-runs Phase 8 + 9: GET /api/config's answer + the last refused setting ({role, text}), note drafts (id → text)
+  cfg: null, cfgErr: null, notes: new Map(), // full-access-runs Phase 8 + 9: GET /api/config's answer + the last refused setting ({role, text}), note drafts (id → text)
+  pres: new Map(), shown: new Map() }; // board-terminal-parity 3: the drawer's kept <pre>s (data-role → {key, node, text}), see keptPre; when each plan round first showed (`${id}:${n}` → ms, approve)
+
+// board-terminal-parity 6.2: the New Flow and Promote kinds are the built ones tbd names (GET /api/state system.kinds)
+const kinds = () => (Array.isArray(state?.system?.kinds) ? state.system.kinds : []);
+const kindLabel = k => String(k).charAt(0).toUpperCase() + String(k).slice(1);
+// Page Tools (Settings → Terminal): on, the page runs Check Setup, Clean Up, Add Tag and Open in Terminal itself
+const pageTools = () => ui.cfg?.config?.terminal?.page_tools === true;
 
 // ---------- helpers ----------
 const $ = (s, r = document) => r.querySelector(s);
@@ -187,6 +193,7 @@ function toast(msg, { kind = 'error', title } = {}) {
 }
 
 // P5: every change sends the session's synchronizer token (X-TB-CSRF), read once per trusted connection.
+const CLI_ONLY = 'CLI only: use tb'; // lib/http.js: a CLI-only route, or a Page Tools one while the switch is off
 async function api(method, path, body, text = false) { // text: the reply as text (a doc), not JSON
   if (!trusted) throw Object.assign(new Error('tbd is not reachable.'), { status: 0 });
   if (method !== 'GET' && !ui.csrf) ui.csrf = (await api('GET', '/api/session/csrf')).csrf;
@@ -198,10 +205,17 @@ async function api(method, path, body, text = false) { // text: the reply as tex
   } catch {
     throw Object.assign(new Error('tbd is not reachable.'), { status: 0 });
   }
-  if (r.status === 401) { lockOut(); return new Promise(() => {}); } // page is gone: callers never resume
+  if (r.status === 401) {
+    // board-terminal-parity: a Page Tools route while the switch is off answers 401 "CLI only": the session is fine, so
+    // no lock-out; the page hides those buttons from now on. Any other 401: the page is gone, callers never resume.
+    const j = await r.json().catch(() => ({}));
+    if (j.error !== CLI_ONLY) { lockOut(); return new Promise(() => {}); }
+    if (ui.cfg?.config?.terminal) ui.cfg.config.terminal.page_tools = false;
+    throw Object.assign(new Error('Page Tools is off in Settings, so this runs in Terminal now.'), { status: 401, cliOnly: true, server: true });
+  }
   if (text && r.ok) return r.text();
   const j = await r.json().catch(() => ({}));
-  if (!r.ok) throw Object.assign(new Error(j.error || `Request failed (${r.status}).`), { status: r.status });
+  if (!r.ok) throw Object.assign(new Error(j.error || `Request failed (${r.status}).`), { status: r.status, server: typeof j.error === 'string' && j.error !== '' });
   for (const w of j.warnings || []) toast(w, { kind: 'warn', title: 'Heads Up' });
   return j;
 }
@@ -560,8 +574,9 @@ const detailLine = t => el('p', { class: 'detail', 'data-role': 'detail' },
 function promoteForm(t) {
   const pick = (name, opts) => el('label', null, name,
     el('select', { name: `promote-${name.toLowerCase()}`, class: 'input mini', 'data-role': `promote-${name.toLowerCase()}`, onchange: ev => { ui.pick[name.toLowerCase()] = ev.target.value; } }, ...opts));
+  if (!kinds().includes(ui.pick.kind)) ui.pick.kind = kinds()[0] ?? ''; // the shown first option is the one sent
   return el('form', { class: 'promote', 'aria-label': 'Promote to flow', onsubmit: ev => { ev.preventDefault(); promote(t); } },
-    pick('Kind', KINDS.map(k => el('option', { value: k, selected: k === ui.pick.kind }, k))),
+    pick('Kind', kinds().map(k => el('option', { value: k, selected: k === ui.pick.kind }, kindLabel(k)))),
     pick('Tag', tagOptions(ui.pick.tag)),
     el('div', { class: 'promote-acts' },
       el('button', { type: 'submit', class: 'btn btn-sm' }, 'Promote to Flow'),
@@ -883,6 +898,19 @@ const rescroll = m => {
   }
 };
 const redraw = () => { if (ui.open && $('#drawer').open) drawerBody(flowOf(ui.open), ui.ticket); };
+// board-terminal-parity 3: the log tail (and a feedback file) is one <pre> per open ticket that every rebuild re-inserts
+// as is: its text is written only when it changed (more lines at the end: appended), so its box and its lines never
+// re-lay out under the reader; rescroll() puts its scroll back. key: what it shows (ticket, feedback n).
+function keptPre(key, attrs, text) {
+  let p = ui.pres.get(attrs['data-role']);
+  if (p?.key !== key) ui.pres.set(attrs['data-role'], p = { key, node: el('pre', attrs), text: null });
+  if (text !== p.text) {
+    if (p.text && text.startsWith(p.text)) p.node.append(text.slice(p.text.length));
+    else p.node.replaceChildren(text);
+    p.text = text;
+  }
+  return p.node;
+}
 
 // The inspector (DESIGN §8 Drawer, 520 wide: plan round 1 Q5): a sticky header (title, stage, kind · tag · id, the
 // Overview · Activity · Reports control), then the three panes. Every pane renders and CSS shows the one in data-tab, so a
@@ -1022,7 +1050,7 @@ function runBox(id, k) {
       l?.log && el('button', { type: 'button', class: 'link-btn', 'data-role': 'follow', 'aria-pressed': String(follow), onclick: () => toggleFollow(id) }, follow ? 'Following' : 'Follow'),
       l?.log && el('button', { type: 'button', class: 'link-btn', 'data-role': 'log', onclick: () => loadLog(id) }, shown ? 'Refresh' : 'Show Last 200 Lines'))));
   if (shown) out.push(ui.log.error ? el('p', { class: 'hint' }, ui.log.error)
-    : el('pre', { class: 'log', 'data-role': 'log-tail', tabindex: '0', 'aria-label': 'Run log, last lines' }, ui.log.lines.join('\n') || 'Empty so far.'));
+    : keptPre(id, { class: 'log log-box', 'data-role': 'log-tail', tabindex: '0', 'aria-label': 'Run log, last lines' }, ui.log.lines.join('\n') || 'Empty so far.'));
   return out;
 }
 
@@ -1037,13 +1065,15 @@ const HELD_WAIT = { // a held flow's recovery in flight (lease.pending.why)
 function heldBox(id, k) {
   const l = k.lease, cmd = UUID_RE.test(l.session ?? '') && typeof k.worktree === 'string' ? `cd ${shq(k.worktree)} && claude --resume ${l.session}` : null;
   const pre = cmd && el('pre', { class: 'log', 'data-role': 'resume-cmd', tabindex: '0', 'aria-label': 'Command, as text' }, cmd);
+  const open = cmd && pageTools(); // board-terminal-parity 6.5: tbd opens Terminal with this line (POST …/terminal); the one Prominent action then
   return el('div', { class: 'held', 'data-role': 'held' }, el('h4', null, 'In Your Terminal'),
     l.pending ? el('p', { class: 'hint' }, HELD_WAIT[l.pending.why] ?? 'Working on it.') : [
       el('p', { class: 'hint' }, 'tbd starts nothing on this flow until you hand it back. Run this exact line in Terminal (tbd cannot see claude -c), work in the session, type /exit, then Hand Back.'),
       pre || el('p', { class: 'hint' }, 'No session to resume.'),
-      el('div', { class: 'acts' }, cmd && el('button', { type: 'button', class: BTN2, 'data-role': 'copy-resume', onclick: () => copyCmd(pre, cmd) }, 'Copy Command'),
-        actBtn(id, 'handback', () => post(id, 'handback'), { cls: BTN1 })),
-      errLine(id, 'handback')]);
+      el('div', { class: 'acts' }, open && actBtn(id, 'terminal', () => post(id, 'terminal', {}), { cls: BTN1 }),
+        cmd && el('button', { type: 'button', class: BTN2, 'data-role': 'copy-resume', onclick: () => copyCmd(pre, cmd) }, 'Copy Command'),
+        actBtn(id, 'handback', () => post(id, 'handback'), { cls: open ? BTN2 : BTN1 })),
+      errLine(id, 'handback', 'terminal')]);
 }
 // Phase 9: a note to the agent (text only, into its prompt file: never a shell). The draft survives the run box's re-renders.
 function noteBox(id, k, running) {
@@ -1060,16 +1090,13 @@ function noteBox(id, k, running) {
     el('div', { class: 'acts' }, actBtn(id, 'note', send), n > 0 && el('span', { class: 'hint' }, `${n} ${n === 1 ? 'note waits' : 'notes wait'} for the next run.`)),
     errLine(id, 'note'));
 }
-// Phase 8: the page turns Sandbox on (POST …/sandbox); off loosens containment, so it is a command to copy (D-0172).
+// Phase 8; board-terminal-parity 6.3: the page turns the locked run on and off (POST …/sandbox {on}, backlog only).
 function sandboxPart(id, k) {
-  const cmd = `tb set-sandbox ${shq(id)} off`;
-  const pre = el('pre', { class: 'log', 'data-role': 'sandbox-cmd', tabindex: '0', 'aria-label': 'Command, as text' }, cmd);
   return el('div', { class: 'sandbox' },
-    el('label', { class: 'switch-row' }, el('span', null, el('span', { class: 'set-label' }, 'Sandbox'),
-      el('span', { class: 'cell-sub' }, k.sandbox ? 'On: its runs are locked (seatbelt on, project settings only).' : 'Off: full access. Turn it on for untrusted input.')),
-      el('input', { type: 'checkbox', role: 'switch', class: 'switch', 'data-role': 'sandbox', checked: !!k.sandbox, disabled: !!k.sandbox || ui.busy.has(id), onchange: () => post(id, 'sandbox', { on: true }) })),
-    k.sandbox && [el('p', { class: 'hint' }, 'Turning it off loosens containment, so it runs in Terminal:'), pre,
-      el('div', { class: 'acts' }, el('button', { type: 'button', class: BTN2, 'data-role': 'copy-sandbox', onclick: () => copyCmd(pre, cmd) }, 'Copy Command'))],
+    el('label', { class: 'switch-row' }, el('span', null, el('span', { class: 'set-label' }, 'Locked Run'),
+      el('span', { class: 'cell-sub' }, 'For untrusted text (an issue, a pasted log). Fewer tools, slower.')),
+      el('input', { type: 'checkbox', role: 'switch', class: 'switch', 'data-role': 'sandbox', checked: !!k.sandbox, disabled: ui.busy.has(id),
+        onchange: e => post(id, 'sandbox', { on: e.target.checked }, 'sandbox', e.target.checked ? 'sandbox' : 'sandbox-off') })),
     errLine(id, 'sandbox'));
 }
 
@@ -1126,7 +1153,7 @@ async function loadLog(id) {
     ui.log = { id, lines: [], error: e.status === 404 ? 'No run log yet.' : e.message };
   }
   renderRunBox();
-  const pre = $('#runbox pre.log');
+  const pre = $('#runbox pre.log-box');
   if (pre) pre.scrollTop = pre.scrollHeight;
 }
 
@@ -1191,16 +1218,18 @@ const reloadOpen = debounce(readOpen, 200);
 
 async function openTicket(id) {
   const d = $('#drawer');
-  if (ui.open !== id) Object.assign(ui, { follow: null, log: null, ticket: null, round: null, plan: null, arm: null, err: null, ask: null, gates: null, ivs: null, fb: null, pass: null, qa: null, rec: null, final: null, tab: 'overview' });
+  if (ui.open !== id) Object.assign(ui, { follow: null, log: null, ticket: null, round: null, plan: null, arm: null, err: null, ask: null, gates: null, ivs: null, fb: null, pass: null, qa: null, rec: null, final: null, tab: 'overview', pres: new Map(), shown: new Map() });
   ui.open = id;
   markOpen();
   drawerBody(flowOf(id), ui.ticket);
   if (!d.open) d.showModal();
   else { d.scrollTop = 0; $('#drawer [data-role="close"]').focus(); } // moved to a parent, child or blocker inside the drawer
-  // M5 C20: the tag's ident + push remote for the drawer, read per open (set by the CLI only; none read = no Push button)
-  await Promise.all([readOpen(), api('GET', '/api/tags').then(j => { ui.tagDefs = j.tags || {}; redraw(); }, () => {})]);
+  // M5 C20: the tag's ident + push remote for the drawer, read per open (set by the CLI only; none read = no Push button);
+  // the config once (Page Tools: Open in Terminal)
+  await Promise.all([readOpen(), api('GET', '/api/tags').then(j => { ui.tagDefs = j.tags || {}; redraw(); }, () => {}), !ui.cfg?.config && loadSettings().then(redraw)]);
 }
-// A held Enter repeats clicks on the refocused button: the first repeat after 400 ms would confirm Approve or Cancel.
+// A held Enter repeats clicks on the refocused button: the repeats are dropped here (a repeat would confirm an armed
+// action, or Approve a plan that just showed); Approve also ignores a click in its plan's first 400 ms (approve()).
 $('#drawer').addEventListener('keydown', e => { if (e.repeat && e.key === 'Enter' && e.target.closest?.('button')) e.preventDefault(); });
 $('#drawer').addEventListener('click', e => { if (e.target === e.currentTarget) e.currentTarget.close(); });
 // Closed (Esc, Close, a click outside): focus goes back to the flow's row, rebuilt or not since it opened; a row gone from
@@ -1210,6 +1239,8 @@ $('#drawer').addEventListener('close', () => {
   const id = ui.open;
   ui.open = null;
   ui.follow = null;
+  ui.pres.clear(); // the kept log text goes with the drawer
+  ui.shown.clear();
   markOpen();
   if (id) ($(`#flowsView [data-id="${CSS.escape(id)}"]`) || $('#flowsView .seg [aria-pressed="true"]') || $('#flowsView .row-open'))?.focus();
 });
@@ -1239,7 +1270,11 @@ const SENT = { // button role → [label, label while sending, toast title, toas
   close: ['Close Flow', 'Closing…', 'Flow Closed', 'The flow is done. Nothing was pushed; the worktree stays until tb gc.'],
   lavish: ['Open in Lavish', 'Opening…', 'Opening Lavish', 'The questions page opens in your browser.'],
   // full-access-runs Phase 8 + 9: the Sandbox switch, a note, Pause and Copy, Hand Back
-  sandbox: ['Sandbox', 'Saving…', 'Sandbox On', 'Its runs are locked: seatbelt on, project settings only.'],
+  sandbox: ['Sandbox', 'Saving…', 'Locked Run On', 'Its runs are locked: seatbelt on, project settings only.'],
+  'sandbox-off': ['Sandbox', 'Saving…', 'Locked Run Off', 'Its runs get full access.'], // board-terminal-parity 6.3
+  // board-terminal-parity 6.5 + 6.8
+  terminal: ['Open in Terminal', 'Opening…', 'Terminal Opened', 'Work in the session, type /exit, then Hand Back. macOS may ask once to let tbd use Terminal.'],
+  'push-close': ['Push and Close', 'Pushing…', 'Push Started', 'Leak scan first, then git push; the flow closes once the push is green.'],
   note: ['Send Note', 'Sending…', 'Note Sent', 'A live run takes it now; else the next run starts with it.'],
   hold: ['Pause and Copy', 'Pausing…', 'Pausing', 'The run stops; then the command to resume it shows here.'],
   handback: ['Hand Back', 'Handing Back…', 'Handed Back', 'The board resumes the same session.'],
@@ -1312,7 +1347,7 @@ function notice(id, w) {
     w.reason === 'setup_failed' && /base red/.test(w.error ?? '') && el('p', null, el('strong', null, 'The base branch is red: '),
       'a check fails on base_sha itself, before any change. Fix main first (main stays green), then approve again.'),
     why && el('pre', { class: 'log', 'data-role': 'wait-error', tabindex: '0', 'aria-label': 'Error output, last part' }, vis(why)),
-    w.reason === 'setup_failed' && el('div', { class: 'acts' }, actBtn(id, 'approve', () => approve(id, true), { cls: BTN1, label: 'Approve Again' })));
+    w.reason === 'setup_failed' && el('div', { class: 'acts' }, actBtn(id, 'approve', () => approve(id), { cls: BTN1, label: 'Approve Again' })));
 }
 
 // Parent, blockers and children from the board's flow list: no request per ticket. A row: title and what it waits on,
@@ -1433,8 +1468,9 @@ function stageActs(id, k) {
     !merged && !built && el('p', { class: 'hint' }, 'While this phase is not built you stand in for it: pass the work on, or send it back with feedback.'),
     st !== 'final_gate' && el('div', { class: 'acts' }, armBtn(id, 'pass', 'pass', () => post(id, 'pass', {}, 'pass'), { cls: BTN1, label: `Pass to ${stateLabel(next)}` })),
     built && el('p', { class: 'hint' }, 'tbd runs the final gate: checks, a final review, the squash. Then you close it (tb close) or push it (tb push).'),
-    // role close-flow: data-role close is the drawer's own × (refocus)
-    close && el('div', { class: 'acts' }, armBtn(id, 'close', 'close-flow', () => post(id, 'close', {}, 'close-flow', 'close'), { cls: BTN1, sent: 'close' })),
+    // role close-flow: data-role close is the drawer's own × (refocus). A tag with a push remote: Push and Close (pushView)
+    // is the Prominent one (board-terminal-parity 6.8)
+    close && el('div', { class: 'acts' }, armBtn(id, 'close', 'close-flow', () => post(id, 'close', {}, 'close-flow', 'close'), { cls: tagDef(k.tag)?.push?.remote ? BTN2 : BTN1, sent: 'close' })),
     st === 'final_gate' && !built && !merged && passForm(id),
     merged && el('p', { class: 'hint' }, 'Passed with ', code(String(k.pr.sha ?? '').slice(0, 12)), ` at ${when(k.pr.merged_at)}.`),
     // a BUILT final gate: tbd refuses a rework there (409) but at waiting close, so the send-back box only then
@@ -1454,17 +1490,23 @@ const pushText = (p, k) => [p.state, `${p.remote ?? ''} ${String(p.ref ?? k.bran
   .filter(Boolean).join(' · ');
 function pushView(id, k, tag) {
   const d = tagDef(tag), remote = d?.push?.remote, sha = String(k.final?.sha ?? '');
-  if (!remote || !((k.state === 'final_gate' && k.waiting?.reason === 'close') || (k.state === 'done' && sha))) return null;
+  const closing = k.state === 'final_gate' && k.waiting?.reason === 'close', off = !d?.ident || !sha || k.push?.state === 'running';
+  if (!remote || !(closing || (k.state === 'done' && sha))) return null;
+  // one span: .notice is a grid, so loose text nodes + <code> would each take a row
+  const ask = then => el('p', { class: 'notice' }, el('span', null, 'Push ', code(sha.slice(0, 12)), ' to ', code(remote), ' as branch ', code(k.branch ?? ''), then));
   return el('section', { class: 'part', 'aria-labelledby': 'pu-h' },
     el('h3', { id: 'pu-h' }, 'Push'),
     el('p', { class: 'hint' }, 'Sends the squash to the tag’s push remote: a leak scan first, then git push with a lease. Never automatic.'),
     !d.ident && el('p', { class: 'err' }, ...noIdent(tag)),
-    // one span: .notice is a grid, so loose text nodes + <code> would each take a row
-    armed(id, 'push') && el('p', { class: 'notice' }, el('span', null, 'Push ', code(sha.slice(0, 12)), ' to ', code(remote), ' as branch ', code(k.branch ?? ''), '?')),
-    // at waiting close Close Flow is the Prominent one (the usual end); once done Push is the only action
-    el('div', { class: 'acts' }, armBtn(id, 'push', 'push', () => post(id, 'push'), { cls: k.state === 'done' ? BTN1 : BTN2, disabled: !d.ident || !sha || k.push?.state === 'running' })),
+    armed(id, 'push') && ask('?'),
+    armed(id, 'push-close') && ask(', then close the flow?'),
+    // board-terminal-parity 6.8: at waiting close Push and Close is the Prominent one (POST …/push {close: true}: tbd closes
+    // after a green push), Close Flow and Push stay; once done Push is the only action
+    el('div', { class: 'acts' },
+      closing && armBtn(id, 'push-close', 'push-close', () => post(id, 'push', { close: true }, 'push-close'), { cls: BTN1, disabled: off }),
+      armBtn(id, 'push', 'push', () => post(id, 'push'), { cls: k.state === 'done' ? BTN1 : BTN2, disabled: off })),
     isObj(k.push) && el('p', { class: k.push.state === 'failed' ? 'err' : 'hint' }, 'Last push: ', pushText(k.push, k)),
-    errLine(id, 'push'));
+    errLine(id, 'push', 'push-close'));
 }
 
 // D9: tbd checks the sha (GET …/pass?sha: every M15 check, nothing written); the confirm shows the full sha + its subject
@@ -1531,7 +1573,7 @@ function workView(id, k) {
       fact('Plan hashes', hashes.length ? hashes.map(h => el('span', { class: `hash${h === k.plan_hash ? ' cur' : ''}`, title: h === k.plan_hash ? 'the current plan' : 'replaced' }, String(h).slice(0, 12))) : null)),
     k.rework > 0 && el('div', { class: 'acts' }, el('span', { class: 'hint' }, 'Your feedback:'),
       ...Array.from({ length: Math.min(k.rework, 10) }, (_, i) => el('button', { type: 'button', class: 'link-btn', 'data-role': `fb-${i + 1}`, onclick: () => loadFeedback(id, i + 1) }, `Rework ${i + 1}`))),
-    fb && (fb.error ? el('p', { class: 'hint' }, fb.error) : el('pre', { class: 'log', 'data-role': 'feedback', tabindex: '0', 'aria-label': `Your feedback, rework ${fb.n}` }, vis(fb.text))));
+    fb && (fb.error ? el('p', { class: 'hint' }, fb.error) : keptPre(`${id}:${fb.n}`, { class: 'log', 'data-role': 'feedback', tabindex: '0', 'aria-label': `Your feedback, rework ${fb.n}` }, vis(fb.text))));
 }
 async function loadFeedback(id, n) {
   try { ui.fb = { id, n, text: (await api('GET', `/api/tickets/${enc(id)}/feedback/${n}`)).text }; } catch (e) { ui.fb = { id, n, error: e.status === 404 ? `No feedback ${n} kept.` : e.message }; }
@@ -1900,7 +1942,8 @@ const task = t => el('li', { class: 'task' },
   t.steps?.length > 0 && el('ol', { class: 'steps' }, ...t.steps.map(s => el('li', null, vis(s)))));
 
 function planActs(id, k, r) {
-  const d = draftOf(id, r.n), sure = armed(id, 'approve');
+  const d = draftOf(id, r.n);
+  if (!ui.shown.has(`${id}:${r.n}`)) ui.shown.set(`${id}:${r.n}`, Date.now());
   const box = el('textarea', { id: 'rj', name: 'comment', rows: 3, maxLength: 10000, 'data-role': 'comment', 'aria-describedby': d.errs.comment ? 'rj-err' : null,
     oninput: e => { d.comment = e.target.value; } });
   box.value = d.comment;
@@ -1908,22 +1951,17 @@ function planActs(id, k, r) {
     el('div', { class: 'field' }, el('label', { for: 'rj' }, 'Comment for Reject or Ask Me More'), box,
       d.errs.comment && el('p', { class: 'err', id: 'rj-err' }, d.errs.comment)),
     el('div', { class: 'acts' },
-      k.waiting?.reason !== 'setup_failed' && actBtn(id, 'approve', () => approve(id), { cls: BTN1, label: sure ? 'Confirm Approve' : 'Approve' }),
+      k.waiting?.reason !== 'setup_failed' && actBtn(id, 'approve', () => approve(id, r.n), { cls: BTN1 }),
       actBtn(id, 'reject', () => sendReject(id, r, false)),
       actBtn(id, 'ask', () => sendReject(id, r, true))),
-    sure && el('p', { class: 'hint' }, 'Press again to approve. The plan is frozen and setup starts.'),
     errLine(id, 'approve', 'reject', 'ask'));
 }
 
-function approve(id, again = false) {
-  if (!again && !armed(id, 'approve')) { // freezes the plan and starts setup: one more click to confirm
-    arm(id, 'approve');
-    redraw();
-    setTimeout(redraw, 4000);
-    return;
-  }
-  if (!again && early()) return;
-  ui.arm = null;
+// board-terminal-parity 6.4: one click (no arm). A double click is one post (ui.busy); a held Enter repeats nothing (the
+// drawer's e.repeat block); a click in the first 400 ms after this round's plan showed is ignored (a click meant for
+// what was there before it).
+function approve(id, n) {
+  if (Date.now() - (ui.shown.get(`${id}:${n}`) ?? 0) < 400) return;
   post(id, 'approve', ui.round?.n === undefined ? undefined : { n: ui.round.n }); // L7: the round shown; tbd refuses (409) when a newer one came
 }
 
@@ -1942,7 +1980,9 @@ function sendReject(id, r, ask) {
 // flows need a leaf tag that has a path (a tag with children is only a group)
 const leafTags = tags => Object.keys(tags).filter(n => tags[n]?.path && !Object.keys(tags).some(o => o.startsWith(`${n}/`))).sort();
 const tagOptions = sel => [el('option', { value: '' }, 'No Tag'), ...ui.tags.map(n => el('option', { value: n, selected: n === sel }, n))];
-const refused = (err, fallback) => (err.status === 409 ? 'Not Available Yet' : fallback);
+// board-terminal-parity 6.7: a toast title for a refusal. tbd's own words are the toast text (err.message): the title is
+// the action that failed; "Not Available Yet" only for a 409 that came without words
+const refused = (err, fallback) => (err.status === 409 && !err.server ? 'Not Available Yet' : fallback);
 
 async function loadTags() {
   if (ui.tagsLoaded) return;
@@ -1984,12 +2024,14 @@ document.addEventListener('keydown', e => {
   }
 });
 
-// one add (send() posts it) from the New sheet → true when tbd took it
+// one add (send() posts it) from the New sheet → true when tbd took it. A flow sent with Start Now that tbd could not
+// assign (started false) stays in Backlog: why it did not start shows as a card (a reason is longer than a capsule)
 async function addItem(flow, send) {
   try {
-    await send();
+    const r = await send();
     refresh();
-    if (root.dataset.view !== (flow ? 'flows' : 'reminders')) toast(flow ? 'The flow is in Backlog.' : 'The reminder is in Inbox.', { kind: 'info', title: 'Added' }); // it landed out of sight
+    if (r?.started === false) toast(vis(r.why ?? 'tbd gave no reason.'), { kind: 'warn', title: 'Added to Backlog' });
+    else if (root.dataset.view !== (flow ? 'flows' : 'reminders')) toast(!flow ? 'The reminder is in Inbox.' : r?.started ? 'The flow is planning.' : 'The flow is in Backlog.', { kind: 'info', title: r?.started ? 'Started' : 'Added' }); // it landed out of sight
     return true;
   } catch (err) {
     toast(err.message, { title: refused(err, `Couldn’t Add ${flow ? 'Flow' : 'Reminder'}`) });
@@ -2046,7 +2088,8 @@ document.addEventListener('keydown', e => {
   if (asking) keepEditing(); else closeSheet();
 });
 
-// Labelled fields of a sheet. spec {k, label, kind: text|area|date|select|check, opts [[value, label]], hint, ph}; init {k: value}.
+// Labelled fields of a sheet. spec {k, label, kind: text|area|date|select|check, opts [[value, label]], hint, ph, list (a
+// datalist id), after (nodes under the control)}; init {k: value}.
 // → nodes, vals() (trimmed strings, checkboxes as booleans) and fail(errors) which writes {k: message} under the fields.
 let sfn = 0;
 function sheetFields(specs, init, onChange) {
@@ -2056,31 +2099,160 @@ function sheetFields(specs, init, onChange) {
     const c = sp.kind === 'select' ? el('select', { id, name: sp.k, class: 'input', onchange: onChange }, ...sp.opts.map(([val, l]) => el('option', { value: val, selected: val === v }, l)))
       : sp.kind === 'area' ? el('textarea', { id, name: sp.k, class: 'input', rows: 3, oninput: onChange })
       : sp.kind === 'check' ? el('input', { id, name: sp.k, class: 'check', type: 'checkbox', checked: !!v, onchange: onChange })
-      : el('input', { id, name: sp.k, class: 'input', type: sp.kind === 'date' ? 'date' : 'text', autocomplete: 'off', spellcheck: 'false', placeholder: sp.ph, oninput: onChange });
+      : el('input', { id, name: sp.k, class: 'input', type: sp.kind === 'date' ? 'date' : 'text', autocomplete: 'off', spellcheck: 'false', placeholder: sp.ph, list: sp.list, oninput: onChange });
     if (sp.kind !== 'select' && sp.kind !== 'check') c.value = v;
     ctl[sp.k] = c;
     errs[sp.k] = el('p', { class: 'err', id: `${id}-err` });
     c.setAttribute('aria-describedby', `${id}-err${sp.hint ? ` ${id}-hint` : ''}`);
-    return el('div', { class: `sf${sp.kind === 'check' ? ' sf-check' : ''}` }, el('label', { for: id }, sp.label), c, sp.hint && el('p', { class: 'hint', id: `${id}-hint` }, sp.hint), errs[sp.k]);
+    return el('div', { class: `sf${sp.kind === 'check' ? ' sf-check' : ''}` }, el('label', { for: id }, sp.label), c,
+      sp.after && el('div', { class: 'sf-after' }, ...sp.after), sp.hint && el('p', { class: 'hint', id: `${id}-hint` }, sp.hint), errs[sp.k]);
   });
   const vals = () => Object.fromEntries(specs.map(sp => [sp.k, sp.kind === 'check' ? ctl[sp.k].checked : sp.kind === 'select' ? ctl[sp.k].value : ctl[sp.k].value.trim()]));
   const fail = errors => { for (const sp of specs) errs[sp.k].replaceChildren(...(errors[sp.k] ? [errors[sp.k]] : [])); };
   return { nodes, vals, fail, ctl };
 }
 
+// board-terminal-parity 5 (B7): skills in the Goal box. `/` at a word start lists the skills tbd knows for the tag (GET
+// /api/skills?tag=, read once per tag while the sheet is open): the textarea is an ARIA combobox over a listbox; ↑ ↓
+// move, Enter / Tab insert `/name `, Esc closes, a click picks. The text is the one source: the chips under it mirror its
+// /names that name a known skill (× takes that token out); Add Skill opens the list to add at the end. Names and
+// descriptions come from SKILL.md files (a tag repo's too): text only, vis(). → {nodes (under the box), wire(textarea, tag select)}
+const ASK_RE = /(^|\s)\/([a-z0-9][\w:.-]{0,63})(?=$|[\s,;!?)])/g; // the same in lib/skills.js ASK_RE (the /names tbd reads from the goal): keep both identical
+const AT_SLASH = /(^|\s)\/([\w:.-]{0,63})$/; // the /word the caret ends, while it is typed
+const SKILLS_SHOWN = 50; // ponytail: the first 50 matches render (tbd lists ≤ 500); typing narrows the rest
+function skillsBox() {
+  const list = el('ul', { id: 'skill-list', role: 'listbox', class: 'popmenu skill-pop', 'aria-label': 'Skills', hidden: true, onmousedown: e => e.preventDefault() }); // a scrollbar click keeps the box focused: the list stays open
+  const chips = el('div', { class: 'skill-chips' });
+  const add = el('button', { type: 'button', class: 'link-btn', 'data-role': 'add-skill' }, 'Add Skill');
+  const cache = new Map(); // tag → its skills (a promise)
+  let ta, tagSel, all = [], loading = true, open = false, items = [], at = 0, query = '', from = null; // from: where the /word starts; -1: the end of the text (Add Skill)
+
+  const mirror = () => {
+    const names = new Set(all.map(s => s.name));
+    const seen = [...new Set([...ta.value.matchAll(ASK_RE)].map(m => m[2]))].filter(n => names.has(n));
+    chips.replaceChildren(...seen.map(n => el('button', { type: 'button', class: 'filter-chip', 'data-role': `skill-chip-${n}`,
+      'aria-label': `Remove skill /${vis(n)}`, onclick: () => drop(n) }, `/${vis(n)}`, icon('close'))));
+  };
+  const drop = n => { // every /n token out of the text, with one space after it
+    let out = '', i = 0;
+    for (const m of ta.value.matchAll(ASK_RE)) {
+      if (m[2] !== n) continue;
+      const s = m.index + m[1].length, e = m.index + m[0].length;
+      out += ta.value.slice(i, s);
+      i = ta.value[e] === ' ' ? e + 1 : e;
+    }
+    ta.value = out + ta.value.slice(i);
+    mirror();
+    ta.focus();
+  };
+  const close = () => {
+    from = null;
+    open = false;
+    list.hidden = true;
+    ta.setAttribute('aria-expanded', 'false');
+    ta.removeAttribute('aria-activedescendant');
+  };
+  const show = () => { // prefix matches first, then the rest that hold the query
+    const q = query.toLowerCase(), low = s => String(s.name).toLowerCase();
+    items = [...all.filter(s => low(s).startsWith(q)), ...all.filter(s => !low(s).startsWith(q) && low(s).includes(q))].slice(0, SKILLS_SHOWN);
+    at = Math.min(at, Math.max(items.length - 1, 0));
+    list.replaceChildren(...(items.length ? items.map((s, i) => el('li', { id: `skill-opt-${i}`, role: 'option', class: 'popmenu-item skill-opt', 'aria-selected': String(i === at),
+      onmousedown: e => e.preventDefault(), onclick: () => pick(i) }, // mousedown: the box keeps focus
+    el('span', { class: 'skill-name' }, `/${vis(s.name)}`), s.description && el('span', { class: 'skill-desc' }, vis(s.description))))
+      : [el('li', { role: 'option', 'aria-disabled': 'true', class: 'skill-none' }, loading ? 'Loading skills…' : all.length ? 'No skill matches.' : 'No skills found.')]));
+    open = true;
+    list.hidden = false;
+    ta.setAttribute('aria-expanded', 'true');
+    if (items.length) ta.setAttribute('aria-activedescendant', `skill-opt-${at}`); else ta.removeAttribute('aria-activedescendant');
+    $(`#skill-opt-${at}`)?.scrollIntoView?.({ block: 'nearest' });
+  };
+  const refresh = () => { // the /word at the caret opens, narrows or closes the list (Add Skill's list stays until a pick or Esc)
+    if (from === -1) return;
+    const end = ta.selectionStart, m = ta.selectionEnd === end && AT_SLASH.exec(ta.value.slice(0, end));
+    if (!m) return close();
+    if (m[2] !== query) at = 0;
+    from = end - m[2].length - 1;
+    query = m[2];
+    show();
+  };
+  const pick = i => {
+    const s = items[i], v = ta.value;
+    if (!s) return close();
+    const ins = `/${s.name} `;
+    let pos;
+    if (from === -1) {
+      ta.value = `${v}${v && !/\s$/.test(v) ? ' ' : ''}${ins}`;
+      pos = ta.value.length;
+    } else {
+      ta.value = v.slice(0, from) + ins + v.slice(ta.selectionStart);
+      pos = from + ins.length;
+    }
+    close();
+    ta.focus();
+    ta.setSelectionRange(pos, pos);
+    mirror();
+  };
+  const keys = e => {
+    if (!open || e.isComposing) return;
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (items.length) { at = (at + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length; show(); }
+    } else if ((e.key === 'Enter' && !e.shiftKey) || e.key === 'Tab') {
+      if (!items.length && e.key === 'Tab') return close();
+      e.preventDefault();
+      e.stopPropagation(); // never the sheet's Enter-to-add while the list is open
+      if (items.length) pick(at); else close();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation(); // closes the list, not the sheet
+      close();
+    } else if (e.key === 'Enter') close(); // Shift+Enter: a new line
+  };
+  const load = async () => {
+    const tag = tagSel.value;
+    if (!cache.has(tag)) {
+      cache.set(tag, api('GET', `/api/skills?tag=${enc(tag)}`).then(r => (Array.isArray(r.skills) ? r.skills.filter(s => isObj(s) && typeof s.name === 'string') : []),
+        e => { cache.delete(tag); toast(e.message, { title: 'Couldn’t Load Skills' }); return []; }));
+    }
+    const got = await cache.get(tag);
+    if (tagSel.value !== tag) return; // the tag changed meanwhile: its own read fills the list
+    all = got;
+    loading = false;
+    mirror();
+    if (open) show();
+  };
+  function wire(t, s) {
+    ta = t;
+    tagSel = s;
+    for (const [k, v] of [['role', 'combobox'], ['aria-autocomplete', 'list'], ['aria-expanded', 'false'], ['aria-controls', 'skill-list']]) ta.setAttribute(k, v);
+    ta.addEventListener('input', () => { if (from === -1) from = null; refresh(); mirror(); });
+    ta.addEventListener('click', refresh);
+    ta.addEventListener('keyup', e => { if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) refresh(); });
+    ta.addEventListener('keydown', keys);
+    ta.addEventListener('blur', close);
+    tagSel.addEventListener('change', () => { loading = true; load(); });
+    add.addEventListener('click', () => { ta.focus(); from = -1; query = ''; at = 0; show(); });
+    load();
+  }
+  return { nodes: [list, el('div', { class: 'skill-bar' }, chips, add)], wire };
+}
+
 // The New sheet (D-0149 / D-0156 / D-0166 fields, calm plan Q4): a reminder with column, due, project, note and tag, or a
-// flow with a goal, short title, kind, tag and fix-of. mode 'reminder' | 'flow' (the Flows view's empty state calls
+// flow with a goal (skills: skillsBox), short title, kind, tag, fix-of, locked run and Start Now. mode 'reminder' | 'flow' (the Flows view's empty state calls
 // openNew('flow')); typed carries the title / goal across a Reminder ↔ Flow switch (asked first when another field holds
 // text: it would be lost). Enter adds; in a note or goal Shift+Enter is a new line.
 function openNew(mode = 'reminder', typed = '') {
   const flow = mode === 'flow', main = flow ? 'text' : 'title';
+  const sk = flow && skillsBox();
   const specs = flow ? [
-    { k: 'text', label: 'Goal for the Agent', kind: 'area' },
+    { k: 'text', label: 'Goal for the Agent', kind: 'area', after: sk.nodes },
     { k: 'title', label: 'Short Title', kind: 'text', hint: 'Optional. The board shows it instead of the goal.' },
-    { k: 'kind', label: 'Kind', kind: 'select', opts: KINDS.map(k => [k, k[0].toUpperCase() + k.slice(1)]) },
+    { k: 'kind', label: 'Kind', kind: 'select', opts: kinds().map(k => [k, kindLabel(k)]) },
     { k: 'tag', label: 'Tag', kind: 'select', opts: [['', 'No Tag'], ...ui.tags.map(n => [n, n])] },
     { k: 'fix_of', label: 'Fix Of', kind: 'select', opts: [['', 'None'], ...(state?.flows ?? []).map(f => [f.id, vis(f.title)])] },
-    { k: 'sandbox', label: 'Sandbox: locked run, for untrusted input (--sandbox)', kind: 'check' },
+    { k: 'sandbox', label: 'Locked run: for untrusted text (an issue, a pasted log). Fewer tools, slower.', kind: 'check' },
+    // board-terminal-parity 6.1: create and assign in one step (tbd's assign checks); the choice is remembered
+    { k: 'start', label: 'Start Now', kind: 'check', hint: 'Planning starts at once. If it can’t, the flow stays in Backlog and says why.' },
   ] : [
     { k: 'title', label: 'Title', kind: 'text' },
     { k: 'status', label: 'Column', kind: 'select', opts: COLS.slice(0, 4) },
@@ -2089,8 +2261,12 @@ function openNew(mode = 'reminder', typed = '') {
     { k: 'note', label: 'Note', kind: 'area' },
     { k: 'tag', label: 'Tag', kind: 'text', ph: 'shop/api' },
   ];
-  const f = sheetFields(specs, flow ? { text: typed, kind: KINDS[0] } : { title: typed, status: 'inbox' }, () => {});
-  if (flow) loadTags();
+  const f = sheetFields(specs, flow ? { text: typed, kind: kinds()[0], start: safe(() => localStorage.getItem('tb-start-now')) !== '0' } : { title: typed, status: 'inbox' }, () => {});
+  if (flow) {
+    loadTags();
+    sk.wire(f.ctl.text, f.ctl.tag);
+    f.ctl.start.addEventListener('change', e => safe(() => localStorage.setItem('tb-start-now', e.target.checked ? '1' : '0')));
+  }
   const typedIn = sp => sp.kind !== 'select' && sp.kind !== 'check' && f.ctl[sp.k].value.trim();
   const seg = el('div', { class: 'seg', role: 'group', 'aria-label': 'Item type' }, ...[['reminder', 'Reminder'], ['flow', 'Flow']].map(([m, l]) =>
     el('button', { type: 'button', value: m, 'aria-pressed': String(flow === (m === 'flow')), onclick: () => {
@@ -2114,7 +2290,7 @@ function openNew(mode = 'reminder', typed = '') {
     add.disabled = true;
     // empty optional fields are undefined: JSON leaves them out. An Inbox add goes on top (the old composer line's body);
     // another column keeps the server's default, as the old More… sheet posted
-    const sent = await addItem(flow, () => (flow ? api('POST', '/api/flows', { text: v.text, title: v.title || undefined, kind: v.kind, tag: v.tag || undefined, fix_of: v.fix_of || undefined, sandbox: v.sandbox || undefined })
+    const sent = await addItem(flow, () => (flow ? api('POST', '/api/flows', { text: v.text, title: v.title || undefined, kind: v.kind, tag: v.tag || undefined, fix_of: v.fix_of || undefined, sandbox: v.sandbox || undefined, start: v.start || undefined })
       : api('POST', '/api/reminders', { title: v.title, status: v.status, pos: v.status === 'inbox' ? 'top' : undefined, due: v.due || undefined, project: v.project || undefined, note: v.note || undefined, tag: v.tag || undefined })));
     if (sent && form.onsubmit === submit && sheetOpen()) closeSheet(true); // a Reminder ↔ Flow switch (or another sheet) since: not this one to close
     add.disabled = false;
@@ -2241,25 +2417,179 @@ async function copyCmd(pre, cmd) {
   }
 }
 
+// board-terminal-parity 6.6: with Page Tools on, Check Setup and Clean Up also Run here: the form's fields go to tbd as tb
+// sends them (lib/cli.js doctor / gc), the reply shows as text. → {lines, next} (next: gc's page cursor)
+const sizeOf = b => (b == null ? DASH : fmtBytes(b));
+const RUNS = {
+  async doctor(v) {
+    const body = { tag: v.tag || undefined }; // cli.js tagKeys: --push-remote, --qa-ports, --db (none = drop the key)
+    if (v['push-remote']) body.push = { remote: v['push-remote'] };
+    if (v['qa-ports']) body.qa_ports = v['qa-ports'].split(',').map(Number);
+    if (v.db) body.db = v.db === 'local' ? 'local' : null;
+    const r = await api('POST', '/api/doctor', body), checks = Array.isArray(r.checks) ? r.checks.filter(isObj) : [];
+    const failed = checks.filter(x => !x.ok).length;
+    return { lines: [`doctor: ${failed ? `FAIL (${failed} of ${checks.length} checks)` : 'ok'}`,
+      ...checks.map(x => [!x.ok ? 'fail' : x.warn ? 'warn' : 'ok', x.name, x.detail, x.fix && `fix: ${x.fix}`].filter(Boolean).map(vis).join(' · '))] };
+  },
+  async gc(v, after) {
+    if (v.mode === 'delete') {
+      const r = await api('POST', '/api/gc', { ids: v.ids.split(/\s+/).filter(Boolean) });
+      const lines = [...(r.deleted ?? []).map(d => `deleted ${vis(d.id)} · ${sizeOf(d.bytes)}`), ...(r.skipped ?? []).map(s => `skipped ${vis(s.id)}: ${vis(s.reason)}`)];
+      return { lines: lines.length ? lines : ['Nothing deleted.'] };
+    }
+    const r = await api('GET', `/api/gc?limit=${v.limit || 20}${after ? `&after=${enc(after)}` : ''}`), items = Array.isArray(r.items) ? r.items.filter(isObj) : [];
+    return { next: r.next ?? null, lines: [...(after ? [] : [`${r.total ?? items.length} can go`]),
+      ...items.map(i => [i.id, i.kind, sizeOf(i.bytes), i.age_days != null && `${i.age_days} days old`, i.reason].filter(Boolean).map(vis).join(' · '))] };
+  },
+};
+
 function cmdSheet(id, preset = {}) {
   const c = CMDS[id], pre = el('pre', { class: 'cmd', tabindex: '0', 'data-role': 'cmd', 'aria-label': 'Command, as text' });
-  const copy = el('button', { type: 'submit', class: 'btn', 'data-role': 'copy' }, 'Copy Command');
+  let run = pageTools() && RUNS[id], running = false, next = null;
+  const copy = el('button', { type: 'submit', class: run ? 'btn btn-gray' : 'btn', 'data-role': 'copy' }, 'Copy Command');
+  // Run is the Prominent one; Enter still copies (Run may take minutes, or delete)
+  const runBtn = run && el('button', { type: 'button', class: 'btn', 'data-role': 'run', onclick: () => go() });
+  const note = run && el('p', { class: 'hint', 'aria-live': 'polite' });
+  const out = run && el('pre', { class: 'log', 'data-role': 'run-out', tabindex: '0', 'aria-label': 'Output, as text' });
+  const more = run && el('button', { type: 'button', class: 'link-btn', 'data-role': 'run-more', hidden: true, onclick: () => go(next) }, 'List More');
+  const outBox = run && el('div', { class: 'cmd-block', hidden: true }, el('p', { class: 'sf-label' }, 'Output'), out, el('p', null, more));
   const f = sheetFields(c.fields, preset, () => update());
   function update() {
-    const { cmd, errors } = buildCmd(id, f.vals());
+    const v = f.vals(), { cmd, errors } = buildCmd(id, v);
     pre.replaceChildren(cmd);
     f.fail(errors);
     copy.disabled = Object.keys(errors).length > 0;
+    if (run) { // gc delete arms first: two clicks (arm(), as Cancel)
+      const del = id === 'gc' && v.mode === 'delete', sure = del && armed('gc', 'delete'), ident = id === 'doctor' && v.ident;
+      runBtn.disabled = copy.disabled || running || ident;
+      runBtn.className = sure ? 'btn btn-danger-fill' : 'btn';
+      runBtn.replaceChildren(running ? 'Running…' : sure ? 'Confirm Delete' : del ? 'Delete' : 'Run');
+      note.replaceChildren(ident ? 'Run can’t read your git name and email: use Copy Command for --ident.' : sure ? 'Press again to delete these for good.' : '');
+    }
     return cmd;
   }
+  async function go(after) {
+    const v = f.vals();
+    if (id === 'gc' && v.mode === 'delete') {
+      if (!armed('gc', 'delete')) { arm('gc', 'delete'); update(); setTimeout(update, 4000); return; }
+      if (early()) return;
+      ui.arm = null;
+    }
+    running = true;
+    update();
+    try {
+      const r = await run(v, after);
+      if (after) out.append('\n', r.lines.join('\n')); else out.replaceChildren(r.lines.join('\n'));
+      next = r.next ?? null;
+      more.hidden = !next;
+      if (id === 'doctor') loadHealth(); // the Doctor card shows the new run
+    } catch (e) {
+      out.replaceChildren(`Refused: ${e.message}`);
+      more.hidden = true;
+      if (e.cliOnly) { run = null; runBtn.remove(); note.remove(); copy.className = 'btn'; } // Page Tools went off: copy only
+    }
+    outBox.hidden = false;
+    running = false;
+    update();
+  }
   const cmd = update();
-  const form = openSheet(c.title, c.sub, f.nodes, [cancelBtn(), copy], f.ctl[c.fields[0].k],
-    { after: [el('div', { class: 'cmd-block' }, el('p', { class: 'sf-label', id: 'cmd-l' }, 'Command'), pre)] });
+  const form = openSheet(c.title, c.sub, f.nodes, [cancelBtn(), copy, runBtn].filter(Boolean), f.ctl[c.fields[0].k],
+    { after: [el('div', { class: 'cmd-block' }, el('p', { class: 'sf-label', id: 'cmd-l' }, 'Command'), pre), note, outBox].filter(Boolean) });
   form.onsubmit = e => {
     e.preventDefault();
     if (!copy.disabled) copyCmd(pre, update());
   };
   return { form, pre, copy, cmd };
+}
+
+// board-terminal-parity 4: Add Tag in three fields while Page Tools is on. Folder: typed, picked from the folders your
+// terminal used (GET /api/folders/recent) or Choose Folder… (the Mac dialog, POST /api/pick-folder); tbd reads it
+// (POST /api/folders/branches: git or a plain folder, its branches) and Add posts /api/tags/quick (tbd checks it all again).
+// More Options opens the copy-command form with what was typed. Page Tools off: that form.
+function addTag() {
+  if (!pageTools()) return cmdSheet('tag-add');
+  const choose = el('button', { type: 'button', class: 'btn btn-sm btn-gray', 'data-role': 'pick-folder', onclick: () => pickFolder() }, 'Choose Folder…');
+  const kind = el('p', { class: 'hint', 'aria-live': 'polite' });
+  const folders = el('datalist', { id: 'tag-folders' });
+  const f = sheetFields([
+    { k: 'name', label: 'Name', kind: 'text', ph: 'shop/api', hint: 'Lowercase letters, digits and -. Use a/b for a child.' },
+    { k: 'path', label: 'Folder', kind: 'text', list: 'tag-folders', after: [choose, kind] },
+    { k: 'base', label: 'Base', kind: 'select', opts: [], hint: 'The branch flows start from: the current one is picked.' },
+  ], {}, () => {});
+  const baseRow = f.nodes[2];
+  baseRow.hidden = true; // a git folder shows it (with its branches)
+  let info = null, why = null, seen = null, reading = null, seq = 0;
+  const preset = () => { const v = f.vals(); return { name: v.name, type: info?.type, path: v.path, base: info?.type === 'git' ? v.base : '' }; };
+  // the folder's type and branches, read once per folder value (a failed read again next time); → the read in flight
+  // (Add waits for it)
+  function readFolder() {
+    const p = f.ctl.path.value.trim();
+    if (p === seen) return reading;
+    seen = p;
+    info = why = null;
+    baseRow.hidden = true;
+    kind.replaceChildren();
+    f.fail({});
+    if (!p) return (reading = null);
+    const mine = ++seq;
+    return (reading = api('POST', '/api/folders/branches', { path: p }).then(r => {
+      if (mine !== seq) return;
+      info = r;
+      kind.replaceChildren(r.type === 'git' ? 'A git repo.' : 'A plain folder: no base branch.');
+      if (r.type !== 'git') return;
+      f.ctl.base.replaceChildren(...(Array.isArray(r.branches) ? r.branches : []).map(b => el('option', { value: String(b), selected: b === r.current }, vis(b))));
+      baseRow.hidden = false;
+    }, e => {
+      if (mine !== seq) return;
+      why = e.message;
+      seen = null;
+      f.fail({ path: why });
+    }));
+  }
+  async function pickFolder() {
+    choose.disabled = true;
+    choose.replaceChildren('Waiting for the Dialog…');
+    try {
+      const r = await api('POST', '/api/pick-folder', {});
+      if (typeof r.path === 'string') { f.ctl.path.value = r.path; readFolder(); }
+    } catch (e) { toast(e.message, { title: refused(e, 'Couldn’t Open the Folder Dialog') }); }
+    choose.disabled = false;
+    choose.replaceChildren('Choose Folder…');
+    f.ctl.path.focus();
+  }
+  f.ctl.path.addEventListener('change', readFolder);
+  f.ctl.path.addEventListener('blur', readFolder);
+  const add = el('button', { type: 'submit', class: 'btn', 'data-role': 'tag-add' }, 'Add');
+  const form = openSheet('Add Tag', 'A tag is a folder flows work in. tbd checks the folder and adds the tag.', f.nodes, [cancelBtn(), add], f.ctl.name, {
+    inline: true,
+    after: [folders, el('p', null, el('button', { type: 'button', class: 'link-btn', 'data-role': 'tag-more', onclick: () => cmdSheet('tag-add', preset()) }, 'More Options…'))],
+  });
+  api('GET', '/api/folders/recent').then(r => folders.replaceChildren(...(Array.isArray(r.folders) ? r.folders.filter(isObj) : []).map(x => el('option', { value: String(x.path) }, vis(x.name)))), () => {});
+  form.onsubmit = async e => {
+    e.preventDefault();
+    if (add.disabled) return;
+    add.disabled = true;
+    await readFolder();
+    const v = f.vals();
+    const bad = !v.name ? { name: 'A name is needed.' } : !validName(v.name) ? { name: 'Use lowercase letters, digits and -; a/b for a child.' }
+      : !v.path ? { path: 'Choose or type a folder.' } : !info ? { path: why ?? 'tbd could not read this folder.' } : null;
+    if (bad) {
+      f.fail(bad);
+      add.disabled = false;
+      return f.ctl[Object.keys(bad)[0]].focus();
+    }
+    try {
+      const r = await api('POST', '/api/tags/quick', { name: v.name, path: v.path, base: info.type === 'git' ? v.base : undefined });
+      closeSheet(true);
+      toast(`#${r.tag?.name ?? v.name} is ready for flows.`, { kind: 'info', title: 'Tag Added' });
+      ui.tagsLoaded = false; // the New sheet and Promote read the tags again
+      loadHealth();
+    } catch (err) {
+      if (err.cliOnly) { cmdSheet('tag-add', preset()); toast(err.message, { kind: 'warn', title: 'Copy the Command' }); }
+      else f.fail({ [err.status === 409 ? 'name' : 'path']: err.message });
+    }
+    add.disabled = false;
+  };
 }
 
 // ---------- Health (M7): the §12 targets, doctor, the drill log, the tag list ----------
@@ -2321,13 +2651,13 @@ function healthView(hl) {
         dr.items.map(x => el('tr', null, el('td', null, when(x.at) ?? DASH), el('td', null, vis(x.name)), el('td', null, pill(...verdict(x.ok))), el('td', { class: 'hl-wrap' }, vis(x.note ?? '')))))
         : pad(el('p', { class: 'hl-line' }, dr ? 'No drills recorded yet.' : DASH)),
       dr && el('div', { class: 'card-foot' }, el('button', { type: 'button', class: 'btn btn-sm btn-gray', 'data-role': 'drills-older', disabled: dr.next == null, onclick: () => loadDrills(dr.next) }, 'Older'))),
-    card('hl-g', 'Tags', cmdBtn('Add Tag…', 'tag-add'),
+    card('hl-g', 'Tags', el('button', { type: 'button', class: 'btn btn-sm btn-gray', 'data-role': 'cmd-tag-add', onclick: () => addTag() }, 'Add Tag…'),
       hl.terr ? pad(el('p', { class: 'err' }, hl.terr)) : tags && Object.keys(tags).length ? hlTable('Tags', ['Name', 'Type', 'Path', ''],
         Object.entries(tags).map(([name, def]) => el('tr', null, el('td', { class: 'cell-title' }, vis(name)), el('td', null, vis(def?.type ?? DASH)), el('td', { class: 'hl-wrap' }, vis(def?.path ?? DASH)),
           el('td', { class: 'hl-edit' }, el('button', { type: 'button', class: 'link-btn', 'data-role': `tag-edit-${name}`, 'aria-label': `Edit tag ${vis(name)}`, onclick: () => cmdSheet('doctor', { tag: name }) }, 'Edit…')))))
         : pad(el('p', { class: 'hl-line' }, tags ? 'No tags yet.' : DASH))),
     el('section', { class: 'card hl-maint', 'aria-labelledby': 'hl-m' }, head('hl-m', 'Maintenance'),
-      el('p', { class: 'hl-line' }, 'These run in Terminal, not here. Each button builds the command and copies it.'),
+      el('p', { class: 'hl-line' }, pageTools() ? 'Clean Up runs here or builds the command to copy. Evals run in Terminal.' : 'These run in Terminal, not here. Each button builds the command and copies it.'),
       el('div', { class: 'hl-acts' }, cmdBtn('Clean Up…', 'gc'), cmdBtn('Run Evals…', 'eval'))));
 }
 
@@ -2342,10 +2672,11 @@ async function loadHealth() {
   const mine = ++hlSeq, days = ui.days;
   ui.hl = { ...ui.hl, days, loading: true };
   renderHealth();
+  const cp = loadSettings(); // Page Tools: Run in Check Setup and Clean Up, the 3-field Add Tag
   const tp = api('GET', '/api/tags');
   const [h] = await Promise.allSettled([api('GET', `/api/health?days=${days}`)]);
   const [d] = await Promise.allSettled([api('GET', '/api/drills?limit=20')]); // after health: one compute at a time
-  const [t] = await Promise.allSettled([tp]);
+  const [t] = await Promise.allSettled([tp, cp]);
   if (mine !== hlSeq) return;
   ui.hl = { days, health: h.value, herr: h.reason?.message, drills: d.value && { items: d.value.items || [], next: d.value.next ?? null }, derr: d.reason?.message, tags: t.value && (t.value.tags || {}), terr: t.reason?.message };
   renderHealth();
@@ -2364,6 +2695,15 @@ async function loadDrills(before) {
 // built from what tbd last answered (as tb config set); tbd checks every value, a refusal shows under its control
 // (ui.cfgErr) and the view reads tbd's config again. claude_bin is shown, never changed here (tb doctor --pin).
 const MODELS = ['opus', 'sonnet', 'fable'], EFFORTS = ['low', 'medium', 'high', 'xhigh'];
+// board-terminal-parity (decision 5): Settings → Terminal, config.terminal's switches (all off in code), one line each
+const TERM = [
+  ['bash_all_steps', 'Bash in Every Step', 'Planning, review and final check may run commands and subagents.'],
+  ['folder_mcp', 'Folder MCP', 'Load the MCP servers your terminal uses in that folder.'],
+  ['git_bridge', 'Git Bridge', 'Pull, fetch and push with your ssh keys; every push asks you.'],
+  ['auto_mode', 'Auto Mode', 'Like your terminal; a blocked action asks you.'],
+  ['task_tickets', 'Task Tickets', 'Tickets that work in your real folder.'],
+  ['page_tools', 'Page Tools', 'Run Check Setup, Clean Up, Add Tag, Open in Terminal from this page.'],
+];
 let cfgSeq = 0;
 async function loadSettings() {
   if (!trusted || ui.locked) return;
@@ -2408,6 +2748,7 @@ function settingsView(r) {
   const ram = p => v => saveSetting(`ram-${p}`, { memory: { ...c.memory, phase_need_gb: { ...need, [p]: v } } });
   const subs = k => v => saveSetting(`sub-${k}`, { subagents: { ...sub, [k]: v } });
   const skill = n => v => saveSetting(`skill-${n}`, { skills: { ...c.skills, defaults: v ? [...on, n] : [...on].filter(x => x !== n) } });
+  const t = c.terminal, term = k => v => saveSetting(`term-${k}`, { terminal: { ...t, [k]: v } }); // the whole object: tbd wants every key
   const phaseErr = AGENT.flatMap(p => [`m-${p}-model`, `m-${p}-effort`, `ram-${p}`]).map(err).find(Boolean);
   return el('div', { class: 'settings' },
     el('p', { class: 'hint' }, 'Changes save at once. A run already going keeps what it started with; the next run uses the new value.'),
@@ -2426,6 +2767,10 @@ function settingsView(r) {
       row('sub-per_session_total', 'Subagent budget', 'Subagents one session may start in all (1 to 20).', number('sub-per_session_total', 'Subagent budget per session', sub.per_session_total, [1, 20, 1], subs('per_session_total'))),
       row('final_distinct', 'Final Gate on Another Model', 'The final gate never runs on the review phase’s model.', toggle('final_distinct', 'Final gate on another model', c.final_distinct, v => saveSetting('final_distinct', { final_distinct: v }))),
       row('lanes', 'Parallel Lanes', 'Two working runs of one ticket at once (needs tickets at once 2 or more).', toggle('lanes', 'Parallel lanes', c.lanes?.enabled, v => saveSetting('lanes', { lanes: { ...c.lanes, enabled: v } })))),
+    isObj(t) && card('set-term', 'Terminal', 'What makes a run work like your terminal. Each stays off until you turn it on.',
+      ...TERM.map(([k, label, hint]) => row(`term-${k}`, label, hint, toggle(`term-${k}`, label, t[k], term(k)))),
+      row('term-approve_min', 'Approve Wait', 'Minutes a blocked action waits for your yes, then the answer is No (1 to 60).',
+        number('term-approve_min', 'Approve wait in minutes', t.approve_min, [1, 60, 1], term('approve_min')))),
     card('set-sk', 'Default Skills', 'Every run names these skills; a tag adds or removes its own.',
       ...(r.skills || []).map(n => row(`skill-${n}`, vis(n), null, el('input', { type: 'checkbox', class: 'check', 'data-role': `skill-${n}`, 'aria-label': `Default skill ${vis(n)}`, checked: on.has(n), onchange: e => skill(n)(e.target.checked) })))),
     card('set-cl', 'Claude', null, row('claude_bin', 'Claude Binary', 'Changed in Terminal only: tb doctor --pin.', el('code', { class: 'set-code' }, vis(c.claude_bin)))));

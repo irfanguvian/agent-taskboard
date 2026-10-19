@@ -129,9 +129,11 @@ test('AC4 SSE: system event on connect, reminder event after a PATCH; bad Host r
   assert.match(res.headers['content-type'], /^text\/event-stream/);
   const [, sys] = await s.until(/event: system\ndata: (.*)\n\n/);
   // P2: live monitor fields change between reads, so compare keys + the runner-owned fields (values: monitor.test.js).
-  const keys = ['ram_total', 'ram_used', 'avail', 'pressure', 'level', 'disk_free', 'claude_rss', 'net', 'power', 'docker', 'disk_warn', 'at', 'runs', 'max', 'paused_until', 'paused_reason', 'usage_warning'].sort();
+  // board-terminal-parity 6.2 (contract change: + kinds, the kinds whose planning phase is built: New Flow lists them)
+  const keys = ['ram_total', 'ram_used', 'avail', 'pressure', 'level', 'disk_free', 'claude_rss', 'net', 'power', 'docker', 'disk_warn', 'at', 'runs', 'max', 'paused_until', 'paused_reason', 'usage_warning', 'kinds'].sort();
   const runner = ({ runs, max, paused_until, paused_reason, usage_warning }) => ({ runs, max, paused_until, paused_reason, usage_warning });
   const fromState = (await tbd.api('GET', '/api/state')).json.system;
+  assert.deepEqual(fromState.kinds, ['code'], 'only code has its planning phase built');
   for (const [where, got] of [['SSE', JSON.parse(sys)], ['/api/state', fromState]]) {
     assert.deepEqual(Object.keys(got).sort(), keys, `${where} carries the system object`);
     assert.deepEqual(runner(got), { runs: 0, max: 3, paused_until: null, paused_reason: null, usage_warning: false }, where); // full-access-runs Phase 4 (contract change): default max_concurrent 1 → 3
@@ -203,7 +205,7 @@ test('C14 C13 POST /api/tickets/:id/push | close: cookie without X-TB-CSRF → 4
 
 // full-access-runs Phase 8: Settings (GET / POST /api/config) and the Sandbox switch; a cookie caller needs X-TB-CSRF.
 // No phase built (empty TB_PHASES_DIR): the working ticket only waits, no run starts.
-test('Phase 8 POST /api/config: cookie without X-TB-CSRF → 403, with it → 200 and GET reflects it; claude_bin → 400; POST …/sandbox: on from the page in backlog, off from the page → 403, off with the token → 200, a working ticket → 409; Phase 9 hold with no run → 409, note / hold / handback CSRF, note limits (10 000 chars, 10 waiting, not on a done flow)', async (t) => {
+test('Phase 8 POST /api/config: cookie without X-TB-CSRF → 403, with it → 200 and GET reflects it; claude_bin → 400; POST …/sandbox: on from the page in backlog, off from the page → 200 (board-terminal-parity 6.3), off with the token → 200, a working ticket → 409 (page too); Phase 9 hold with no run → 409, note / hold / handback CSRF, note limits (10 000 chars, 10 waiting, not on a done flow)', async (t) => {
   const phases = fs.mkdtempSync(path.join(os.tmpdir(), 'http-p8-'));
   const own = await startTbd({ env: { TB_PHASES_DIR: phases }, files: {
     'tickets/t_sbx001/ticket.json': ticket('t_sbx001', { state: 'backlog' }), 'tickets/t_sbx002/ticket.json': ticket('t_sbx002', { state: 'working' }),
@@ -217,7 +219,8 @@ test('Phase 8 POST /api/config: cookie without X-TB-CSRF → 403, with it → 20
   const ok = await own.api('POST', '/api/config', { max_concurrent: 2 }, csrf);
   assert.deepEqual([ok.status, ok.json.config.max_concurrent], [200, 2]);
   const got = (await own.api('GET', '/api/config', undefined, ui)).json.config;
-  assert.deepEqual([got.max_concurrent, Object.keys(got).sort()], [2, ['claude_bin', 'final_distinct', 'lanes', 'max_concurrent', 'memory', 'models', 'skills', 'subagents']], 'the Settings keys + claude_bin, nothing else');
+  // board-terminal-parity task 0 (contract change: + terminal, the switches)
+  assert.deepEqual([got.max_concurrent, Object.keys(got).sort()], [2, ['claude_bin', 'final_distinct', 'lanes', 'max_concurrent', 'memory', 'models', 'skills', 'subagents', 'terminal']], 'the Settings keys + claude_bin, nothing else');
   const bin = await own.api('POST', '/api/config', { claude_bin: '/tmp/claude' });
   assert.deepEqual([bin.status, bin.json], [400, { error: 'config key "claude_bin" cannot be changed here: tb doctor --pin changes it' }]);
 
@@ -225,12 +228,15 @@ test('Phase 8 POST /api/config: cookie without X-TB-CSRF → 403, with it → 20
   assert.equal((await sandbox('t_sbx001', true, ui)).status, 403, 'cookie without X-TB-CSRF');
   const on = await sandbox('t_sbx001', true, csrf);
   assert.deepEqual([on.status, on.json.ticket.sandbox], [200, true]);
+  // board-terminal-parity 6.3 (contract change: was 403 "Sandbox off is CLI only"): off from the page too, backlog only
   const offUi = await sandbox('t_sbx001', false, csrf);
-  assert.deepEqual([offUi.status, offUi.json], [403, { error: 'Sandbox off is CLI only: run tb set-sandbox <id> off in Terminal' }]);
+  assert.deepEqual([offUi.status, 'sandbox' in offUi.json.ticket], [200, false]);
   const off = await sandbox('t_sbx001', false);
   assert.deepEqual([off.status, 'sandbox' in off.json.ticket], [200, false]);
   const working = await sandbox('t_sbx002', true);
   assert.deepEqual([working.status, working.json], [409, { error: 't_sbx002: the Sandbox switch works in backlog only (now working)' }]);
+  const workingUi = await sandbox('t_sbx002', false, csrf);
+  assert.deepEqual([workingUi.status, workingUi.json], [409, { error: 't_sbx002: the Sandbox switch works in backlog only (now working)' }]);
   // full-access-runs Phase 9: Pause and Copy needs this phase's run with a session in a worktree; a note needs text
   const hold = await own.api('POST', '/api/tickets/t_sbx001/hold', undefined, csrf);
   assert.deepEqual([hold.status, hold.json], [409, { error: 't_sbx001: no backlog run with a session in a worktree to pause' }]);

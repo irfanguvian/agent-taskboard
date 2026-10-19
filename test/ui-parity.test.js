@@ -84,12 +84,15 @@ function routesOf(src) {
 
 // the routes only one side has, each with its reason (m7-build.md "CLI-only" and "UI-only" lists)
 const CLI_ONLY = new Set([
-  'POST /api/tags', 'POST /api/doctor', 'GET /api/gc', 'POST /api/gc', 'POST /api/drills', 'POST /api/evals', // agent wall (D39, D-0149, D-0172): copy-command forms in the UI
+  'POST /api/tags', 'POST /api/drills', 'POST /api/evals', // agent wall (D39, D-0149, D-0172): copy-command forms in the UI
   'POST /api/session/code', 'POST /api/notify-test', 'GET /api/whoami', // tb open, tb notify-test, the CLI's identity check
 ]);
 const UI_ONLY = new Set([
   'GET /api/ui-whoami', 'GET /api/session/csrf', 'GET /events', 'GET /api/tickets/:id/docs', 'GET /api/tickets/:id/gates/:id/log', // identity, CSRF, stream, doc and gate-log links
   'GET /api/tickets/:id/feedback/:id', 'GET /api/tickets/:id/pass', // feedback file and pass preview
+  // board-terminal-parity Phase 1, page-only (Page Tools): the 3-field tag form (the CLI has tb tag add), its folder list,
+  // branches and the Mac folder dialog, Open in Terminal (the CLI is the terminal), the Goal box's / skill list
+  'POST /api/tags/quick', 'GET /api/folders/recent', 'POST /api/folders/branches', 'POST /api/pick-folder', 'POST /api/tickets/:id/terminal', 'GET /api/skills',
 ]);
 const EXEMPT_KEYS = new Set(['pos', 'note', 'tag']); // reminder add: the UI drags for pos, edits for note and tag (m7-build.md)
 
@@ -115,10 +118,12 @@ test('UP1: every CLI route is in the UI or CLI-only, every UI route in the CLI o
   assert.deepEqual(gaps(cli, ui), []);
 });
 
+// board-terminal-parity 6.6: doctor and gc left this list (the page runs them while Page Tools is on; tbd refuses them
+// to a cookie while it is off)
 test('UP1: the page never calls a CLI-only route (agent wall: copy-command forms instead)', () => {
   const ui = routesOf(read('ui/app.js'));
   for (const k of CLI_ONLY) assert.ok(!ui.has(k), `the UI calls ${k}`);
-  assert.ok(!read('ui/app.js').match(/['"`]\/api\/(gc|doctor|evals)\b/), 'no literal path of a CLI-only route in app.js');
+  assert.ok(!read('ui/app.js').match(/['"`]\/api\/evals\b/), 'no literal path of a CLI-only route in app.js');
 });
 
 test('UP2: gaps() on a synthetic list names exactly the planted route and the planted key', () => {

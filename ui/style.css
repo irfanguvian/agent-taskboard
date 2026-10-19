@@ -176,7 +176,7 @@ main:focus { outline: none; }
 .tray .trail { font: 400 var(--footnote) var(--font); }
 .tray .popmenu-item:is(label) { cursor: default; }
 .tray .popmenu-item:is(label):hover { background: transparent; }
-.input.mini { width: auto; min-height: 28px; height: 28px; margin-left: auto; padding: 0 28px 0 8px; border-color: transparent; border-radius: var(--r-sm); background-color: var(--fill); font: 400 var(--footnote) var(--font); }
+.input.mini { width: auto; min-height: 28px; height: 28px; margin-left: auto; padding: 0 28px 0 8px; border-color: var(--field-border); border-radius: var(--r-sm); background-color: var(--fill); font: 400 var(--footnote) var(--font); }
 .popmenu-item.danger.armed { background: var(--danger-fill); color: #fff; }
 .promote { display: grid; gap: 8px; margin: 4px 0 0; padding: 8px 10px 6px; border-top: var(--hairline) solid var(--line); }
 .promote label { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--fg-muted); font: 500 var(--footnote) var(--font); }
@@ -198,7 +198,7 @@ main:focus { outline: none; }
 .sf + .sf::before { content: ""; position: absolute; top: 0; left: 16px; right: 0; border-top: var(--hairline) solid var(--line); }
 .sf > label, .sf-label { color: var(--fg-muted); font: 500 var(--footnote) var(--font); }
 .sf .input {
-  width: calc(100% + 16px); min-height: 28px; margin: 0 -8px; padding: 4px 8px; border-color: transparent; border-radius: var(--r-sm);
+  width: calc(100% + 16px); min-height: 28px; margin: 0 -8px; padding: 4px 8px; border-color: var(--field-border); border-radius: var(--r-sm);
   background-color: transparent;
 }
 .sf select.input { padding-right: 32px; }
@@ -215,6 +215,18 @@ main:focus { outline: none; }
 .sheet-fields.inline .sf:has(textarea) > label { padding-top: 4px; }
 .sheet-fields.inline .sf textarea.input { min-height: 52px; }
 .cmd-block { display: grid; gap: 8px; }
+/* board-terminal-parity: what sits under a field (the Goal box's skills, Choose Folder…), the Goal box's / list */
+.sf-after { position: relative; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
+.sheet-fields.inline .sf > .sf-after { grid-column: 2; }
+.skill-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
+.skill-chips { display: contents; }
+.skill-bar .filter-chip .icon { width: 14px; height: 14px; }
+.skill-pop { position: absolute; top: 0; left: -8px; right: -8px; z-index: 5; max-height: 240px; overflow-y: auto; transform-origin: top left; }
+.skill-opt { min-width: 0; }
+.skill-opt[aria-selected="true"] { background: var(--fill); }
+.skill-name { flex: none; font-weight: 500; }
+.skill-desc { min-width: 0; overflow: hidden; color: var(--fg-subtle); font: 400 var(--footnote) var(--font); white-space: nowrap; text-overflow: ellipsis; }
+.skill-none { padding: 6px 10px; color: var(--fg-muted); font: 400 var(--footnote) var(--font); }
 .cmd {
   margin: 0; padding: 12px 16px; border-radius: var(--r-md); background: var(--surface); color: var(--fg);
   font: 400 var(--footnote) var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; user-select: all;

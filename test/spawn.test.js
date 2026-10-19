@@ -416,6 +416,17 @@ test('full access (default): user + project + local sources, no --strict-mcp-con
   assert.equal(edit(path.join(f.learning, '.claude', 'x'))?.permissionDecision, 'deny');
 });
 
+// board-terminal-parity task 5: the /names Irfan typed (t.skills_asked) join the board note, right after the default skills
+test('full access: skills Irfan asked for on the ticket (skills_asked) → one line in system.md after the default skills; a locked run → no line', async () => {
+  const f = fullFixture();
+  const { ticketDir } = await run({ resume: false, ticket: { skills_asked: ['tdd', 'shop:deploy'] }, tag: { path: f.tag }, env: { HOME: f.home } });
+  const defaults = 'learning, grilling, lavish, test-engineer-irfan, tdd, codebase-design, postgres-irfan-axi, chrome-devtools-axi, caveman, ponytail, frontend-design';
+  assert.equal(fs.readFileSync(path.join(ticketDir, 'runs/2.system.md'), 'utf8'), `# working fixture\n\n\n${fs.readFileSync(path.join(__dirname, '..', 'phases', '_board.md'), 'utf8')}\n\ndefault skills for this board: ${defaults}\nIrfan asked for these skills on this ticket: /tdd, /shop:deploy. Use them where they fit.\n`);
+  // a locked run (Sandbox on): the rules only, no asked line (D-0217)
+  const locked = await run({ resume: false, ticket: { sandbox: true, skills_asked: ['tdd'] }, tag: { path: f.tag }, env: { HOME: f.home } });
+  assert.equal(fs.readFileSync(path.join(locked.ticketDir, 'runs/2.system.md'), 'utf8'), `# working fixture\n\n\n${fs.readFileSync(path.join(__dirname, '..', 'phases', '_rules.md'), 'utf8')}`);
+});
+
 test('full access, read-only phase: rtk git reads + learn find allowed, the user allow list\'s bash / node / npx denied, no Edit on the DB; no global rules → _rules.md', async () => {
   const f = fullFixture();
   fs.rmSync(path.join(f.home, '.claude', 'CLAUDE.md'));

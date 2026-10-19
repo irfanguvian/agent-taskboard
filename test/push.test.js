@@ -54,7 +54,7 @@ const T = (id, w, sha, over = {}) => ticket(id, {
 });
 
 // ---- fixtures, seeded before store.init (it loads tickets once) ----
-const W = Object.fromEntries(['ok', 'leak', 'nodeny', 'kids', 'refuse', 'dead', 'boot', 'lease', 'probe', 'deadls', 'env', 'ev1', 'ev2', 'ev3', 'ev4'].map((n) => [n, world(n)]));
+const W = Object.fromEntries(['ok', 'leak', 'nodeny', 'kids', 'refuse', 'dead', 'boot', 'lease', 'probe', 'deadls', 'env', 'ev1', 'ev2', 'ev3', 'ev4', 'pclose'].map((n) => [n, world(n)]));
 const S = {
   ok: squash(W.ok, 'feat: one'),
   leak: squash(W.leak, `feat: ${WORD} support`),
@@ -65,6 +65,8 @@ const S = {
   dead: squash(W.dead, 'feat: dead remote'),
   boot: squash(W.boot, 'feat: landed before'),
   lease1: squash(W.lease, 'feat: first'),
+  pclose: squash(W.pclose, 'feat: push and close'), // board-terminal-parity 6.8
+  pcloseLeak: squash(W.pclose, `feat: ${WORD} and close`),
 };
 S.child = squash(W.kids, 'feat: child', S.parent);
 // SEC-1 probe: an unpushed parent squash with the word, a clean child on it; refs/remotes/mirror/x and a packed-refs
@@ -134,6 +136,8 @@ const TICKETS = [
   T('t_dels01', W.deadls, S.deadls),
   T('t_env001', W.env, S.env),
   ...Object.keys(EV).map((n, i) => T(`t_ev${i + 1}000`, W[n], S[n])),
+  T('t_pcls01', W.pclose, S.pclose),
+  T('t_pcls02', W.pclose, S.pcloseLeak),
 ];
 fs.writeFileSync(path.join(TB_HOME, 'tags.json'), JSON.stringify(TAGS));
 for (const t of TICKETS) {
@@ -224,6 +228,19 @@ test('H3 envBlock: a boolean under a SECRET-named key and a plain NODE_ENV do no
     const t = await settled(id);
     assert.deepEqual([t.push.state, t.push.state === 'failed' ? t.push.why : null, remoteAt(W[n], id) !== null], i < 2 ? ['ok', null, true] : ['failed', 'leak', false], n);
   }
+});
+
+// board-terminal-parity 6.8 Push and Close: lib/final.js close (its guards + intervention) after a green push only
+test('6.8 Push and Close: a green push closes the flow (done; interventions push then close); a refused push (leak) stays waiting close', async () => {
+  await ready;
+  await push.start('t_pcls01', 'cli', { close: true });
+  const t = await settled('t_pcls01');
+  assert.deepEqual([t.push.state, t.state, remoteAt(W.pclose, 't_pcls01')], ['ok', 'done', S.pclose]);
+  assert.deepEqual(ivs('t_pcls01'), [['cli', 'push'], ['cli', 'close']]);
+  await push.start('t_pcls02', 'cli', { close: true });
+  const r = await settled('t_pcls02');
+  assert.deepEqual([r.push.state, r.push.why, r.state, r.waiting.reason], ['failed', 'leak', 'final_gate', 'close']);
+  assert.deepEqual(ivs('t_pcls02'), [['cli', 'push']], 'no close');
 });
 
 test('push clean(): a URL\'s userinfo masked whole, a / or @ in the password too', () => {

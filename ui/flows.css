@@ -125,6 +125,8 @@
   white-space: pre-wrap; overflow-wrap: anywhere;
 }
 .notice .log { max-height: 16rem; }
+/* board-terminal-parity 3: the log tail keeps one size while lines arrive (the box never grows under the reader) */
+.log-box { height: min(50vh, 28rem); max-height: none; }
 /* text actions: pressed Follow shows a mint dot; Older / Newer off read disabled */
 .insp .link-btn[aria-pressed="true"] { color: var(--fg); }
 .insp .link-btn[aria-pressed="true"]::before {

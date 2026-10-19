@@ -267,7 +267,11 @@ test('item 8 E2E (U8 U9 J3 J12 AC3 AC4 AC8): assign → questions → tb answer 
   [Q1, P1, Q3, P2].forEach((out, i) => fs.writeFileSync(path.join(scn, `${i + 1}.json`), JSON.stringify({ steps: [result(out)] })));
   const root = newRoot();
   fs.symlinkSync('/etc/hosts', path.join(root, 'home', '.claude', 'skills', 'learning', 'hosts-link')); // never followed into the copy
-  const tbd = await boot(t, { t_e2e001: { sandbox: true, state: 'backlog', tag: 'acme/api', title: 'Paginate GET /users!', text: 'Paginate GET /users' } }, {
+  // board-terminal-parity review: a home skill outside the board defaults, asked by a /token: a locked run never copies it (removed after the check below)
+  const extra = path.join(root, 'home', '.claude', 'skills', 'extra');
+  fs.mkdirSync(extra, { recursive: true });
+  fs.writeFileSync(path.join(extra, 'SKILL.md'), '---\nname: extra\n---\n');
+  const tbd = await boot(t, { t_e2e001: { sandbox: true, state: 'backlog', tag: 'acme/api', title: 'Paginate GET /users!', text: 'Paginate GET /users /extra', skills_asked: ['extra'] } }, {
     files: { 'tags.json': { acme: {}, 'acme/api': { type: 'git', path: dir, base: 'main', setup, env_files: ['.env.test'] } } },
     env: { FAKE_CLAUDE_SCENARIO_DIR: scn }, root,
   });
@@ -364,6 +368,7 @@ test('item 8 E2E (U8 U9 J3 J12 AC3 AC4 AC8): assign → questions → tb answer 
   assert.deepEqual([fs.lstatSync(path.join(sk, 'SKILL.md')).isFile(), fs.readdirSync(sk)], [true, ['SKILL.md']]);
   // Phase 4 (+/-): sandbox ticket, the board defaults hold plugin skills (caveman ...) the home lacks: no throw, only the known one copied
   assert.deepEqual(fs.readdirSync(path.join(tk(tbd, id, 'skills', '.claude', 'skills'))), ['learning']);
+  fs.rmSync(extra, { recursive: true });
   assert.match(fs.readFileSync(path.join(wt, 'node_modules', '.lease'), 'utf8'), /^\S{8,}\n$/, 'TBX_LEASE: setup ran in the heavy slot');
   // J3: children in Backlog, parent + blocked_by mapped, auto_assign; not assigned while the parent is not merged (J5).
   // C15 (D-0091) contract change: a code child always waits on its parent too (C2 named only C1: was [c1.id])
