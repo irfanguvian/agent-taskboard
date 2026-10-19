@@ -94,6 +94,55 @@ test('AC9 AC10 a run end: one t:run line (App C fields, cost in micro-USD), the 
   assert.match((await runTb(['show', 't_logs01'], tbd)).stdout, /^ {2}run: runs\/1\.jsonl · ended result$/m);
 });
 
+// board-terminal-parity Phase 3 (.omc/handoffs/btp-p3-server.md contract B, C, D): the activity feed of a fake-claude run
+test('Phase 3 GET …/activity: the last rows + steps (state moves + your actions); after=<cursor> pages of limit 2 with a moving cursor, no steps; unknown run → 404; tb logs --plain', async (t) => {
+  const T = (s) => `2026-10-19T01:00:0${s}.000Z`;
+  const at = (ts, role, content) => ({ emit: { type: role, timestamp: ts, message: { role, content } } });
+  const scenario = { steps: [
+    at(T(1), 'assistant', [{ type: 'text', text: 'Reading the shop' }, { type: 'tool_use', id: 'tu_1', name: 'Read', input: { file_path: 'shop/cart.js' } }]), // 2 rows, one page
+    at(T(3), 'user', [{ type: 'tool_result', tool_use_id: 'tu_1', content: 'module.exports = {}' }]),
+    at(T(4), 'assistant', [{ type: 'tool_use', id: 'tu_2', name: 'Bash', input: { command: 'npm test' } }]),
+    at(T(5), 'user', [{ type: 'tool_result', tool_use_id: 'tu_2', is_error: true, content: 'Exit code 1' }]),
+    { result: { structured_output: { answer: 'ok' }, num_turns: 3, total_cost_usd: 0.123456 } },
+  ] };
+  const you = (at, verb, task = null) => JSON.stringify({ at, actor: 'cli', verb, task, payload_sha256: '0'.repeat(64) });
+  const tbd = await boot(t, { t_feed01: { scenario } }, {
+    'tickets/t_feed01/interventions.jsonl': `${you('2020-01-01T00:00:00.000Z', 'answer')}\n${you('2020-01-01T00:00:02.000Z', 'rework', 'cart-fix')}\n`,
+    'tickets/t_feed01/events.jsonl': `${JSON.stringify({ t: '2020-01-01T00:00:01.000Z', kind: 'transition', id: 't_feed01', from: 'backlog', to: 'planning' })}\n`,
+  });
+  const dir = path.join(tbd.tbHome, 'tickets/t_feed01');
+  await until(() => read(tbd, 't_feed01').lease?.exit && fs.existsSync(path.join(dir, 'runs/1.jsonl.gz')), 30_000, 'run 1 ended and packed');
+  const feed = [
+    { at: T(1), text: 'Started · model opus', tone: 'info' }, // no timestamp, before the first one: that one's time (Phase 3 review)
+    { at: T(1), text: 'Said: Reading the shop', tone: 'info' },
+    { at: T(1), text: 'Read shop/cart.js', tone: 'info' },
+    { at: T(4), text: 'Ran npm test', tone: 'info' },
+    { at: T(5), text: 'Failed: Exit code 1', tone: 'bad' },
+    { at: T(5), text: 'Step ended: success · $0.12', tone: 'ok' }, // no timestamp: the last one of this read
+  ];
+  const get = async (q) => { const r = await tbd.api('GET', `/api/tickets/t_feed01/activity?${q}`); return r.status === 200 ? r.json : [r.status, r.json]; };
+
+  const last = await get('limit=2');
+  const moves = lines(path.join(dir, 'events.jsonl')).filter((e) => e.kind === 'transition' && e.t > '2021').map((e) => ({ at: e.t, text: `Moved to ${e.to}`, tone: 'info' }));
+  assert.deepEqual(last, { id: 't_feed01', run: 1, lines: feed.slice(-2), ended: true, cursor: last.cursor, steps: [
+    { at: '2020-01-01T00:00:00.000Z', text: 'You: answer', tone: 'you' }, { at: '2020-01-01T00:00:01.000Z', text: 'Moved to planning', tone: 'info' },
+    { at: '2020-01-01T00:00:02.000Z', text: 'You: rework task cart-fix', tone: 'you' }, ...moves] });
+  const pages = [];
+  for (let cursor = 0, i = 0; i < 4; i++) {
+    const p = await get(`run=1&after=${cursor}&limit=2`);
+    assert.ok(p.cursor > cursor && !('steps' in p), `page ${i}: cursor ${cursor} → ${p.cursor}, no steps`);
+    pages.push(p.lines);
+    cursor = p.cursor;
+  }
+  // at most 2 rows a page, a line's rows never split; a page with no timestamped line: at null (contract B, "in this read")
+  assert.deepEqual(pages, [[{ ...feed[0], at: null }], feed.slice(1, 3), feed.slice(3, 5), [{ ...feed[5], at: null }]]);
+  assert.deepEqual(await get('run=9'), [404, { error: 't_feed01: run 9 has no log' }]);
+  assert.deepEqual(await get('limit=201'), [400, { error: 'limit must be a number from 1 to 200' }]);
+  const tb = await runTb(['logs', 't_feed01', '--plain'], tbd, { TB_TZ: 'UTC' });
+  assert.equal(tb.code, 0, tb.stderr);
+  assert.deepEqual(tb.stdout.split('\n').filter((l) => /^ {2}(--:--|01:00) {2}(?!Moved|You)/.test(l)), feed.map((x) => `  ${x.at ? '01:00' : '--:--'}  ${x.text}`), 'HH:MM  text, the run rows in order');
+});
+
 test('AC4 AC7 R16 run control: SSE run event; Resume refused while live (409), no auth → 401; tb restart → a fresh session, tb cancel → run killed + cancelled, t:run per run; tb resume then refused (exit 1)', async (t) => {
   const tbd = await boot(t, { t_ctrl01: { scenario: { steps: [say('assistant', [{ type: 'tool_use', id: 'tu_1', name: 'Bash', input: {} }]), { hang: true }] } } });
   const wait = events(t, tbd);

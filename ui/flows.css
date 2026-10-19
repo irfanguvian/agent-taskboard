@@ -236,18 +236,46 @@
 .gates { display: grid; }
 .gate { border-top: var(--hairline) solid var(--line); }
 .gate:last-child { border-bottom: var(--hairline) solid var(--line); }
-.gate > summary, .tail > summary { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; list-style: none; cursor: pointer; }
+.gate > summary, .tail > summary, .tech > summary { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; list-style: none; cursor: pointer; }
 .gate > summary { padding: 12px 0; }
-.tail > summary { color: var(--fg-muted); font: 400 var(--subheadline) var(--font); }
-.gate > summary::-webkit-details-marker, .tail > summary::-webkit-details-marker { display: none; }
-.gate > summary::before, .tail > summary::before {
+.tail > summary, .tech > summary { color: var(--fg-muted); font: 400 var(--subheadline) var(--font); }
+.gate > summary::-webkit-details-marker, .tail > summary::-webkit-details-marker, .tech > summary::-webkit-details-marker { display: none; }
+.gate > summary::before, .tail > summary::before, .tech > summary::before {
   content: ""; flex: none; width: 6px; height: 6px; margin: 0 4px 0 2px; border: solid var(--fg-subtle); border-width: 0 1.5px 1.5px 0;
   transform: rotate(-45deg); transition: transform var(--fast) var(--ease);
 }
-.gate[open] > summary::before, .tail[open] > summary::before { transform: rotate(45deg); }
+.gate[open] > summary::before, .tail[open] > summary::before, .tech[open] > summary::before { transform: rotate(45deg); }
 .gate[open] { padding-bottom: 16px; }
-.gate > * + *, .tail > * + * { margin-top: 12px; }
+.gate > * + *, .tail > * + *, .tech > * + * { margin-top: 12px; }
 .rec { display: grid; gap: 8px; }
+
+/* board-terminal-parity 3, Overview top: the step bar (wraps, never scrolls), the Now card, the plan tasks. A mark leads
+   each item: a check (done), the accent dot (now), a gray dot (next, dim text) */
+.stepbar { display: flex; flex-wrap: wrap; gap: 6px 16px; }
+.ptasks { display: grid; gap: 8px; }
+.stepbar > li, .ptasks > li { display: flex; align-items: center; gap: 6px; min-width: 0; color: var(--fg-muted); overflow-wrap: anywhere; }
+.stepbar > li { font: 400 var(--footnote) var(--font); }
+.stepbar > .next, .ptasks > .next { color: var(--fg-subtle); }
+.stepbar > .now, .ptasks > .now { color: var(--fg); font-weight: 600; }
+.stepbar .icon, .ptasks .icon { width: 14px; height: 14px; color: var(--mint-fg); }
+.stepbar .dot, .ptasks .dot { margin: 0 3px; }
+.stepbar .pill { margin-left: 2px; }
+.now-card { display: grid; gap: 4px; }
+.now-stage { font: 600 var(--headline) var(--font); letter-spacing: -0.01em; overflow-wrap: anywhere; }
+.now-subs { display: grid; margin-top: 8px; }
+.now-subs > li { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 0; border-top: var(--hairline) solid var(--line); }
+.now-sub { display: grid; min-width: 0; overflow-wrap: anywhere; }
+.now-sub .hint { font: 400 var(--footnote) var(--font); }
+.now-facts { margin-top: 4px; color: var(--fg-muted); font: 400 var(--footnote) var(--font); font-variant-numeric: tabular-nums; }
+.now-facts:empty { display: none; }
+
+/* the Activity feed: one fixed-height box (it never grows under the reader), a row = time, tone dot, text */
+.feed { height: min(40vh, 22rem); overflow: auto; overscroll-behavior: contain; padding: 8px 12px; border-radius: var(--r-md); background: var(--fill); }
+.feed-row { display: grid; grid-template-columns: max-content 8px minmax(0, 1fr); align-items: baseline; gap: 10px; padding: 3px 0; }
+.feed-at { color: var(--fg-subtle); font: 400 var(--caption) var(--font); font-variant-numeric: tabular-nums; }
+.feed-row > .dot { align-self: start; margin-top: calc(0.5lh - 4px); }
+.feed-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.part > .link-btn { justify-self: start; }
 
 /* ---------- phones (< 744): the table becomes a list, the inspector a bottom sheet (foundation) ---------- */
 @media (max-width: 743px) {

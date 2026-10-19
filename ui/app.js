@@ -31,7 +31,8 @@ const ui = { drag: null, editing: null, tray: null, promote: null, pick: { kind:
   fview: 'all', rfilter: null, tab: 'overview', day: null, // calm UI: Flows segment (all|you|running|done), Reminders filter from a Today highlight (overdue|today), inspector tab (overview|activity|reports), the date of the last render (midnight)
   cfg: null, cfgErr: null, notes: new Map(), // full-access-runs Phase 8 + 9: GET /api/config's answer + the last refused setting ({role, text}), note drafts (id → text)
   pres: new Map(), shown: new Map(), // board-terminal-parity 3: the drawer's kept <pre>s (data-role → {key, node, text}), see keptPre; when each plan round first showed (`${id}:${n}` → ms, approve)
-  tc: null }; // board-terminal-parity Phase 2 task 6: Settings → Terminal check ({busy, res, err, live, tags, tag, cost, armedAt})
+  tc: null, // board-terminal-parity Phase 2 task 6: Settings → Terminal check ({busy, res, err, live, tags, tag, cost, armedAt})
+  feed: null, raw: false, tech: false }; // board-terminal-parity Phase 3: the open ticket's Activity feed (see readFeed), Show Raw Log, Tech Details open
 
 // board-terminal-parity 6.2: the New Flow and Promote kinds are the built ones tbd names (GET /api/state system.kinds)
 const kinds = () => (Array.isArray(state?.system?.kinds) ? state.system.kinds : []);
@@ -753,10 +754,12 @@ $('#board').addEventListener('keydown', e => {
 });
 
 // ---------- flows ----------
-const span = v => {
-  const s = Math.max(0, Math.round((Date.now() - new Date(v)) / 1000));
+// a duration as 40s / 12m / 3h / 2d; span: the time since v
+const dur = ms => {
+  const s = Math.max(0, Math.round(ms / 1000));
   return s < 90 ? `${s}s` : s < 5400 ? `${Math.round(s / 60)}m` : s < 129600 ? `${Math.round(s / 3600)}h` : `${Math.round(s / 86400)}d`;
 };
+const span = v => dur(Date.now() - new Date(v));
 const ago = v => `${span(v)} ago`;
 
 // Spec §8 liveness: a status dot and a word (mint: working, butter: held or quiet, rose: stuck or gone).
@@ -786,6 +789,7 @@ const WORD_HUE = Object.assign(Object.create(null), { done: 'mint', merged: 'min
 const WORD_LABEL = Object.assign(Object.create(null), Object.fromEntries(FLOW_COLS), {
   cancelled: 'Cancelled', pass: 'Pass', fail: 'Fail', failed: 'Failed', block: 'Block', running: 'Running', pending: 'Pending', gating: 'Gating',
   red: 'Red', green: 'Green', merged: 'Merged', closed: 'Closed', 'need review': 'Need Review', assisted: 'Assisted',
+  completed: 'Completed', stopped: 'Stopped', killed: 'Killed', // board-terminal-parity 3: a subagent's status (Now card)
 });
 const wordPill = (w, other = 'gray', hue = WORD_HUE[String(w ?? '').toLowerCase()]) => {
   const label = WORD_LABEL[String(w ?? '').toLowerCase()];
@@ -821,8 +825,9 @@ function onRun(e) {
   for (const cell of document.querySelectorAll(`#flowsView [data-run="${CSS.escape(r.id)}"]`)) cell.replaceChildren(run ? runStats(run) : DASH);
   if (ui.open === r.id) {
     renderRunBox();
-    reloadOpen(); // the run moved: the lease changed too
+    reloadOpen(); // the run moved: the lease changed too (the drawer, its Now card and step bar render again)
     followLog(r.id, r.liveness == null);
+    readFeed(r.id);
   }
 }
 
@@ -906,9 +911,14 @@ const redraw = () => { if (ui.open && $('#drawer').open) drawerBody(flowOf(ui.op
 // board-terminal-parity 3: the log tail (and a feedback file) is one <pre> per open ticket that every rebuild re-inserts
 // as is: its text is written only when it changed (more lines at the end: appended), so its box and its lines never
 // re-lay out under the reader; rescroll() puts its scroll back. key: what it shows (ticket, feedback n).
-function keptPre(key, attrs, text) {
+// kept: that one node per data-role (Phase 3: the Activity feed list too); keptPre: a <pre> of it, its text kept in step.
+function kept(key, attrs, tag = 'pre') {
   let p = ui.pres.get(attrs['data-role']);
-  if (p?.key !== key) ui.pres.set(attrs['data-role'], p = { key, node: el('pre', attrs), text: null });
+  if (p?.key !== key) ui.pres.set(attrs['data-role'], p = { key, node: el(tag, attrs), text: null });
+  return p;
+}
+function keptPre(key, attrs, text) {
+  const p = kept(key, attrs);
   if (text !== p.text) {
     if (p.text && text.startsWith(p.text)) p.node.append(text.slice(p.text.length));
     else p.node.replaceChildren(text);
@@ -929,6 +939,7 @@ function setTab(t) {
   const insp = $('#drawer .insp');
   if (!insp) return;
   insp.dataset.tab = t;
+  if (t === 'activity') feedScroll(); // review M1: a hidden pane has no layout box, so the feed scrolls once it shows
   for (const b of insp.querySelectorAll('.insp-tabs [role="tab"]')) {
     b.setAttribute('aria-selected', String(b.value === t));
     b.tabIndex = b.value === t ? 0 : -1;
@@ -966,6 +977,7 @@ function drawerBody(f, ticket, error) {
         tab('overview', 'Overview'), tab('activity', 'Activity', live && ', run live'), tab('reports', 'Reports', reports && ', has reports'))),
     el('div', { class: 'pane', 'data-pane': 'overview', role: 'tabpanel', id: 'ipane-overview', 'aria-labelledby': 'itab-overview' },
       ticket && [
+        progress(f.id, k),
         actionCards(f.id, k),
         notice(f.id, k.waiting),
         st === 'backlog' && el('section', { class: 'part', 'aria-labelledby': 'as-h' },
@@ -987,7 +999,8 @@ function drawerBody(f, ticket, error) {
           dd('Waiting', w), dd('Rework', k.rework ?? f.rework), dd('Fix', k.fixes > 0 ? `${k.fixes}/${ui.fixMax}` : null),
           dd('QA', k.qa?.verdict ? `${k.qa.verdict} · ${k.qa.pass} pass · ${k.qa.fail} fail · ${k.qa.blocked} blocked` : null),
           dd('Final', isObj(k.final) ? finalText(k.final) : null),
-          dd('Branch', k.branch), dd('Base', k.base_sha?.slice(0, 12)), dd('Push', isObj(k.push) ? pushText(k.push, k) : null),
+          dd('Branch', k.branch), dd('Base', isObj(k.work) ? null : k.base_sha?.slice(0, 12)), // with work: under Activity → Tech Details
+          dd('Push', isObj(k.push) ? pushText(k.push, k) : null),
           fact('Ident', identText(td) ?? (td?.push ? noIdent(tg) : null)),
           fact('Fix of', k.fix_of && el('button', { type: 'button', class: 'link-btn', 'data-role': 'fix-of', onclick: () => openTicket(k.fix_of) }, vis(state.flows.find(x => x.id === k.fix_of)?.title || k.fix_of))),
           fact('Promoted from', k.promoted_from && vis(k.promoted_from)),
@@ -997,6 +1010,7 @@ function drawerBody(f, ticket, error) {
         el('p', { class: 'ticket-text' }, error || (ticket ? vis(ticket.text) || 'No text.' : 'Loading…'))),
       st !== 'plan_approval' && plan),
     el('div', { class: 'pane', 'data-pane': 'activity', role: 'tabpanel', id: 'ipane-activity', 'aria-labelledby': 'itab-activity' },
+      ui.feed?.id === f.id && el('section', { id: 'feedbox', class: 'part', 'aria-labelledby': 'fd-h' }, ...feedBox(f.id)),
       st === 'blocked' ? el('p', { class: 'hint' }, 'Resume, Restart and the log are under Overview.') : runSec,
       ticket && isObj(k.work) && [workView(f.id, k), gatesView(f.id)],
       ticket && k.interventions > 0 && ivsView(f.id)),
@@ -1008,6 +1022,62 @@ function drawerBody(f, ticket, error) {
         : el('p', { class: 'hint' }, 'Loading…')))));
   refocus(foc);
   rescroll(scroll);
+  feedScroll();
+}
+
+// board-terminal-parity Phase 3, Overview top: where the flow is (step bar), what its run does now (Now card), the
+// approved plan's tasks by title. Rebuilt with the drawer on each run event (onRun → reloadOpen); times tick in place
+// (data-since). Agent text (task titles, model, what it does, subagent names) as text only (vis).
+const STEPS = [['planning', 'Planning'], ['clarify', 'Questions'], ['plan_approval', 'Plan Approval'], ['working', 'Working'],
+  ['review', 'Review'], ['qa', 'QA'], ['final_gate', 'Final Check'], ['done', 'Done']];
+const kilo = n => (n >= 1000 ? `${Math.round(n / 1000)}k` : String(n));
+const sep = parts => parts.filter(Boolean).flatMap((p, i) => (i ? [' · ', p] : [p])); // a run of facts joined by ' · '
+// marks in a row: [text, done | now | next, extra]; done: a check + "done" for screen readers, now: the accent dot +
+// aria-current, next: dim (the step bar, the plan tasks)
+const track = (cls, label, items) => el('ol', { class: cls, 'aria-label': label }, ...items.map(([text, at, extra]) =>
+  el('li', { class: at, 'aria-current': at === 'now' ? 'step' : null },
+    at === 'done' ? icon('check') : el('i', { class: `dot${at === 'now' ? ' hue-lavender' : ''}`, 'aria-hidden': 'true' }),
+    el('span', null, text, at === 'done' && el('span', { class: 'sr-only' }, ', done')), extra)));
+function progress(id, k) {
+  const st = k.state, steps = STEPS.filter(([s]) => s !== 'qa' || k.kind !== 'brainstorm');
+  const at = s => steps.findIndex(([x]) => x === s);
+  const from = st === 'blocked' ? k.blocked_from : st, cur = at(from); // backlog, cancelled: -1, nothing lit
+  const upto = from === 'clarify' && at(k.clarify_origin?.phase) > cur ? at(k.clarify_origin.phase) : cur; // asked from working on (or blocked there): the steps before it stay done
+  const phase = from === 'clarify' ? k.clarify_origin?.phase : from;
+  const w = isObj(k.work) ? k.work : {}, by = new Map((Array.isArray(w.tasks) ? w.tasks : []).filter(isObj).map(x => [x.id, x.status]));
+  const tasks = Array.isArray(ui.plan?.tasks) && at(phase) >= at('working') ? ui.plan.tasks.filter(isObj) : [];
+  return el('section', { class: 'part progress', 'aria-label': 'Progress' },
+    track('stepbar', 'Flow steps', steps.map(([, label], i) => [label, i === cur ? 'now' : i < upto ? 'done' : 'next', i === cur && st === 'blocked' && pill('rose', 'Blocked')])),
+    st === 'cancelled' && el('p', null, pill('gray', 'Cancelled')),
+    nowCard(id, k, w),
+    tasks.length > 0 && [el('h4', null, 'Plan Tasks'),
+      track('ptasks', 'Plan tasks', tasks.map(x => [vis(x.title || 'Task'), by.get(x.id) === 'done' ? 'done' : x.id === w.task ? 'now' : 'next']))]);
+}
+// The Now card: the run live, or the lease's last run. Line 1 the stage (working: task n of m and its title), then model
+// and effort, what it does now and since when (live) or how it ended, its subagents, context, refusals, cost, elapsed.
+// Money arrives as integer micro-USD: divided only here, for display.
+function nowCard(id, k, w) {
+  const r = ui.runs.get(id), l = k.lease, live = !!r?.live || (!!l && !l.exit);
+  if (!live && !l?.started_at) return null;
+  const phase = l?.phase || k.state, tasks = Array.isArray(w.tasks) ? w.tasks : [], n = tasks.findIndex(x => x?.id === w.task);
+  const title = phase === 'working' && Array.isArray(ui.plan?.tasks) ? ui.plan.tasks.find(x => x?.id === w.task)?.title : null;
+  const doing = isObj(r?.doing) ? [r.doing.tool, r.doing.text].filter(Boolean).map(vis).join(': ') : '';
+  const subs = Array.isArray(r?.subs) ? r.subs.filter(isObj) : [], cost = r?.cost_total ?? l?.cost_total;
+  const start = l?.started_at ?? r?.started_at, took = Date.parse(l?.ended_at) - Date.parse(start);
+  const model = [r?.model ?? l?.model, r?.effort].filter(Boolean).map(vis).join(' · ');
+  const idle = r?.liveness && r.liveness !== 'thinking' && r.liveness !== 'tool' ? LIVE[r.liveness]?.[1] : null; // a slot, retry or Approve wait
+  return el('div', { class: 'card now-card', role: 'group', 'aria-label': 'Now' },
+    el('p', { class: 'now-stage' }, sep([stateLabel(phase), phase === 'working' && n >= 0 && `task ${n + 1} of ${tasks.length}`, title && vis(title)])),
+    model && el('p', { class: 'hint' }, model),
+    live ? el('p', null, doing || idle || 'Thinking or writing', doing && r.tool_at && [' · ', el('span', { 'data-since': r.tool_at }, span(r.tool_at))])
+      : el('p', null, `Last run · ended: ${vis(l.exit ?? DASH)}`),
+    subs.length > 0 && el('ul', { class: 'now-subs', 'aria-label': 'Subagents' }, ...subs.map(s => el('li', null,
+      el('span', { class: 'now-sub' }, el('span', null, vis(s.desc || s.type || 'Subagent')),
+        el('span', { class: 'hint' }, sep([s.type && vis(s.type), s.tool && vis(s.tool), Number.isFinite(s.tokens) && `${kilo(s.tokens)} tokens`]))),
+      wordPill(s.status, s.status === 'completed' ? 'mint' : 'gray')))),
+    el('p', { class: 'now-facts' }, ...sep([Number.isFinite(r?.ctx_tokens) && `Context ${kilo(r.ctx_tokens)} tokens`, r?.denied > 0 && dot('wait', `${r.denied} refused`),
+      Number.isInteger(cost) && `$${(cost / 1e6).toFixed(2)}`,
+      live && start ? el('span', { 'data-since': start }, span(start)) : took >= 0 && dur(took)])));
 }
 
 // Run section of the drawer (spec §10 card detail): run line, refused-run error (R17), Resume / Restart / Cancel,
@@ -1051,11 +1121,14 @@ function runBox(id, k) {
   if (open) out.push(noteBox(id, k, running));
   const shown = ui.log?.id === id;
   const follow = ui.follow?.id === id && ui.follow.on;
+  const raw = ui.raw || follow; // board-terminal-parity 3: the Activity feed is the default view, this tail sits behind Show Raw Log (Follow keeps it shown)
+  const rawBtn = () => { ui.raw = !raw; if (!ui.raw) ui.follow = null; renderRunBox(); };
   if (l?.log || shown) out.push(el('div', { class: 'log-head' }, el('h4', null, 'Log Tail'),
     el('span', { class: 'log-acts' },
-      l?.log && el('button', { type: 'button', class: 'link-btn', 'data-role': 'follow', 'aria-pressed': String(follow), onclick: () => toggleFollow(id) }, follow ? 'Following' : 'Follow'),
-      l?.log && el('button', { type: 'button', class: 'link-btn', 'data-role': 'log', onclick: () => loadLog(id) }, shown ? 'Refresh' : 'Show Last 200 Lines'))));
-  if (shown) out.push(ui.log.error ? el('p', { class: 'hint' }, ui.log.error)
+      raw && l?.log && el('button', { type: 'button', class: 'link-btn', 'data-role': 'follow', 'aria-pressed': String(follow), onclick: () => toggleFollow(id) }, follow ? 'Following' : 'Follow'),
+      raw && l?.log && el('button', { type: 'button', class: 'link-btn', 'data-role': 'log', onclick: () => loadLog(id) }, shown ? 'Refresh' : 'Show Last 200 Lines'),
+      el('button', { type: 'button', class: 'link-btn', 'data-role': 'raw-log', 'aria-pressed': String(raw), onclick: rawBtn }, 'Show Raw Log'))));
+  if (shown && raw) out.push(ui.log.error ? el('p', { class: 'hint' }, ui.log.error)
     : keptPre(id, { class: 'log log-box', 'data-role': 'log-tail', tabindex: '0', 'aria-label': 'Run log, last lines' }, ui.log.lines.join('\n') || 'Empty so far.'));
   return out;
 }
@@ -1199,6 +1272,89 @@ async function followLog(id, ending) {
   if (ui.follow === f) renderRunBox();
 }
 
+// board-terminal-parity Phase 3, Activity feed (GET …/activity): the first read of an open ticket (no after) brings the
+// run's last lines and the state moves + your actions (steps; steps first on a tie); each `run` event of the open ticket
+// reads after the cursor, as Follow does: one request at a time, an event during it asks for one more round. A newer
+// run of the ticket (its lease) starts again with that run's last lines. The last 1000 rows are kept, append only, in
+// one kept list node (kept) that every rebuild re-inserts.
+const FEED_MAX = 1000;
+const TONE = Object.assign(Object.create(null), { info: 'gray', ok: 'mint', warn: 'butter', bad: 'rose', you: 'lavender' });
+const FEED_EMPTY = Object.assign(Object.create(null), { loading: 'Loading…', none: 'No activity yet.', ok: 'Nothing yet.' }); // else: the error
+const feedAdd = (a, xs) => { a.rows = [...a.rows, ...xs.map(x => ({ at: x.at ?? a.rows.at(-1)?.at ?? null, text: x.text, tone: x.tone, n: ++a.seq }))].slice(-FEED_MAX); };
+async function readFeed(id) {
+  const a = ui.feed;
+  if (a?.id !== id) return;
+  if (a.busy) { a.again = true; return; }
+  a.busy = true;
+  const seq = a.seq, was = a.state;
+  try {
+    do {
+      a.again = false;
+      const cur = Number(/^runs\/(\d+)\.jsonl$/.exec(ui.ticket?.lease?.log ?? '')?.[1]);
+      if (a.run && cur > a.run) Object.assign(a, { run: cur, cursor: null });
+      const first = a.cursor == null;
+      const r = await api('GET', `/api/tickets/${enc(id)}/activity?limit=200${a.run ? `&run=${a.run}` : ''}${first ? '' : `&after=${enc(a.cursor)}`}`);
+      if (ui.feed !== a) return;
+      const lines = Array.isArray(r.lines) ? r.lines.filter(isObj) : [];
+      const steps = first && !a.rows.length && Array.isArray(r.steps) ? r.steps.filter(isObj)
+        .map(x => ({ ...x, text: String(x.text ?? '').replace(/^Moved to (\w+)$/, (_, s) => `Moved to ${stateLabel(s)}`) })) : [];
+      const t = x => Date.parse(x.at) || 0;
+      feedAdd(a, first ? [...steps, ...lines].sort((x, y) => t(x) - t(y)) : lines); // a stable sort: steps first on a tie
+      Object.assign(a, { run: r.run ?? a.run, cursor: r.cursor ?? a.cursor, state: 'ok' });
+      if (!first && lines.length >= 200) a.again = true; // more waiting after this page
+    } while (a.again);
+  } catch (e) {
+    if (ui.feed === a) a.state = e.status === 404 ? 'none' : e.message;
+  } finally {
+    a.busy = false;
+  }
+  if (ui.feed === a && (a.seq !== seq || a.state !== was)) renderFeed(); // nothing new: the section stays as it is
+}
+// the feed section's parts: heading, the kept list (new rows appended, the oldest past 1000 dropped) or why it is empty,
+// Jump to Latest while Irfan reads further up. role log, aria-live off: the run box's outcome line is the one that speaks.
+function feedBox(id) {
+  const a = ui.feed;
+  if (a?.id !== id) return [];
+  const p = kept(id, { class: 'feed', 'data-role': 'feed', role: 'log', 'aria-live': 'off', tabindex: '0', 'aria-label': 'Activity, oldest first', onscroll: e => feedScrolled(e.currentTarget) }, 'div');
+  for (const x of a.rows) {
+    if (x.n <= (p.drawn ?? 0)) continue;
+    p.node.append(el('div', { class: 'feed-row' }, el('span', { class: 'feed-at' }, Number.isFinite(Date.parse(x.at)) ? hhmm(x.at) : '--:--'),
+      el('i', { class: `dot hue-${TONE[x.tone] ?? 'gray'}`, 'aria-hidden': 'true' }), el('span', { class: 'feed-text' }, vis(x.text))));
+  }
+  p.drawn = a.seq;
+  for (let n = p.node.children.length - FEED_MAX; n > 0; n--) p.node.firstElementChild?.remove();
+  return [el('h3', { id: 'fd-h' }, 'Activity'),
+    a.rows.length ? p.node : el('p', { class: 'hint' }, FEED_EMPTY[a.state] ?? a.state),
+    el('button', { type: 'button', class: 'link-btn', 'data-role': 'feed-latest', hidden: a.pinned, onclick: () => {
+      const n = $('#drawer [data-role="feed"]');
+      if (!n) return;
+      n.focus(); // first: the button hides under the focus
+      n.scrollTop = n.scrollHeight;
+      feedScrolled(n);
+    } }, 'Jump to Latest')];
+}
+// it sticks to the bottom unless Irfan scrolled up; a re-inserted node is put back where he left it
+function feedScrolled(n) {
+  const a = ui.feed;
+  if (!a) return;
+  a.pinned = n.scrollTop + n.clientHeight >= n.scrollHeight - 2;
+  a.top = n.scrollTop;
+  const b = $('#drawer [data-role="feed-latest"]');
+  if (b) b.hidden = a.pinned;
+}
+const feedScroll = () => {
+  const a = ui.feed, n = a && $('#drawer [data-role="feed"]');
+  if (n) n.scrollTop = a.pinned ? n.scrollHeight : a.top;
+};
+function renderFeed() {
+  const box = $('#feedbox');
+  if (!box || !ui.open) return;
+  const foc = drawerFocus();
+  box.replaceChildren(...nodes(feedBox(ui.open)));
+  refocus(foc);
+  feedScroll();
+}
+
 // The open drawer's ticket, read again (state, lease: the run box shows the outcome). Reads can answer out of order:
 // only the newest one renders. Called on open, after every board load (any ticket event, a reconnect), on the flow's
 // run events and after a click.
@@ -1214,6 +1370,12 @@ async function readOpen() {
       ui.plan = j.plan ?? null;
       ui.ask = j.ask ?? null;
       ui.fixMax = j.fix_max;
+      // Phase 3: a state move seen here is a feed row of its own (the first read's steps hold the older ones): no request
+      const a = ui.feed, s = j.ticket?.state;
+      if (a?.id === id && s) {
+        if (a.seen && a.seen !== s && a.cursor != null) feedAdd(a, [{ at: j.ticket.updated_at ?? new Date().toISOString(), text: `Moved to ${stateLabel(s)}`, tone: 'info' }]);
+        a.seen = s;
+      }
       drawerBody(flowOf(id), ui.ticket = j.lanes ? { ...j.ticket, lanes: j.lanes } : j.ticket); // M5.5: a parent's lanes ride on its ticket
     }
   } catch (e) {
@@ -1224,7 +1386,8 @@ const reloadOpen = debounce(readOpen, 200);
 
 async function openTicket(id) {
   const d = $('#drawer');
-  if (ui.open !== id) Object.assign(ui, { follow: null, log: null, ticket: null, round: null, plan: null, arm: null, err: null, ask: null, gates: null, ivs: null, fb: null, pass: null, qa: null, rec: null, final: null, tab: 'overview', pres: new Map(), shown: new Map() });
+  if (ui.open !== id) Object.assign(ui, { follow: null, log: null, ticket: null, round: null, plan: null, arm: null, err: null, ask: null, gates: null, ivs: null, fb: null, pass: null, qa: null, rec: null, final: null, tab: 'overview', pres: new Map(), shown: new Map(),
+    raw: false, tech: false, feed: { id, rows: [], seq: 0, run: null, cursor: null, state: 'loading', pinned: true, top: 0, seen: null } });
   ui.open = id;
   markOpen();
   drawerBody(flowOf(id), ui.ticket);
@@ -1232,7 +1395,7 @@ async function openTicket(id) {
   else { d.scrollTop = 0; $('#drawer [data-role="close"]').focus(); } // moved to a parent, child or blocker inside the drawer
   // M5 C20: the tag's ident + push remote for the drawer, read per open (set by the CLI only; none read = no Push button);
   // the config once (Page Tools: Open in Terminal)
-  await Promise.all([readOpen(), api('GET', '/api/tags').then(j => { ui.tagDefs = j.tags || {}; redraw(); }, () => {}), !ui.cfg?.config && loadSettings().then(redraw)]);
+  await Promise.all([readOpen(), readFeed(id), api('GET', '/api/tags').then(j => { ui.tagDefs = j.tags || {}; redraw(); }, () => {}), !ui.cfg?.config && loadSettings().then(redraw)]);
 }
 // A held Enter repeats clicks on the refocused button: the repeats are dropped here (a repeat would confirm an armed
 // action, or Approve a plan that just showed); Approve also ignores a click in its plan's first 400 ms (approve()).
@@ -1245,6 +1408,7 @@ $('#drawer').addEventListener('close', () => {
   const id = ui.open;
   ui.open = null;
   ui.follow = null;
+  ui.feed = null; // its rows and reads too
   ui.pres.clear(); // the kept log text goes with the drawer
   ui.shown.clear();
   markOpen();
@@ -1375,18 +1539,22 @@ const allows = b => (b.tool === 'Bash' ? `Allow this exact command for the next 
 // review M3: Allow only while the next run resumes the blocked session (lib/approvals.js resumes, the same check)
 const RESUMES = ['crash', 'interrupted', 'stalled', 'usage', 'paused', 'held', 'schema_fail'];
 const resumes = (k, b) => typeof b.session === 'string' && k.state === b.phase && k.lease?.phase === b.phase && k.lease.session === b.session
-  && (!k.lease.exit || (RESUMES.includes(k.lease.exit) && Number.isInteger(k.lease.pid)));
+  && !k.lease.pending?.fresh && (!k.lease.exit || (RESUMES.includes(k.lease.exit) && Number.isInteger(k.lease.pid))
+    || (k.lease.exit === 'result' && k.continue?.phase === b.phase && k.continue.session === b.session));
 function actionCards(id, k) {
   const list = v => (Array.isArray(v) ? v.filter(isObj) : []);
   const asks = list(k.approvals).filter(a => a.status === 'pending'), blocks = list(k.blocked_actions).filter(b => b.status === 'open');
   const past = list(k.approvals).filter(a => a.status !== 'pending').slice(-3);
   if (!asks.length && !blocks.length && !past.length) return null;
-  // L-a11y: an answered card is gone: focus the next card's first button, else the heading (refocus would take Close)
+  // L-a11y: an answered card is gone: focus the next card's first button, else the heading, else (the section went with
+  // the last card) the Overview tab (refocus would take Close)
   const answer = (role, sent, send) => post(id, null, null, role, sent, send).then(e => {
-    if (!e) ($('#drawer .notice[data-role^="approve-"] button, #drawer .notice[data-role^="blocked-"] button') ?? $('#ok-h'))?.focus();
+    if (!e) ($('#drawer .notice[data-role^="approve-"] button, #drawer .notice[data-role^="blocked-"] button') ?? $('#ok-h') ?? $('#itab-overview'))?.focus();
   });
-  const card = (role, title, text, why, acts) => el('div', { class: 'notice', 'data-role': role }, el('p', null, el('strong', null, title)),
+  // note: tbd's word on a block (e.g. Allow was not used: the run did not start)
+  const card = (role, title, text, why, acts, note) => el('div', { class: 'notice', 'data-role': role }, el('p', null, el('strong', null, title)),
     el('pre', { class: 'log', tabindex: '0', 'aria-label': `${title}: the action` }, marked(text)), why && el('p', { class: 'hint' }, 'The agent says: ', vis(why)),
+    typeof note === 'string' && note && el('p', { class: 'hint' }, vis(note)),
     el('div', { class: 'acts' }, ...acts));
   return el('section', { class: 'part', 'aria-labelledby': 'ok-h' }, el('h3', { id: 'ok-h', tabindex: '-1' }, 'Needs Your OK'),
     ...asks.map(a => card(`approve-${a.id}`, `Approve? ${vis(a.tool)}`, a.too_long ? 'Too long to show: only No is possible.' : a.input_text, a.reason, [
@@ -1403,7 +1571,7 @@ function actionCards(id, k) {
         () => api('POST', `/api/tickets/${encodeURIComponent(id)}/blocked/${encodeURIComponent(b.id)}/dismiss`)), { sent: 'dismiss-blocked' }),
       el('span', { class: 'hint' }, !b.rule ? 'The board cannot allow exactly this one: run it from your terminal.'
         : !resumes(k, b) ? 'The blocked run is over: run it from your terminal, or Dismiss.' : allows(b)),
-      errLine(id, `allow-${b.id}`, `dismiss-${b.id}`)])),
+      errLine(id, `allow-${b.id}`, `dismiss-${b.id}`)], b.note)),
     past.length > 0 && el('ul', { class: 'plist', 'aria-label': 'Earlier asks' }, ...past.map(a => el('li', null, `${vis(a.tool)}: ${ASKED[a.status] ?? vis(a.status)}`))));
 }
 
@@ -1611,23 +1779,26 @@ function workView(id, k) {
   const fb = ui.fb?.id === id ? ui.fb : null;
   return el('section', { class: 'part', 'aria-labelledby': 'wk-h' },
     el('h3', { id: 'wk-h' }, 'Work', el('span', { class: 'count' }, `${tasks.filter(x => x.status === 'done').length}/${tasks.length} tasks done`)),
-    tasks.length ? el('table', { class: 'table dtable wtable' }, el('caption', { class: 'sr-only' }, 'Tasks: state, attempt, session mode, verified head'),
-      el('thead', null, el('tr', null, ...['Task', 'State', 'Attempt', 'Mode', 'Head'].map(h => el('th', { scope: 'col', class: h === 'Attempt' ? 'num' : null }, h)))),
-      el('tbody', null, ...tasks.map(x => el('tr', { class: x.id === w.task ? 'cur' : null, 'aria-current': x.id === w.task ? 'step' : null },
-        el('td', null, code(String(x.id))), el('td', null, wordPill(x.status)),
-        el('td', { class: 'num' }, String(x.attempt ?? DASH)), el('td', null, mode(x)), el('td', null, x.head ? code(String(x.head).slice(0, 12)) : DASH))))) : none(),
-    Array.isArray(k.lanes) && k.lanes.length > 0 && el('table', { class: 'table dtable wtable' }, el('caption', { class: 'sr-only' }, 'Lanes: task, ticket, state, waiting, live, attempt'),
-      el('thead', null, el('tr', null, ...['Task', 'Lane', 'State', 'Waiting', 'Live', 'Attempt'].map(h => el('th', { scope: 'col', class: h === 'Attempt' ? 'num' : null }, h)))),
-      el('tbody', null, ...k.lanes.filter(isObj).map(x => el('tr', null,
-        el('td', null, code(String(x.task))), el('td', null, code(String(x.id))), el('td', null, wordPill(x.state, 'gray', STAGE_HUE[x.state] || 'gray')),
-        el('td', null, x.waiting ? vis(`${x.waiting.reason}${x.waiting.why ? `: ${x.waiting.why}` : ''}`) : DASH),
-        el('td', null, x.live ? 'yes' : 'no'), el('td', { class: 'num' }, String(x.attempt ?? DASH)))))),
-    el('dl', { class: 'facts' },
-      fact('Gate', g && dot(g.ok === undefined ? '' : g.ok ? 'ok' : 'bad', `${vis(g.kind)} gate ${g.ok === undefined ? 'running' : g.ok ? 'green' : `red${g.class ? ` (${vis(g.class)})` : ''}`}${g.n ? ` · #${g.n}` : ''}`)),
-      fact('Tries', String(w.tries ?? 0)), fact('Unit', w.unit_ms == null ? null : `${w.unit_ms} ms`),
-      fact('Base checks', base.length ? base.map(([c, x]) => dot(x?.ok ? 'ok' : 'bad', `${vis(c)} ${x?.ok ? 'ok' : 'red'}${Number.isFinite(x?.ms) ? ` · ${secs(x.ms)}` : ''}`)) : null),
-      fact('Rework', String(k.rework ?? 0)),
-      fact('Plan hashes', hashes.length ? hashes.map(h => el('span', { class: `hash${h === k.plan_hash ? ' cur' : ''}`, title: h === k.plan_hash ? 'the current plan' : 'replaced' }, String(h).slice(0, 12))) : null)),
+    // board-terminal-parity Phase 3: tables, hashes, gate facts and the base sha folded (open or closed kept for this drawer: ui.tech)
+    el('details', { class: 'tech', open: ui.tech, ontoggle: e => { ui.tech = e.currentTarget.open; } }, el('summary', { 'data-role': 'tech' }, 'Tech Details'),
+      tasks.length ? el('table', { class: 'table dtable wtable' }, el('caption', { class: 'sr-only' }, 'Tasks: state, attempt, session mode, verified head'),
+        el('thead', null, el('tr', null, ...['Task', 'State', 'Attempt', 'Mode', 'Head'].map(h => el('th', { scope: 'col', class: h === 'Attempt' ? 'num' : null }, h)))),
+        el('tbody', null, ...tasks.map(x => el('tr', { class: x.id === w.task ? 'cur' : null, 'aria-current': x.id === w.task ? 'step' : null },
+          el('td', null, code(String(x.id))), el('td', null, wordPill(x.status)),
+          el('td', { class: 'num' }, String(x.attempt ?? DASH)), el('td', null, mode(x)), el('td', null, x.head ? code(String(x.head).slice(0, 12)) : DASH))))) : none(),
+      Array.isArray(k.lanes) && k.lanes.length > 0 && el('table', { class: 'table dtable wtable' }, el('caption', { class: 'sr-only' }, 'Lanes: task, ticket, state, waiting, live, attempt'),
+        el('thead', null, el('tr', null, ...['Task', 'Lane', 'State', 'Waiting', 'Live', 'Attempt'].map(h => el('th', { scope: 'col', class: h === 'Attempt' ? 'num' : null }, h)))),
+        el('tbody', null, ...k.lanes.filter(isObj).map(x => el('tr', null,
+          el('td', null, code(String(x.task))), el('td', null, code(String(x.id))), el('td', null, wordPill(x.state, 'gray', STAGE_HUE[x.state] || 'gray')),
+          el('td', null, x.waiting ? vis(`${x.waiting.reason}${x.waiting.why ? `: ${x.waiting.why}` : ''}`) : DASH),
+          el('td', null, x.live ? 'yes' : 'no'), el('td', { class: 'num' }, String(x.attempt ?? DASH)))))),
+      el('dl', { class: 'facts' },
+        fact('Gate', g && dot(g.ok === undefined ? '' : g.ok ? 'ok' : 'bad', `${vis(g.kind)} gate ${g.ok === undefined ? 'running' : g.ok ? 'green' : `red${g.class ? ` (${vis(g.class)})` : ''}`}${g.n ? ` · #${g.n}` : ''}`)),
+        fact('Tries', String(w.tries ?? 0)), fact('Unit', w.unit_ms == null ? null : `${w.unit_ms} ms`),
+        fact('Base checks', base.length ? base.map(([c, x]) => dot(x?.ok ? 'ok' : 'bad', `${vis(c)} ${x?.ok ? 'ok' : 'red'}${Number.isFinite(x?.ms) ? ` · ${secs(x.ms)}` : ''}`)) : null),
+        fact('Rework', String(k.rework ?? 0)),
+        fact('Plan hashes', hashes.length ? hashes.map(h => el('span', { class: `hash${h === k.plan_hash ? ' cur' : ''}`, title: h === k.plan_hash ? 'the current plan' : 'replaced' }, String(h).slice(0, 12))) : null),
+        fact('Base', k.base_sha?.slice(0, 12)))),
     k.rework > 0 && el('div', { class: 'acts' }, el('span', { class: 'hint' }, 'Your feedback:'),
       ...Array.from({ length: Math.min(k.rework, 10) }, (_, i) => el('button', { type: 'button', class: 'link-btn', 'data-role': `fb-${i + 1}`, onclick: () => loadFeedback(id, i + 1) }, `Rework ${i + 1}`))),
     fb && (fb.error ? el('p', { class: 'hint' }, fb.error) : keptPre(`${id}:${fb.n}`, { class: 'log', 'data-role': 'feedback', tabindex: '0', 'aria-label': `Your feedback, rework ${fb.n}` }, vis(fb.text))));
@@ -2808,8 +2979,12 @@ async function termRun(live) {
   } catch (e) { tc.err = e.message; }
   tc.busy = null;
   renderSettings();
-  const said = $('#tc-said'); // L-a11y: the one live region for results (outside #settings, which every render replaces)
-  if (said && tc.res && !tc.err && !tc.cost) said.textContent = tcSum(tc.res);
+  const said = $('#tc-said'); // L-a11y: the one live region for results (outside every view: it speaks while Settings is hidden too)
+  if (said && tc.res && !tc.err && !tc.cost) { // emptied first, the words a frame later: the same words twice are read again
+    const text = tcSum(tc.res);
+    said.textContent = '';
+    requestAnimationFrame(() => { said.textContent = text; });
+  }
 }
 async function liveOpen() {
   const tc = ui.tc ??= {};

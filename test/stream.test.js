@@ -2,12 +2,13 @@
 // P3a AC1 parse edge cases (lib/stream.js): tail from an offset, liveness facts only, outcome from the LAST result
 // line, untrusted lines (D31). The run-level outcomes through a real tbd + fake-claude are in runner.test.js.
 // P3c AC9: the shown log lines, plain and gzipped (readLog, packLog); through a real tbd: run-control.test.js.
+// board-terminal-parity Phase 3: the Now card's run facts (tail) and the activity feed rows (brief); the route: run-control.test.js.
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { createTail, outcome, OUTCOMES, readLog, packLog } = require('../lib/stream');
+const { createTail, outcome, OUTCOMES, readLog, packLog, brief } = require('../lib/stream');
 
 const REAL = path.join(__dirname, 'fixtures/stream/real-sonnet-sample.jsonl');
 const SID = '00000000-0000-4000-8000-000000000000'; // the fixture's session
@@ -141,4 +142,49 @@ test('P3c AC9 readLog: shown lines of a live log (no partial-message deltas, one
   assert.deepEqual((await readLog(file)).lines, [...shown, 'assistant: two lines [31mred', 'assistant: torn']);
   assert.equal(await packLog(file), false, 'packed once');
   assert.equal(await readLog(path.join(path.dirname(file), '9.jsonl')), null);
+});
+
+// board-terminal-parity Phase 3, expected values from .omc/handoffs/btp-p3-server.md contract A
+test('Phase 3 run facts: model from init, ctx_tokens of the main session only, 2 subagents start → completed (a background Bash is none), one denial, doing = the open tool + its input in short', async (t) => {
+  const sys = (o) => line({ type: 'system', ...o });
+  const usage = (n) => ({ input_tokens: n, cache_creation_input_tokens: 100, cache_read_input_tokens: 1000, output_tokens: 7 });
+  const { file } = log(t, [
+    sys({ subtype: 'init', model: 'claude-sandbox-1' }),
+    line({ type: 'assistant', parent_tool_use_id: null, message: { usage: usage(10), content: [{ type: 'text', text: 'checking the shop' }] } }),
+    sys({ subtype: 'task_started', task_id: 'sub1', task_type: 'local_agent', subagent_type: 'Explore', description: 'Map the shop routes' }),
+    sys({ subtype: 'task_started', task_id: 'sub2', task_type: 'local_agent', subagent_type: 'Plan', description: 'Plan the cart fix' }),
+    sys({ subtype: 'task_started', task_id: 'bash1', task_type: 'local_bash', description: 'Start the shop app' }),
+    sys({ subtype: 'task_progress', task_id: 'sub1', last_tool_name: 'Grep', usage: { total_tokens: 2048 } }),
+    line({ type: 'assistant', parent_tool_use_id: 'toolu_task1', message: { usage: usage(90000), content: [] } }), // a subagent's context
+    sys({ subtype: 'permission_denied', tool_name: 'Bash', tool_use_id: 'tu9', decision_reason_type: 'mode' }),
+    sys({ subtype: 'task_notification', task_id: 'sub1', status: 'completed' }),
+    sys({ subtype: 'task_updated', task_id: 'sub2', patch: { status: 'completed' } }),
+    line({ type: 'assistant', parent_tool_use_id: null, message: { content: [{ type: 'tool_use', id: 'tu1', name: 'Bash', input: { command: 'npm test --\nshop' } }] } }),
+  ].join(''));
+  const tail = createTail(file);
+  const s = await tail.read();
+  assert.deepEqual([s.model, s.ctx_tokens, s.denied, tail.doing()], ['claude-sandbox-1', 1110, 1, { tool: 'Bash', text: 'npm test -- shop' }]);
+  assert.deepEqual(s.subs, [
+    { id: 'sub1', desc: 'Map the shop routes', type: 'Explore', tool: 'Grep', tokens: 2048, status: 'completed' },
+    { id: 'sub2', desc: 'Plan the cart fix', type: 'Plan', tool: null, tokens: null, status: 'completed' },
+  ]);
+});
+
+// contract C: one row per kind, a subagent's line → none
+test('Phase 3 brief(): Read, Ran, Failed, Started subagent, Refused, Said (control + bidi characters out); a subagent line → no row', () => {
+  const T = '2026-10-19T02:06:22.258Z';
+  const use = (name, input, o = {}) => ({ type: 'assistant', parent_tool_use_id: null, timestamp: T, message: { content: [{ type: 'tool_use', id: 'tu1', name, input }] }, ...o });
+  /** @type {[object, object[]][]} */
+  const cases = [
+    [use('Read', { file_path: 'shop/cart.js' }), [{ at: T, text: 'Read shop/cart.js', tone: 'info' }]],
+    [use('Bash', { command: 'npm test' }), [{ at: T, text: 'Ran npm test', tone: 'info' }]],
+    [{ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'tu1', is_error: true, content: 'Exit code 1\nshop test failed' }] } },
+      [{ at: null, text: 'Failed: Exit code 1 shop test failed', tone: 'bad' }]],
+    [{ type: 'system', subtype: 'task_started', task_id: 'sub1', task_type: 'local_agent', subagent_type: 'Explore', description: 'Map the shop' },
+      [{ at: null, text: 'Started subagent Map the shop (Explore)', tone: 'info' }]],
+    [{ type: 'system', subtype: 'permission_denied', tool_name: 'Bash', tool_use_id: 'tu1' }, [{ at: null, text: 'Refused Bash', tone: 'warn' }]],
+    [{ type: 'assistant', timestamp: T, message: { content: [{ type: 'text', text: 'cart \u001b[31mfixed\u202e ok' }] } }, [{ at: T, text: 'Said: cart [31mfixed ok', tone: 'info' }]],
+    [use('Read', { file_path: 'shop/cart.js' }, { parent_tool_use_id: 'toolu_task1' }), []],
+  ];
+  for (const [ev, want] of cases) assert.deepEqual(brief(JSON.stringify(ev)), want, JSON.stringify(ev));
 });
