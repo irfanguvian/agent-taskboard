@@ -30,7 +30,8 @@ const ui = { drag: null, editing: null, tray: null, promote: null, pick: { kind:
   q: '', hl: null, days: 30, follow: null, // M7: reminder search (lowercase), the Health view's data + its days, the drawer's log Follow
   fview: 'all', rfilter: null, tab: 'overview', day: null, // calm UI: Flows segment (all|you|running|done), Reminders filter from a Today highlight (overdue|today), inspector tab (overview|activity|reports), the date of the last render (midnight)
   cfg: null, cfgErr: null, notes: new Map(), // full-access-runs Phase 8 + 9: GET /api/config's answer + the last refused setting ({role, text}), note drafts (id → text)
-  pres: new Map(), shown: new Map() }; // board-terminal-parity 3: the drawer's kept <pre>s (data-role → {key, node, text}), see keptPre; when each plan round first showed (`${id}:${n}` → ms, approve)
+  pres: new Map(), shown: new Map(), // board-terminal-parity 3: the drawer's kept <pre>s (data-role → {key, node, text}), see keptPre; when each plan round first showed (`${id}:${n}` → ms, approve)
+  tc: null }; // board-terminal-parity Phase 2 task 6: Settings → Terminal check ({busy, res, err, live, tags, tag, cost, armedAt})
 
 // board-terminal-parity 6.2: the New Flow and Promote kinds are the built ones tbd names (GET /api/state system.kinds)
 const kinds = () => (Array.isArray(state?.system?.kinds) ? state.system.kinds : []);
@@ -2770,6 +2771,62 @@ function renderSettings() { // a re-render keeps focus on the same control
   box.replaceChildren(settingsView(ui.cfg));
   if (role) $(`#settings [data-role="${CSS.escape(role)}"]`)?.focus();
 }
+// board-terminal-parity Phase 2 task 6 (Page Tools): Check Terminal = tb doctor --terminal (free checks); Live Run… =
+// --live: a git tag, tbd's cost line on the first click (Check Cost), the run on the second (Run Live Check: one short
+// sonnet run, up to 10 min). Page Tools off: the tb line. The lines are tbd's text (a live run's hold agent text):
+// textContent + vis only. The body is built apart: tb sends more keys (test/ui-parity reads literal bodies only).
+const TC_TONE = { ok: 'ok', warn: 'wait', fail: 'bad' };
+async function termRun(live) {
+  const tc = ui.tc ??= {};
+  if (tc.busy || (live && !tc.tag)) return;
+  if (live && tc.cost && Date.now() - tc.armedAt < 400) return; // a held Enter repeats the click that armed it
+  const body = live ? { terminal: true, live: true, tag: tc.tag } : { terminal: true };
+  if (live && tc.cost) body.yes = true;
+  tc.busy = live ? 'live' : 'fixed';
+  tc.err = null;
+  renderSettings();
+  try {
+    const r = await api('POST', '/api/doctor', body);
+    if (r.confirm) { tc.cost = String(r.cost ?? ''); tc.armedAt = Date.now(); } else { tc.res = { checks: Array.isArray(r.checks) ? r.checks.filter(isObj) : [] }; tc.cost = null; }
+  } catch (e) { tc.err = e.message; }
+  tc.busy = null;
+  renderSettings();
+}
+async function liveOpen() {
+  const tc = ui.tc ??= {};
+  Object.assign(tc, { live: true, cost: null, err: null });
+  renderSettings();
+  try {
+    const j = await api('GET', '/api/tags');
+    tc.tags = Object.entries(isObj(j.tags) ? j.tags : {}).filter(([, d]) => isObj(d) && d.type === 'git').map(([n]) => n);
+    if (!tc.tags.includes(tc.tag)) tc.tag = tc.tags[0];
+  } catch (e) { tc.err = e.message; }
+  renderSettings();
+}
+function termCheckRows(row) {
+  const tc = ui.tc ?? {};
+  const what = 'Free checks of what runs use: git bridge, folder MCP, browser, skills, the wall, claude.';
+  if (!pageTools()) return [row('term-check', 'Terminal Check', `${what} Page Tools is off: run it in Terminal.`, el('code', { class: 'set-code' }, 'tb doctor --terminal'))];
+  const btn = (role, label, onclick, main = false) => el('button', { type: 'button', class: main ? 'btn btn-sm' : 'btn btn-sm btn-gray', 'data-role': role, 'aria-busy': tc.busy ? 'true' : null, onclick }, label);
+  const out = [row('term-check', 'Terminal Check', `${what} Live Run tries them in one short run.`, el('div', { class: 'set-acts' },
+    btn('term-check', tc.busy === 'fixed' ? 'Checking…' : 'Check Terminal', () => termRun(false)), btn('term-live', 'Live Run…', () => liveOpen())))];
+  if (tc.live) {
+    const hint = tc.tags && !tc.tags.length ? 'No git tag yet: add one first.' : tc.cost ? `Costs ${vis(tc.cost)}. Run Live Check starts it.`
+      : 'One short sonnet run on a git tag: Bash, a subagent, an MCP tool, the skills and tb-git. It costs usage: Check Cost shows how much first.';
+    out.push(row('term-live-tag', 'Live Run', hint, el('div', { class: 'set-acts' },
+      el('select', { class: 'input', 'data-role': 'term-live-tag', 'aria-label': 'Git tag for the live run', onchange: e => { tc.tag = e.target.value; tc.cost = null; renderSettings(); } },
+        ...(tc.tags ?? []).map(n => el('option', { value: n, selected: n === tc.tag }, vis(n)))),
+      btn('term-live-run', tc.busy === 'live' ? 'Running…' : tc.cost ? 'Run Live Check' : 'Check Cost', () => termRun(true), !!tc.cost),
+      btn('term-live-cancel', 'Cancel', () => { ui.tc = { res: tc.res, err: tc.err }; renderSettings(); }))));
+  }
+  if (tc.err) out.push(el('p', { class: 'err set-sub', role: 'alert' }, vis(tc.err)));
+  if (tc.res) {
+    const n = tc.res.checks.filter(x => x.status === 'fail').length;
+    out.push(el('div', { class: 'card-pad' }, el('p', { class: 'hint', 'aria-live': 'polite' }, n ? `${n} of ${tc.res.checks.length} checks failed.` : `No check failed (${tc.res.checks.length}).`),
+      el('ul', { class: 'tcheck', 'aria-label': 'Terminal check, one line each' }, ...tc.res.checks.map(x => el('li', null, dot(TC_TONE[x.status] ?? '', vis(x.status)), ' ', vis(`${x.name} · ${x.detail}`))))));
+  }
+  return out;
+}
 function settingsView(r) {
   const c = r?.config;
   if (!c) return el('div', { class: 'settings' }, r?.error ? el('p', { class: 'err', role: 'alert' }, r.error) : el('p', { class: 'hint' }, 'Loading…'));
@@ -2810,7 +2867,8 @@ function settingsView(r) {
     isObj(t) && card('set-term', 'Terminal', 'What makes a run work like your terminal. Each stays off until you turn it on.',
       ...TERM.map(([k, label, hint]) => row(`term-${k}`, label, hint, toggle(`term-${k}`, label, t[k], term(k)))),
       row('term-approve_min', 'Approve Wait', 'Minutes a blocked action waits for your yes, then the answer is No (1 to 60).',
-        number('term-approve_min', 'Approve wait in minutes', t.approve_min, [1, 60, 1], term('approve_min')))),
+        number('term-approve_min', 'Approve wait in minutes', t.approve_min, [1, 60, 1], term('approve_min'))),
+      ...termCheckRows(row)),
     card('set-sk', 'Default Skills', 'Every run names these skills; a tag adds or removes its own.',
       ...(r.skills || []).map(n => row(`skill-${n}`, vis(n), null, el('input', { type: 'checkbox', class: 'check', 'data-role': `skill-${n}`, 'aria-label': `Default skill ${vis(n)}`, checked: on.has(n), onchange: e => skill(n)(e.target.checked) })))),
     card('set-cl', 'Claude', null, row('claude_bin', 'Claude Binary', 'Changed in Terminal only: tb doctor --pin.', el('code', { class: 'set-code' }, vis(c.claude_bin)))));

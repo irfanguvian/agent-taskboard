@@ -269,6 +269,8 @@ main:focus { outline: none; }
 .input.num { width: 6rem; text-align: right; font-variant-numeric: tabular-nums; }
 .set-table td { height: auto; padding-top: 8px; padding-bottom: 8px; }
 .set-code { font: 400 var(--subheadline) var(--mono); overflow-wrap: anywhere; text-align: right; }
+.set-acts { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; } /* Settings → Terminal check buttons */
+.tcheck { display: grid; gap: 4px; margin: 0; padding: 0; list-style: none; font-size: var(--footnote); overflow-wrap: anywhere; }
 @media (max-width: 743px) { .set-row { flex-wrap: wrap; } }
 
 /* ---------- toasts: short ones are the foundation capsule; errors and warnings are a closable card ---------- */
