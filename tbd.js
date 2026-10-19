@@ -109,6 +109,7 @@ function boot() {
       autoAssign: planning.autoAssign, // J5: approval-made children, once their blockers are merged / done
     });
     planning.lostSetups(runner.alert); // an approve's setup dies with its tbd: waiting setup → setup_failed (J12)
+    await planning.sweepChecks(); // board-terminal-parity T1: a terminal check's clone, pin and temp dir a dead tbd left
     await require('./lib/approvals').boot(); // board-terminal-parity Phase 2 task 4: Approve cards of a dead tbd → lost (their askers are gone)
     await interview.boot({ alert: runner.alert }).catch((e) => console.error(`tbd: lavish boot: ${e.message}`)); // orphan polls, leftover sends (D-0119), open rounds polled again; before runs start (no round opens meanwhile)
     monitor.on('wake', (e) => runner.wake(e)); // §8 sleep: the OS wake carries the slept time; a wall jump alone is a hint

@@ -41,9 +41,11 @@ const SSH_TOOLS = new Set(['ssh', 'scp', 'sftp', 'ssh-add', 'ssh-agent', 'ssh-ke
 const CHROME = /(^|[^\w.-])chrome-devtools-axi(?![\w-])/;
 // board-terminal-parity Phase 2 task 5 (TB_GIT_RUN: the git bridge is on): a plain `<TB_CODE>/bin/tb-git <words>` call (no
 // shell operator, quote or expansion: excludedCommands runs exactly it outside the wall, and tb-git checks every word)
-// passes as is; git's network verbs any other way have no keys: pointed at tb-git
+// passes as is; git's network verbs any other way have no keys: pointed at tb-git. Security review L7: also remote update,
+// submodule update --remote, a --git-dir <d> before the verb, and any -c / --config-env setting credential.*, url.* or
+// alias.* (a helper, a URL rewrite, an alias that hides fetch). L6: tb-git named any other way than its plain form → denied.
 const TB_GIT_CALL = /^\s*(\/[\w./-]+)\/bin\/tb-git(\s+[\w.:@/+=,~-]+)*\s*$/;
-const GIT_NET = /\bgit(\s+-[Cc]\s+\S+|\s+--[\w-]+(=\S+)?)*\s+(fetch|pull|push|clone)\b/;
+const GIT_NET = /\bgit(\s+-[Cc]\s+\S+|\s+--[\w-]+((=|\s+)\S+)?)*\s+(fetch|pull|push|clone|remote\s+update|submodule\s+update\b[^;&|\n]*\s--remote)\b|\bgit\b[^;&|\n]*(\s-c\s*|--config-env[=\s]+)['"]?(credential|url|alias)\./i;
 const SSH_WHY = 'board runs never use ssh, scp or ssh keys (Irfan); work through the files in your worktree';
 const ENV_WHY = 'board runs read no .env file outside this worktree (Irfan); use only the env files the tag copied in';
 // a word naming a .env file outside the run's dir (cwd: the hook input's)
@@ -399,6 +401,7 @@ function heavyList(env) {
 function guard(command, env = process.env, cwd = '') {
   if (env.TB_GIT_RUN && env.TB_CODE && TB_GIT_CALL.exec(command)?.[1] === env.TB_CODE) return null;
   if (env.TB_GIT_RUN && GIT_NET.test(command)) return { deny: `bash-guard: git fetch, pull, push and clone go through ${env.TB_CODE ?? '<board>'}/bin/tb-git <verb> …, called by its full path, alone in its Bash call (no &&, ;, |, $(...), redirects); plain git has no keys here` };
+  if (env.TB_GIT_RUN && /\/bin\/tb-git\b/.test(command)) return { deny: `bash-guard: call tb-git in its plain form only: ${env.TB_CODE ?? '<board>'}/bin/tb-git <verb> <words>, by its full path, alone in its Bash call (no &&, ;, |, $(...), quotes or redirects)` };
   for (const [re, why] of rules(env)) if (re.test(command)) return { deny: `bash-guard: ${why}` };
   if (env.TB_FULL_ACCESS === '1' && (SSH_PATH.test(command) || sshWord(command))) return { deny: `bash-guard: ${SSH_WHY}` };
   if (env.TB_CHROME_SB && CHROME.test(command)) return { deny: `bash-guard: use ${env.TB_CODE ?? '<board>'}/bin/tb-chrome <command> by its full path, alone in its Bash call (no &&, ;, |, $(...), redirects): npx chrome-devtools-axi cannot start Chrome inside the sandbox wall` };

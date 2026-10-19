@@ -652,7 +652,7 @@ test('Phase 2 task 1: .mcp.json + AGENTS.md Edit- and write-denied at any depth,
 
 test('Phase 2 task 1b: ~/.zshenv exports reach a full-access run as runs/<n>.zdot/.zshenv (ZDOTDIR) minus secret-like names, PATH merged with the run\'s bin first; a locked run gets none', async () => {
   const f = fullFixture();
-  fs.writeFileSync(path.join(f.home, '.zshenv'), 'export FOO_TOKEN=x\nexport GH_PAT=p\nexport DB_MAIN="postgres://u:pw@h/db"\nexport MYTOOL_HOME=/y\nexport QUOTE_HOME="it\'s"\nexport PATH="/opt/x:$PATH"\n');
+  fs.writeFileSync(path.join(f.home, '.zshenv'), 'export FOO_TOKEN=x\nexport GH_PAT=p\nexport DB_MAIN="postgres://u:pw@h/db"\nexport SVC_URL="https://tok@host/x"\nexport MYTOOL_HOME=/y\nexport QUOTE_HOME="it\'s"\nexport PATH="/opt/x:$PATH"\n');
   const { d, ticketDir } = await run({ resume: false, tag: { path: f.tag }, env: { HOME: f.home } });
   const zdot = path.join(ticketDir, 'runs/2.zdot');
   assert.equal(d.env.ZDOTDIR, zdot);
@@ -690,7 +690,7 @@ test('Phase 2 task 3: folder_mcp → the folder\'s servers (local scope + enable
   git('init', '-q', '-b', 'main');
   const srv = (x) => ({ command: '/bin/echo', args: [x] });
   fs.writeFileSync(path.join(repo, '.mcp.json'), JSON.stringify({ mcpServers: { 'srv-a': srv('a'), 'srv-b': srv('b') } }));
-  fs.writeFileSync(path.join(repo, '.claude', 'settings.json'), JSON.stringify({ enabledMcpjsonServers: ['srv-a', 'srv-b', 'srv-c'], permissions: { allow: ['Bash(npm run x)', 'Bash', 'Edit(//elsewhere/**)'] } }));
+  fs.writeFileSync(path.join(repo, '.claude', 'settings.json'), JSON.stringify({ enabledMcpjsonServers: ['srv-a', 'srv-b', 'srv-c'], permissions: { allow: ['Bash(npm run x)', 'Bash', 'Bash(*:*)', 'Edit(//elsewhere/**)'] } }));
   const base_sha = commitAll(git);
   fs.writeFileSync(path.join(repo, '.mcp.json'), JSON.stringify({ mcpServers: { 'srv-a': srv('a'), 'srv-b': srv('b'), 'srv-c': srv('c') } })); // not committed
   fs.writeFileSync(path.join(repo, '.claude', 'settings.local.json'), JSON.stringify({ permissions: { allow: ['Bash(npm run y)', 'WebFetch(domain:example.com)'] } }));
@@ -710,7 +710,7 @@ test('Phase 2 task 3: folder_mcp → the folder\'s servers (local scope + enable
   assert.deepEqual([fs.statSync(file).mode & 0o777, fs.statSync(path.dirname(file)).mode & 0o777, on.mcp], [0o600, 0o700, 2], 'two stdio servers (admission)');
   const allow = settingsOf(on.ticketDir).permissions.allow;
   for (const r of ['mcp__local_srv', 'mcp__web', 'mcp__srv-a', 'mcp__srv__t', 'Bash(npm run x)', 'Bash(npm run y)']) assert.ok(allow.includes(r), r);
-  for (const r of ['mcp__srv-b', 'mcp__srv-c', 'mcp__*', 'Edit(//elsewhere/**)', 'Read(x)', 'WebFetch(domain:example.com)']) assert.equal(allow.includes(r), false, r);
+  for (const r of ['mcp__srv-b', 'mcp__srv-c', 'mcp__*', 'Edit(//elsewhere/**)', 'Read(x)', 'WebFetch(domain:example.com)', 'Bash(*:*)']) assert.equal(allow.includes(r), false, r);
   assert.equal(allow.filter((r) => r === 'Bash').length, 1);
   // a read-only phase (bash_all_steps off): the server rules, none of the imports
   const plan = settingsOf((await run({ phase: 'planning', resume: false, config: { ...PLAN_CONFIG, terminal: config.terminal }, ticket, tag, env: { HOME: f.home } })).ticketDir).permissions.allow;
@@ -748,4 +748,9 @@ test('Phase 2 task 4a: auto_mode → --permission-mode auto --permission-prompts
     assert.deepEqual([r.d.opts['--permission-mode'], r.d.opts['--permission-prompts'], r.d.opts['--permission-prompt-tool'], settingsOf(r.ticketDir).permissions.ask, r.d.env.MCP_TOOL_TIMEOUT],
       ['dontAsk', 'none', undefined, undefined, undefined], JSON.stringify(o.ticket ?? 'off'));
   }
+});
+
+test('fileRemote (security review L10): TB_GIT_FILE_REMOTE never reaches a run of the live ~/.taskboard; a temp TB_HOME keeps it', () => {
+  const env = { TB_GIT_FILE_REMOTE: '/tmp/remote.git' };
+  assert.deepEqual([spawn.fileRemote(env, path.join(os.homedir(), '.taskboard')), spawn.fileRemote(env, ROOT)], ['', '/tmp/remote.git']);
 });

@@ -1257,7 +1257,7 @@ const SENT = { // button role → [label, label while sending, toast title, toas
   // board-terminal-parity Phase 2 task 4: the Approve cards and auto mode's blocks (actionCards)
   'approve-yes': ['Yes Once', 'Sending…', 'Allowed Once', 'The run does exactly this action.'],
   'approve-no': ['No', 'Sending…', 'Refused', 'The run is told: Irfan said no.'],
-  'allow-blocked': ['Allow and Retry', 'Sending…', 'Allowed Once', 'The same session retries exactly this action.'],
+  'allow-blocked': ['Allow and Retry', 'Sending…', 'Allowed Once', 'This exact call is allowed once; the same session retries it.'],
   'dismiss-blocked': ['Dismiss', 'Sending…', 'Dismissed', 'The card is gone; the action stays blocked.'],
   assign: ['Assign', 'Assigning…', 'Assigned', 'Planning starts when a run slot is free.'],
   answer: ['Send Answers', 'Sending…', 'Answers Sent', 'The planner plans the next round with them.'],
@@ -1363,30 +1363,37 @@ function notice(id, w) {
 }
 
 // board-terminal-parity Phase 2 task 4, at the top of Overview: each waiting Approve card (tool, the input exactly as the
-// run will do it, the agent's words: Yes Once / No; too long to show: No only) and each open auto-mode block (Allow and
-// Retry when tbd can allow exactly it, Dismiss), then how the last asks ended. Agent text as text only (vis).
+// run will do it, the agent's words: Yes Once / No; too long to show, or a carriage return / long blank run that could
+// hide part of it: No only) and each open auto-mode block (Allow and Retry when tbd can allow exactly that call, with what
+// it allows; Dismiss), then how the last asks ended. Agent text as text only (vis); line breaks, tabs and blank runs of 4+
+// shown as marks (security review L4), so no part of a command hides in them.
 const ASKED = { yes: 'Yes', no: 'No', timeout: 'Timed out: No', gone: 'The run went away', lost: 'Could not ask you: board restarted' };
+const marked = s => vis(s).replace(/\t/g, '→').replace(/ {4,}/g, m => `␣×${m.length}`).replace(/\r/g, '␍').replace(/\n/g, '⏎\n');
+// M2: what Allow and Retry allows: a Bash call's exact rule; a WebFetch / MCP call only with this input, other calls its rule matches ask first
+const allows = b => (b.tool === 'Bash' ? `Allow this exact call once: ${vis(b.rule)}`
+  : `Allow this exact call once: ${vis(b.tool)} with the input above. Other ${vis(b.rule)} calls ask you first.`);
 function actionCards(id, k) {
   const list = v => (Array.isArray(v) ? v.filter(isObj) : []);
   const asks = list(k.approvals).filter(a => a.status === 'pending'), blocks = list(k.blocked_actions).filter(b => b.status === 'open');
   const past = list(k.approvals).filter(a => a.status !== 'pending').slice(-3);
   if (!asks.length && !blocks.length && !past.length) return null;
   const card = (role, title, text, why, acts) => el('div', { class: 'notice', 'data-role': role }, el('p', null, el('strong', null, title)),
-    el('pre', { class: 'log', tabindex: '0', 'aria-label': `${title}: the action` }, vis(text)), why && el('p', { class: 'hint' }, 'Why: ', vis(why)),
+    el('pre', { class: 'log', tabindex: '0', 'aria-label': `${title}: the action` }, marked(text)), why && el('p', { class: 'hint' }, 'The agent says: ', vis(why)),
     el('div', { class: 'acts' }, ...acts));
   return el('section', { class: 'part', 'aria-labelledby': 'ok-h' }, el('h3', { id: 'ok-h' }, 'Needs Your OK'),
     ...asks.map(a => card(`approve-${a.id}`, `Approve? ${vis(a.tool)}`, a.too_long ? 'Too long to show: only No is possible.' : a.input_text, a.reason, [
-      !a.too_long && actBtn(id, `yes-${a.id}`, () => post(id, null, null, `yes-${a.id}`, 'approve-yes',
+      !a.too_long && !a.hidden && actBtn(id, `yes-${a.id}`, () => post(id, null, null, `yes-${a.id}`, 'approve-yes',
         () => api('POST', `/api/tickets/${encodeURIComponent(id)}/approvals/${encodeURIComponent(a.id)}`, { yes: true })), { cls: BTN1, sent: 'approve-yes' }),
       actBtn(id, `no-${a.id}`, () => post(id, null, null, `no-${a.id}`, 'approve-no',
         () => api('POST', `/api/tickets/${encodeURIComponent(id)}/approvals/${encodeURIComponent(a.id)}`, { yes: false })), { sent: 'approve-no' }),
+      a.hidden && el('span', { class: 'hint' }, 'It holds a carriage return or a long blank run that can hide part of it: only No.'),
       errLine(id, `yes-${a.id}`, `no-${a.id}`)])),
     ...blocks.map(b => card(`blocked-${b.id}`, `Blocked: ${vis(b.tool)}`, b.input_text, b.reason, [
       b.rule && actBtn(id, `allow-${b.id}`, () => post(id, null, null, `allow-${b.id}`, 'allow-blocked',
         () => api('POST', `/api/tickets/${encodeURIComponent(id)}/blocked/${encodeURIComponent(b.id)}/allow`)), { cls: BTN1, sent: 'allow-blocked' }),
       actBtn(id, `dismiss-${b.id}`, () => post(id, null, null, `dismiss-${b.id}`, 'dismiss-blocked',
         () => api('POST', `/api/tickets/${encodeURIComponent(id)}/blocked/${encodeURIComponent(b.id)}/dismiss`)), { sent: 'dismiss-blocked' }),
-      !b.rule && el('span', { class: 'hint' }, 'The board cannot allow exactly this one: run it from your terminal.'),
+      b.rule ? el('span', { class: 'hint' }, allows(b)) : el('span', { class: 'hint' }, 'The board cannot allow exactly this one: run it from your terminal.'),
       errLine(id, `allow-${b.id}`, `dismiss-${b.id}`)])),
     past.length > 0 && el('ul', { class: 'plist', 'aria-label': 'Earlier asks' }, ...past.map(a => el('li', null, `${vis(a.tool)}: ${ASKED[a.status] ?? vis(a.status)}`))));
 }

@@ -197,6 +197,16 @@ test('bash-guard git bridge: a plain tb-git call by its full path passes; compou
   assert.match(guard('/code/tb/bin/tb-git push origin feat', { TB_CODE: '/code/tb' })?.deny ?? 'allowed', /agents never push/);
 });
 
+// security review L6 + L7 (the bridge on): tb-git named any way but its plain form, and git forms that reach the network
+// or rewrite it without fetch / pull / push / clone in front of them → denied, pointing at the plain tb-git form
+test('bash-guard git bridge (L6, L7): tb-git with a redirect or quotes; git -c credential.* / url.* / alias.*, remote update, submodule update --remote, --git-dir <d> push → denied', () => {
+  const env = { TB_GIT_RUN: '/h/run-secrets/t_x-1/git.json', TB_CODE: '/code/tb', TB_FULL_ACCESS: '1' };
+  for (const c of ['/code/tb/bin/tb-git ls-remote origin > refs.txt', '"/code/tb/bin/tb-git" ls-remote origin']) assert.match(guard(c, env)?.deny ?? 'allowed', /call tb-git in its plain form only/, c);
+  for (const c of ['git -c alias.f=fetch f origin', 'git -c credential.helper=x ls-remote origin', 'git -c url.git@x:.insteadOf=https://x/ ls-remote origin', 'git remote update', 'git submodule update --init --remote', 'git --git-dir ../other push origin feat']) {
+    assert.match(guard(c, env)?.deny ?? 'allowed', /go through \/code\/tb\/bin\/tb-git/, c);
+  }
+});
+
 test('bash-guard hook I/O: deny and rewrite JSON per hooks docs, other tool_input fields kept, bad input allowed', async () => {
   const input = (command) => ({ session_id: 's', hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command, description: 'd', timeout: 1000 } });
   const d = await hook('bash-guard.js', input('pkill node'));
