@@ -324,7 +324,7 @@ test('chromeProfile: the run wall as a seatbelt profile (real sandbox-exec): all
   servers.push(await new Promise((r) => { const v = net.createServer((c) => c.end()).listen(sock, () => r(v)); }));
   const [open, shut] = servers.map((v) => v.address().port);
   const sb = path.join(root, 'run.sb');
-  fs.writeFileSync(sb, chromeProfile(s.sandbox, { home, cwd: wt, node: path.dirname(path.dirname(process.execPath)), ports: [open] }));
+  fs.writeFileSync(sb, chromeProfile(s.sandbox, { home, cwd: wt, node: process.execPath, ports: [open] }));
   const probe = (js) => new Promise((resolve) => execFile('/usr/bin/sandbox-exec', ['-f', sb, process.execPath, '-e', js], (e, out) => resolve(e ? 'fail' : out.trim())));
   const rd = (p) => probe(`require('fs').readFileSync(${JSON.stringify(p)}); console.log('ok')`);
   const wr = (p) => probe(`require('fs').writeFileSync(${JSON.stringify(p)}, 'x'); console.log('ok')`);

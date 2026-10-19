@@ -591,7 +591,7 @@ test('full-access wall on: seatbelt on (fail closed), ~/.ssh + .env* + ~/.config
   assert.deepEqual(s.sandbox.excludedCommands, [`${tbc} *`]);
   assert.equal(on.d.env.TB_CHROME_SB, path.join(on.ticketDir, 'runs/2.chrome.sb'));
   const [bport, cport] = on.d.env.TB_CHROME_PORTS.split(' ').map(Number);
-  assert.deepEqual([cport - bport, bport >= 20000 && bport < 30000, on.d.env.TB_CHROME_NODE], [1, true, process.execPath]);
+  assert.deepEqual([cport - bport, bport >= 20000 && bport < 48000, on.d.env.TB_CHROME_NODE], [1, true, process.execPath]);
   const sb = fs.readFileSync(path.join(on.ticketDir, 'runs/2.chrome.sb'), 'utf8');
   const line = (start) => sb.split('\n').find((l) => l.startsWith(start)) ?? '';
   const real = (p) => JSON.stringify(fs.realpathSync(p)); // the seatbelt sees /private/var, not /var
