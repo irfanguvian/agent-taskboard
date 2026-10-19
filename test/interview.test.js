@@ -89,7 +89,9 @@ async function boot(t, { id = 't_int001', over = {}, questions = QUESTIONS, inte
   const dumps = fs.mkdtempSync(path.join(ROOT, 'dump-')); // each run's argv + prompt, by invocation (fake-claude)
   const envAll = { TB_PHASES_DIR: PHASES, NODE_OPTIONS: `${RUN_SPY} ${OPENER} --require ${PROBE}`, TEST_REAL_HANDLERS: '1', FAKE_CLAUDE_SCENARIO_DIR: scn, FAKE_CLAUDE_DUMP_DIR: dumps, ...env };
   const tbd = await startTbd({ root, files, env: envAll });
-  t.after(async () => { reap(pidsOf(tbd)); await tbd.stop({ keep: true }).catch(() => {}); }); // keep: a restart may run on root (ROOT goes at the end)
+  // stop first, then reap: a tbd still up spawns the next run (an answer → planning) after the reap read the lease, and that
+  // run outlives it (orphans, ppid 1); stopped, the lease names the last run. keep: a restart may run on root (ROOT goes at the end)
+  t.after(async () => { await tbd.stop({ keep: true }).catch(() => {}); reap(pidsOf(tbd)); });
   return Object.assign(tbd, { envAll, seed: (n) => { const f = path.join(dumps, `${n}.json`); return fs.existsSync(f) && JSON.parse(fs.readFileSync(f, 'utf8')).prompt; } });
 }
 
@@ -167,7 +169,7 @@ test('I2 (+) clarify → the page in its own 0700 dir under TB_HOME/interview; e
   await tbd.stop({ keep: true });
   fs.writeFileSync(path.join(tbd.tbHome, 'config.json'), JSON.stringify(cfg()));
   let next = await startTbd({ root: tbd.root, env: tbd.envAll });
-  t.after(async () => { await next.stop().catch(() => {}); });
+  t.after(async () => { await next.stop({ keep: true }).catch(() => {}); reap(pidsOf(next)); }); // stop, then reap (see boot)
   const opens = of(tbd, 'open').length;
   const orphan = await until(() => { const p = read(next, id).interview?.poll?.pid; return p && alive(p) && of(next, 'poll').some((c) => c.pid === p) && p; }, 15_000, 'poll pid kept');
   process.kill(Number(fs.readFileSync(path.join(next.tbHome, 'tbd.pid'), 'utf8')), 'SIGKILL');
@@ -260,7 +262,7 @@ test('I3d (+) D-0119: a send on disk when tbd died before applying it → the ne
   fs.mkdirSync(path.join(tbd.tbHome, 'interview-out'), { recursive: true, mode: 0o700 });
   fs.writeFileSync(path.join(tbd.tbHome, 'interview-out', `${id}-r01.feedback`), FB.replaceAll('{{NONCE}}', nonce), { mode: 0o600 });
   const next = await startTbd({ root: tbd.root, env: tbd.envAll });
-  t.after(async () => { reap(pidsOf(next)); await next.stop().catch(() => {}); });
+  t.after(async () => { await next.stop({ keep: true }).catch(() => {}); reap(pidsOf(next)); }); // stop, then reap (see boot)
   await stateIs(next, id, 'planning');
   assert.deepEqual(rows(next, id), [['lavish', 'answer']]);
   assert.equal((await view(next, id)).answers.length, 2);
@@ -335,7 +337,7 @@ async function workAsk(t, out, lavish = undefined) {
       [`tickets/${id}/rounds/01-plan.json`]: plan, [`fake-gates/${id}.json`]: {}, ...(lavish && { 'lavish/fake-lavish.json': lavish }) },
     env: { TB_PHASES_DIR: PHASES, NODE_OPTIONS: `${RUN_SPY} ${FAKE_GATES} ${OPENER}`, TEST_REAL_HANDLERS: '1', FAKE_CLAUDE_SCENARIO_DIR: scn, FAKE_CLAUDE_DUMP_DIR: dumps },
   });
-  t.after(async () => { reap(pidsOf(tbd)); await tbd.stop().catch(() => {}); });
+  t.after(async () => { await tbd.stop({ keep: true }).catch(() => {}); reap(pidsOf(tbd)); }); // stop, then reap (see boot)
   assert.equal((await tbd.api('POST', `/api/tickets/${id}/approve`, {})).status, 202);
   await stateIs(tbd, id, 'clarify');
   return { tbd, id, dump: (n) => { const f = path.join(dumps, `${n}.json`); return fs.existsSync(f) && JSON.parse(fs.readFileSync(f, 'utf8')); } };

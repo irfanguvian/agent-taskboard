@@ -9,6 +9,7 @@ const path = require('node:path');
 const http = require('node:http');
 const net = require('node:net');
 const { startTbd, REPO } = require('./helpers/tbd');
+const { ticket } = require('./helpers/runs');
 
 let tbd;
 before(async () => { tbd = await startTbd(); });
@@ -198,4 +199,49 @@ test('C14 C13 POST /api/tickets/:id/push | close: cookie without X-TB-CSRF → 4
       assert.deepEqual([r.status, r.json], [404, { error: 'no ticket t_zzzzzz' }], `${op} ${JSON.stringify(Object.keys(h))}`);
     }
   }
+});
+
+// full-access-runs Phase 8: Settings (GET / POST /api/config) and the Sandbox switch; a cookie caller needs X-TB-CSRF.
+// No phase built (empty TB_PHASES_DIR): the working ticket only waits, no run starts.
+test('Phase 8 POST /api/config: cookie without X-TB-CSRF → 403, with it → 200 and GET reflects it; claude_bin → 400; POST …/sandbox: on from the page in backlog, off from the page → 403, off with the token → 200, a working ticket → 409; Phase 9 hold with no run → 409, note / hold / handback CSRF, note limits (10 000 chars, 10 waiting, not on a done flow)', async (t) => {
+  const phases = fs.mkdtempSync(path.join(os.tmpdir(), 'http-p8-'));
+  const own = await startTbd({ env: { TB_PHASES_DIR: phases }, files: {
+    'tickets/t_sbx001/ticket.json': ticket('t_sbx001', { state: 'backlog' }), 'tickets/t_sbx002/ticket.json': ticket('t_sbx002', { state: 'working' }),
+    'tickets/t_sbx003/ticket.json': ticket('t_sbx003', { state: 'done' }) } });
+  t.after(async () => { await own.stop(); fs.rmSync(phases, { recursive: true, force: true }); });
+  const ui = { 'x-tb-token': undefined, cookie: await own.unlock(), 'sec-fetch-site': 'same-origin' };
+  const csrf = { ...ui, 'x-tb-csrf': (await own.api('GET', '/api/session/csrf', undefined, ui)).json.csrf };
+  const no = await own.api('POST', '/api/config', { max_concurrent: 2 }, ui);
+  assert.deepEqual([no.status, no.json], [403, { error: 'missing or wrong X-TB-CSRF token: reload the page' }]);
+  assert.equal((await own.api('GET', '/api/config')).json.config.max_concurrent, 3, 'refused: still the default');
+  const ok = await own.api('POST', '/api/config', { max_concurrent: 2 }, csrf);
+  assert.deepEqual([ok.status, ok.json.config.max_concurrent], [200, 2]);
+  const got = (await own.api('GET', '/api/config', undefined, ui)).json.config;
+  assert.deepEqual([got.max_concurrent, Object.keys(got).sort()], [2, ['claude_bin', 'final_distinct', 'lanes', 'max_concurrent', 'memory', 'models', 'skills', 'subagents']], 'the Settings keys + claude_bin, nothing else');
+  const bin = await own.api('POST', '/api/config', { claude_bin: '/tmp/claude' });
+  assert.deepEqual([bin.status, bin.json], [400, { error: 'config key "claude_bin" cannot be changed here: tb doctor --pin changes it' }]);
+
+  const sandbox = (id, on, h) => own.api('POST', `/api/tickets/${id}/sandbox`, { on }, h);
+  assert.equal((await sandbox('t_sbx001', true, ui)).status, 403, 'cookie without X-TB-CSRF');
+  const on = await sandbox('t_sbx001', true, csrf);
+  assert.deepEqual([on.status, on.json.ticket.sandbox], [200, true]);
+  const offUi = await sandbox('t_sbx001', false, csrf);
+  assert.deepEqual([offUi.status, offUi.json], [403, { error: 'Sandbox off is CLI only: run tb set-sandbox <id> off in Terminal' }]);
+  const off = await sandbox('t_sbx001', false);
+  assert.deepEqual([off.status, 'sandbox' in off.json.ticket], [200, false]);
+  const working = await sandbox('t_sbx002', true);
+  assert.deepEqual([working.status, working.json], [409, { error: 't_sbx002: the Sandbox switch works in backlog only (now working)' }]);
+  // full-access-runs Phase 9: Pause and Copy needs this phase's run with a session in a worktree; a note needs text
+  const hold = await own.api('POST', '/api/tickets/t_sbx001/hold', undefined, csrf);
+  assert.deepEqual([hold.status, hold.json], [409, { error: 't_sbx001: no backlog run with a session in a worktree to pause' }]);
+  for (const op of ['hold', 'handback', 'note']) assert.equal((await own.api('POST', `/api/tickets/t_sbx001/${op}`, op === 'note' ? { text: 'x' } : undefined, ui)).status, 403, `${op} without X-TB-CSRF`);
+  assert.equal((await own.api('POST', '/api/tickets/t_sbx001/note', { note: 'x' })).status, 400, 'body must be {text}');
+  const note = (id, text) => own.api('POST', `/api/tickets/${id}/note`, { text }, csrf);
+  const big = await note('t_sbx001', 'x'.repeat(10_001));
+  assert.deepEqual([big.status, big.json], [400, { error: 'a note is 1-10000 characters' }]);
+  for (let i = 1; i <= 10; i++) assert.deepEqual((await note('t_sbx001', `note ${i}`)).json.live, false, `note ${i} queued (no run)`);
+  const eleventh = await note('t_sbx001', 'note 11');
+  assert.deepEqual([eleventh.status, eleventh.json], [409, { error: 't_sbx001: 10 notes already wait for the next run' }]);
+  const done = await note('t_sbx003', 'too late');
+  assert.deepEqual([done.status, done.json], [409, { error: 't_sbx003: done: no run takes a note' }]);
 });

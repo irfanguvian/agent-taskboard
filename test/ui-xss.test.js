@@ -766,3 +766,39 @@ test('D-0172: Copy puts the exact command on the clipboard; without one the prev
   await run('copyCmd')(pre, 'tb doctor');
   assert.deepEqual(picked, [pre], 'fallback: the preview text is selected');
 });
+
+// full-access-runs Phase 9 + 8 (taint): the held run box builds its resume line only from shq() (the worktree) and a
+// session id that passes UUID_RE; while held no Resume / Restart, one Hand Back; a backlog flow's Sandbox off is a command
+// to copy (the page never posts it); the tag-add form's skills-off field
+test('Phase 9 held run box: "cd <shq(worktree)> && claude --resume <uuid>" arrives as plain words in a real shell, Hand Back, no Resume / Restart; no uuid → no line; Phase 8 sandbox off = a copy command; tag add --skills-off', () => {
+  const ctx = sandbox();
+  const run = (code) => vm.runInContext(code, ctx);
+  run('state = { reminders: [], flows: [], system: {}, calendar: {} };');
+  const uuid = '11111111-2222-4333-8444-555555555555', wt = "/tmp/w'; touch PWNED; echo '";
+  const box = (lease) => run(`el('div', null, ...runBox("t_hold01", ${JSON.stringify({ state: 'working', worktree: wt, lease: { phase: 'working', log: 'runs/1.jsonl', ...lease } })}))`);
+  const held = box({ exit: 'held', session: uuid });
+  const line = txt(byRole(held, 'resume-cmd'));
+  const words = execFileSync('/bin/sh', ['-c', line.replace(/^cd /, "printf '%s\\n' ").replace(' && claude --resume ', ' ')], { encoding: 'utf8' }).trimEnd().split('\n');
+  assert.deepEqual(words, [wt, uuid], `one word each, nothing ran: ${line}`);
+  assert.deepEqual(['handback', 'copy-resume', 'resume', 'restart', 'hold'].map((r) => !!byRole(held, r)), [true, true, false, false, false]);
+  assert.equal(byRole(box({ exit: 'held', session: 'x; rm -rf ~' }), 'resume-cmd'), undefined, 'a session that is no uuid: no line');
+  assert.equal(byRole(box({ exit: 'held', session: uuid, pending: { why: 'hold' } }), 'resume-cmd'), undefined, 'the run still dies: no line yet');
+  assert.match(txt(box({ exit: 'held', session: uuid, pending: { why: 'handback' } })), /Handing back: the board resumes the same session/, 'a pending hand back says so');
+  const cancelled = run(`el('div', null, ...runBox("t_hold01", ${JSON.stringify({ state: 'cancelled', worktree: wt, lease: { phase: 'working', log: 'runs/1.jsonl', exit: 'held', session: uuid } })}))`);
+  assert.deepEqual(['held', 'handback'].map((r) => !!byRole(cancelled, r)), [false, false], 'a cancelled flow keeps no Hand Back');
+  const squashed = run(`el('div', null, ...runBox("t_hold01", ${JSON.stringify({ state: 'final_gate', waiting: { reason: 'close' }, worktree: wt, lease: { phase: 'final_gate', log: 'runs/1.jsonl', exit: 'result', session: uuid } })}))`);
+  assert.equal(byRole(squashed, 'hold'), undefined, 'squashed, waiting close: no Pause and Copy');
+  const live = box({ session: uuid, lstart: 'x' });
+  assert.deepEqual(['hold', 'resume', 'restart', 'note-text'].map((r) => !!byRole(live, r)), [true, true, true, true], 'a live run: Pause and Copy, the note box');
+  noMarkup(walk(held));
+
+  const on = run('el("div", null, sandboxPart("t_sbx001", { sandbox: true }))');
+  assert.equal(txt(byRole(on, 'sandbox-cmd')), "tb set-sandbox 't_sbx001' off");
+  assert.equal(byRole(on, 'sandbox').attrs.disabled, '', 'the page cannot turn it off');
+  const off = run('el("div", null, sandboxPart("t_sbx001", {}))');
+  assert.deepEqual([byRole(off, 'sandbox-cmd'), byRole(off, 'sandbox').attrs.disabled], [undefined, undefined]);
+  // the tag-add form's --skills-off field (cli.js CHECK['skills-off']: plain names, comma-separated)
+  const cmd = (v) => JSON.parse(run(`JSON.stringify(buildCmd("tag-add", ${JSON.stringify(v)}))`));
+  assert.deepEqual(cmd({ name: 'acme/api', 'skills-off': 'caveman,ponytail' }), { cmd: "tb tag add 'acme/api' --skills-off 'caveman,ponytail'", errors: {} });
+  assert.ok(cmd({ name: 'acme/api', 'skills-off': 'a b;rm' }).errors['skills-off']);
+});

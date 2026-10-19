@@ -132,6 +132,18 @@ test('AC5 10 concurrent subagent.request in one session → exactly 3 ok, 7 deni
   assert.equal((await call(sock, { op: 'subagent.request', session: '' })).ok, false);
 });
 
+// full-access-runs Phase 8: tbd hands slots the lifetime budget through a getter (tbd.js), so a Settings save of
+// subagents.per_session_total counts from the next request, no restart; the harness budget 3 comes back after
+test('Phase 8 the lifetime subagent budget follows POST /api/config at once: 4 → the 5th request of a session is denied (4/4)', async (t) => {
+  const set = (total) => tbd.api('POST', '/api/config', { subagents: { concurrent: 3, per_session_total: total, depth: 1 } });
+  t.after(() => set(3));
+  assert.equal((await set(4)).status, 200);
+  const res = [];
+  for (let i = 0; i < 5; i++) res.push(await call(sock, { op: 'subagent.request', session: 's-live' }));
+  assert.deepEqual(res.map((r) => r.ok), [true, true, true, true, false]);
+  assert.equal(res[4].message, 'subagent budget used (4/4); do the rest yourself');
+});
+
 test('AC5 leases and counters survive a tbd restart; dead-pid and reused-pid leases are dropped', async (t) => {
   const a = sleeper(t);
   const b = sleeper(t);

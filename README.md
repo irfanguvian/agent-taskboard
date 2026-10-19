@@ -65,6 +65,14 @@ flowchart LR
 - Needs git 2.49+ (`clone --revision`); `tb doctor` checks it.
 - Local Postgres: TCP loopback needs a password (scram); the socket is out of agent reach. A tag without `db: local` must hold no DB password in its env files (`tb doctor --tag` fails it). `tb doctor` shows `pg_wall`.
 
+### Full access by default, Sandbox toggle
+
+A code run works like your terminal: it reads your live `~/.claude/CLAUDE.md` and FUNDAMENTALS, the repo `CLAUDE.md`, `CLAUDE.local.md` and `AGENTS.md`, loads your user and plugin skills and hooks (OMC off), may use 2 subagents, and asks you questions from any step (lavish page; the same session resumes). A seatbelt wall (`full_access_wall`, on by default) still blocks `~/.ssh`, every `.env` but the tag's copied env files, and gh / git / netrc / AWS credentials. Browser checks run through `bin/tb-chrome` (working and QA), outside Claude's seatbelt but under a profile built from the same wall (only node, Chrome and the shell run; loopback only the ticket's ports and the tag's qa ports).
+
+- Untrusted input in the task (an issue, a pasted log, a third-party file)? Turn Sandbox on: `tb new … --sandbox`, the New Flow checkbox, or the page switch on a backlog ticket. That is the old locked run. Turning it off is the CLI only: `tb set-sandbox <id> off`.
+- What full access can still do: run as you inside the wall (internet open, your other repos readable) and stop another of your processes. Push stays yours.
+- Settings page or `tb config`: models per step, tickets at once, subagents, default skills. Steering: note box, Pause and Copy (`cd <worktree> && claude --resume <uuid>` for your terminal), Hand Back.
+
 ## Health, evals and drills
 
 `tb health` (or the Health view in the board) shows the reliability targets as x / y over the last 30 days: interruptions recovered without you, runs you had to Resume or Restart, gate failures that were infra, false stall alerts, rework, hands-off after approve, fix-of tickets, golden score, tbd memory. Computed on request from `~/.taskboard/metrics.jsonl` (rotates at 32 MB into `metrics.1.jsonl`), no timer.

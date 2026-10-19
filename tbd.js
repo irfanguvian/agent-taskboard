@@ -94,7 +94,8 @@ function boot() {
   }
   monitor = createMonitor({ config: store.config });
   monitor.on('disk', notifier.disk);
-  slots = createSlots({ config: store.config, system: () => monitor?.snapshot() ?? null, alert: notifier.alert }); // TB_HOME/tbd.sock; slots.registerRoot for P3 runs
+  // full-access-runs Phase 8: subagents through a getter, so a Settings change of the lifetime budget needs no restart
+  slots = createSlots({ config: { ...store.config, get subagents() { return store.config.subagents; } }, system: () => monitor?.snapshot() ?? null, alert: notifier.alert }); // TB_HOME/tbd.sock; slots.registerRoot for P3 runs
   notifier.start();
   monitor.start();
   doctor.start({ notifier, monitor }); // login re-check every 30 min and after a wake

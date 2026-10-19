@@ -353,6 +353,44 @@ test('tb new -f --sandbox stores sandbox: true (default: no field; a reminder re
   }
 });
 
+// full-access-runs Phase 8: tb config (TOON, one dotted key a row), tb config set (the whole top object built from the
+// live config, tbd checks it), tb config skills add|rm, tb set-sandbox (backlog only)
+test('Phase 8 tb config set models.review.effort \'"high"\' round trip (only that leaf changes); skills rm; a value tbd refuses → exit 1, unchanged; claude_bin → exit 2; tb set-sandbox on / off, not in backlog → exit 1', async () => {
+  const phases = fs.mkdtempSync(path.join(os.tmpdir(), 'tb-p8-'));
+  const t = await startTbd({ env: { TB_PHASES_DIR: phases }, files: {
+    'tickets/t_sbx001/ticket.json': ticket('t_sbx001', { state: 'backlog' }), 'tickets/t_sbx002/ticket.json': ticket('t_sbx002', { state: 'working' }) } });
+  const tb = (...args) => runTb(args, t);
+  const cfg = async () => (await t.api('GET', '/api/config')).json.config;
+  try {
+    const show = await tb('config');
+    assert.equal(show.code, 0, show.stdout);
+    assert.match(show.stdout, /^ {2}models\.review\.effort,xhigh$/m);
+    assert.match(show.stdout, /^ {2}subagents\.per_session_total,8$/m);
+    const set = await tb('config', 'set', 'models.review.effort', '"high"');
+    assert.deepEqual([set.code, set.stdout], [0, 'config: set models.review.effort = "high"\n']);
+    const m = (await cfg()).models;
+    assert.deepEqual([m.review, m.planning], [{ model: 'opus', effort: 'high' }, { model: 'opus', effort: 'xhigh' }], 'only the leaf changed');
+    assert.match((await tb('config')).stdout, /^ {2}models\.review\.effort,high$/m);
+    assert.equal((await tb('config', 'skills', 'rm', 'caveman')).code, 0);
+    assert.equal((await cfg()).skills.defaults.includes('caveman'), false);
+
+    const bad = await tb('config', 'set', 'max_concurrent', '9');
+    assert.deepEqual([bad.code, bad.stdout.split('\n')[0]], [1, 'error: bad value for config key "max_concurrent": a whole number 1-3']);
+    assert.equal((await cfg()).max_concurrent, 3, 'refused: unchanged');
+    assert.equal((await tb('config', 'set', 'claude_bin', '"/tmp/x"')).code, 2);
+    assert.equal((await tb('config', 'set', 'models.nope.model', '"opus"')).code, 2, 'no such inner key: nothing sent');
+
+    assert.match((await tb('set-sandbox', 't_sbx001', 'on')).stdout, /^sandbox: on · t_sbx001 · backlog/m);
+    assert.equal((await t.api('GET', '/api/tickets/t_sbx001')).json.ticket.sandbox, true);
+    assert.match((await tb('set-sandbox', 't_sbx001', 'off')).stdout, /^sandbox: off · t_sbx001 · backlog/m);
+    const late = await tb('set-sandbox', 't_sbx002', 'on');
+    assert.deepEqual([late.code, late.stdout.split('\n')[0]], [1, 'error: t_sbx002: the Sandbox switch works in backlog only (now working)']);
+  } finally {
+    await t.stop();
+    fs.rmSync(phases, { recursive: true, force: true });
+  }
+});
+
 test('list: a flow\'s waiting column is its reason (children done/total), empty when none, never [object Object]', async () => {
   const since = '2026-10-12T00:00:00.000Z';
   const files = Object.fromEntries([

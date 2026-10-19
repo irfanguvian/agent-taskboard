@@ -27,7 +27,8 @@ const ui = { drag: null, editing: null, tray: null, promote: null, pick: { kind:
   round: null, plan: null, drafts: new Map(), busy: new Map(), err: null, // the open ticket's newest planning round and frozen plan, Clarify / Reject drafts (`${id}:${n}` → draft), planning action in flight (id → role), its refusal
   csrf: null, ask: null, gates: null, ivs: null, fb: null, pass: null, phase: new Map(), // P5: synchronizer token, the open working ask, gate / intervention pages + a feedback file (on demand), the pass check, Resume's phase pick (id → phase)
   q: '', hl: null, days: 30, follow: null, // M7: reminder search (lowercase), the Health view's data + its days, the drawer's log Follow
-  fview: 'all', rfilter: null, tab: 'overview', day: null }; // calm UI: Flows segment (all|you|running|done), Reminders filter from a Today highlight (overdue|today), inspector tab (overview|activity|reports), the date of the last render (midnight)
+  fview: 'all', rfilter: null, tab: 'overview', day: null, // calm UI: Flows segment (all|you|running|done), Reminders filter from a Today highlight (overdue|today), inspector tab (overview|activity|reports), the date of the last render (midnight)
+  cfg: null, cfgErr: null, notes: new Map() }; // full-access-runs Phase 8 + 9: GET /api/config's answer + the last refused setting ({role, text}), note drafts (id → text)
 
 // ---------- helpers ----------
 const $ = (s, r = document) => r.querySelector(s);
@@ -53,6 +54,7 @@ function el(tag, attrs, ...kids) {
 }
 // Bidi controls and zero-width chars in agent text: stripped (run errors) or shown as [U+202E] (plan, questions,
 // titles), never applied or hidden, so a file name or test_cmd reads the way it runs.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/; // lib/runner.js's: a claude session id
 const BIDI = /[\u061C\u200B-\u200F\u202A-\u202E\u2060\u2066-\u2069\uFEFF]/g;
 const vis = s => String(s ?? '').replace(BIDI, c => `[U+${c.codePointAt(0).toString(16).toUpperCase().padStart(4, '0')}]`);
 const debounce = (fn, ms) => { let t; return () => { clearTimeout(t); t = setTimeout(fn, ms); }; };
@@ -71,6 +73,7 @@ const ICONS = {
   flows: ['M6 3v12', circ(18, 6, 3), circ(6, 18, 3), 'M18 9a9 9 0 0 1-9 9'],
   health: ['M22 12h-4l-3 9L9 3l-3 9H2'],
   system: ['M20 7h-9M14 17H5', circ(17, 17, 3), circ(7, 7, 3)],
+  settings: ['M21 4h-7M10 4H3M21 12h-9M8 12H3M21 20h-5M12 20H3', 'M14 2v4M8 10v4M16 18v4'], // lucide sliders-horizontal
   search: [circ(11, 11, 8), 'm21 21-4.3-4.3'],
   plus: ['M5 12h14M12 5v14'],
   close: ['M18 6 6 18M6 6l12 12'],
@@ -130,7 +133,7 @@ $('#theme').addEventListener('click', e => {
 });
 
 // ---------- views: one per hash (#today #reminders #flows #health, #system below 1280px), so back / forward work ----------
-const VIEWS = { today: 'Today', reminders: 'Reminders', flows: 'Flows', health: 'Health', system: 'System' };
+const VIEWS = { today: 'Today', reminders: 'Reminders', flows: 'Flows', health: 'Health', settings: 'Settings', system: 'System' };
 const COMPACT = matchMedia('(max-width: 1279px)'); // icon rail or tab bar: the sidebar's metrics live in the System view
 const compact = () => COMPACT.matches;
 COMPACT.addEventListener('change', e => { if (!e.matches && root.dataset.view === 'system') location.replace('#today'); }); // the full sidebar shows System: widening leaves it
@@ -147,6 +150,7 @@ function route() {
   for (const a of document.querySelectorAll('a[data-view]')) a.setAttribute('aria-current', a.dataset.view === v ? 'page' : 'false');
   root.scrollTop = 0;
   if (v === 'health') loadHealth(); // loads on open and on Refresh only: no timer
+  if (v === 'settings') loadSettings(); // full-access-runs Phase 8: on open, and after each save
 }
 // the toolbar turns to material with a hairline once content scrolls under it (foundation .material falls back to solid)
 document.addEventListener('scroll', () => $('#toolbar')?.classList.toggle('material', root.scrollTop > 0), { passive: true });
@@ -274,6 +278,7 @@ async function reconnect() {
   await load(); // events may have been missed while down
   if (!ui.locked) connect();
   if (root.dataset.view === 'health') loadHealth(); // opened by hash before the page was trusted
+  if (root.dataset.view === 'settings') loadSettings(); // the same for Settings (full-access-runs Phase 8)
 }
 
 function connect() {
@@ -933,7 +938,7 @@ function drawerBody(f, ticket, error) {
           el('h3', { id: 'as-h' }, 'Assign'),
           el('p', { class: 'hint' }, 'Assign starts planning: the planner reads the code, then asks you questions or writes a plan.'),
           el('div', { class: 'acts' }, actBtn(f.id, 'assign', () => post(f.id, 'assign'), { cls: BTN1 })),
-          errLine(f.id, 'assign')),
+          errLine(f.id, 'assign'), sandboxPart(f.id, k)),
         st === 'planning' && k.reject_comment && el('p', { class: 'hint' }, 'Your comment on the last plan: ', el('q', null, k.reject_comment)),
         st === 'planning' && k.must_ask && el('p', { class: 'hint' }, 'You asked for more: the planner asks you questions before it plans.'),
         st === 'clarify' && (k.clarify_origin?.phase === 'working' ? askPanel(f.id, k, ui.ask)
@@ -991,17 +996,25 @@ function runBox(id, k) {
   // from blocked: the phase it blocked in, or an earlier one (tb resume --phase)
   const at = s => FLOW_COLS.findIndex(([c]) => c === s);
   const back = st === 'blocked' ? AGENT.filter(p => at(p) <= at(k.blocked_from) && !(p === 'qa' && k.kind === 'brainstorm')) : [];
+  // full-access-runs Phase 9: held = Irfan's terminal has the session (no Resume / Restart until Hand Back)
+  const held = l?.exit === 'held', open = st && st !== 'done' && st !== 'cancelled';
+  const pause = AGENT.includes(st) && !held && l?.phase === st && UUID_RE.test(l.session ?? '') && typeof k.worktree === 'string' && k.waiting?.reason !== 'close' && l.exit !== 'usage'; // squashed: nothing to pause; a usage wait: tbd refuses
   const acts = [
     back.length > 1 && el('label', { class: 'pick' }, 'Resume in',
       el('select', { class: 'input', name: 'resume-phase', 'data-role': 'resume-phase', onchange: e => ui.phase.set(id, e.target.value) },
         ...back.map(p => el('option', { value: p, selected: (ui.phase.get(id) ?? k.blocked_from) === p }, stateLabel(p))))),
-    can && btn('resume', { disabled: live, title: live ? 'The run is live. Resume works once it ended.' : null }),
-    can && btn('restart'),
-    st && st !== 'done' && st !== 'cancelled' && btn('cancel'),
+    can && !held && btn('resume', { disabled: live, title: live ? 'The run is live. Resume works once it ended.' : null }),
+    can && !held && btn('restart'),
+    pause && actBtn(id, 'hold', () => post(id, 'hold')),
+    open && btn('cancel'),
   ].filter(Boolean);
   if (acts.length) out.push(el('div', { class: 'run-actions' }, ...acts));
   if (sure) out.push(el('p', { class: 'hint' }, 'Press again to cancel this flow.'));
+  if (pause) out.push(el('p', { class: 'hint' }, 'Pause and Copy stops the run at once: its turn ends, and a tool call in flight finishes or dies with it.'));
+  out.push(errLine(id, 'hold'));
+  if (held && open && (AGENT.includes(st) || st === 'blocked')) out.push(heldBox(id, k)); // a cancelled or closed flow keeps no Hand Back; blocked + held: Hand Back resumes from Blocked
   out.push(el('p', { class: 'hint', 'aria-live': 'polite' }, outcome(id, k, running)));
+  if (open) out.push(noteBox(id, k, running));
   const shown = ui.log?.id === id;
   const follow = ui.follow?.id === id && ui.follow.on;
   if (l?.log || shown) out.push(el('div', { class: 'log-head' }, el('h4', null, 'Log Tail'),
@@ -1011,6 +1024,53 @@ function runBox(id, k) {
   if (shown) out.push(ui.log.error ? el('p', { class: 'hint' }, ui.log.error)
     : el('pre', { class: 'log', 'data-role': 'log-tail', tabindex: '0', 'aria-label': 'Run log, last lines' }, ui.log.lines.join('\n') || 'Empty so far.'));
   return out;
+}
+
+// full-access-runs Phase 9: Pause and Copy → "In Your Terminal": the resume line built only from shq() (the worktree)
+// and a session id that passes UUID_RE, a Copy button (copyCmd) and the one Hand Back button. While the run still dies
+// (pending) no line yet: two writers of one session never.
+const HELD_WAIT = { // a held flow's recovery in flight (lease.pending.why)
+  hold: 'Stopping the run. The command shows once it has stopped.',
+  handback: 'Handing back: the board resumes the same session (it may wait for memory first).',
+  cancel: 'Cancelling the flow.',
+};
+function heldBox(id, k) {
+  const l = k.lease, cmd = UUID_RE.test(l.session ?? '') && typeof k.worktree === 'string' ? `cd ${shq(k.worktree)} && claude --resume ${l.session}` : null;
+  const pre = cmd && el('pre', { class: 'log', 'data-role': 'resume-cmd', tabindex: '0', 'aria-label': 'Command, as text' }, cmd);
+  return el('div', { class: 'held', 'data-role': 'held' }, el('h4', null, 'In Your Terminal'),
+    l.pending ? el('p', { class: 'hint' }, HELD_WAIT[l.pending.why] ?? 'Working on it.') : [
+      el('p', { class: 'hint' }, 'tbd starts nothing on this flow until you hand it back. Run this exact line in Terminal (tbd cannot see claude -c), work in the session, type /exit, then Hand Back.'),
+      pre || el('p', { class: 'hint' }, 'No session to resume.'),
+      el('div', { class: 'acts' }, cmd && el('button', { type: 'button', class: BTN2, 'data-role': 'copy-resume', onclick: () => copyCmd(pre, cmd) }, 'Copy Command'),
+        actBtn(id, 'handback', () => post(id, 'handback'), { cls: BTN1 })),
+      errLine(id, 'handback')]);
+}
+// Phase 9: a note to the agent (text only, into its prompt file: never a shell). The draft survives the run box's re-renders.
+function noteBox(id, k, running) {
+  const ta = el('textarea', { class: 'input', rows: 2, maxlength: '10000', 'data-role': 'note-text', 'aria-label': 'Note to the agent',
+    placeholder: running ? 'The run stops and its session goes on with your note first.' : 'The next run starts with your note.', oninput: e => ui.notes.set(id, e.target.value) });
+  ta.value = ui.notes.get(id) ?? '';
+  const send = async () => {
+    const text = ta.value.trim();
+    if (!text) return;
+    if (!(await post(id, 'note', { text }))) ui.notes.delete(id);
+  };
+  const n = k.notes?.length ?? 0;
+  return el('div', { class: 'note-box' }, el('h4', null, 'Note'), ta,
+    el('div', { class: 'acts' }, actBtn(id, 'note', send), n > 0 && el('span', { class: 'hint' }, `${n} ${n === 1 ? 'note waits' : 'notes wait'} for the next run.`)),
+    errLine(id, 'note'));
+}
+// Phase 8: the page turns Sandbox on (POST …/sandbox); off loosens containment, so it is a command to copy (D-0172).
+function sandboxPart(id, k) {
+  const cmd = `tb set-sandbox ${shq(id)} off`;
+  const pre = el('pre', { class: 'log', 'data-role': 'sandbox-cmd', tabindex: '0', 'aria-label': 'Command, as text' }, cmd);
+  return el('div', { class: 'sandbox' },
+    el('label', { class: 'switch-row' }, el('span', null, el('span', { class: 'set-label' }, 'Sandbox'),
+      el('span', { class: 'cell-sub' }, k.sandbox ? 'On: its runs are locked (seatbelt on, project settings only).' : 'Off: full access. Turn it on for untrusted input.')),
+      el('input', { type: 'checkbox', role: 'switch', class: 'switch', 'data-role': 'sandbox', checked: !!k.sandbox, disabled: !!k.sandbox || ui.busy.has(id), onchange: () => post(id, 'sandbox', { on: true }) })),
+    k.sandbox && [el('p', { class: 'hint' }, 'Turning it off loosens containment, so it runs in Terminal:'), pre,
+      el('div', { class: 'acts' }, el('button', { type: 'button', class: BTN2, 'data-role': 'copy-sandbox', onclick: () => copyCmd(pre, cmd) }, 'Copy Command'))],
+    errLine(id, 'sandbox'));
 }
 
 // L4: the last click wins (gen CAS in tbd); this line shows what came of it once the ticket and run events arrive.
@@ -1178,6 +1238,11 @@ const SENT = { // button role → [label, label while sending, toast title, toas
   push: ['Push', 'Pushing…', 'Push Started', 'Leak scan first, then git push. The outcome shows in the drawer.'],
   close: ['Close Flow', 'Closing…', 'Flow Closed', 'The flow is done. Nothing was pushed; the worktree stays until tb gc.'],
   lavish: ['Open in Lavish', 'Opening…', 'Opening Lavish', 'The questions page opens in your browser.'],
+  // full-access-runs Phase 8 + 9: the Sandbox switch, a note, Pause and Copy, Hand Back
+  sandbox: ['Sandbox', 'Saving…', 'Sandbox On', 'Its runs are locked: seatbelt on, project settings only.'],
+  note: ['Send Note', 'Sending…', 'Note Sent', 'A live run takes it now; else the next run starts with it.'],
+  hold: ['Pause and Copy', 'Pausing…', 'Pausing', 'The run stops; then the command to resume it shows here.'],
+  handback: ['Hand Back', 'Handing Back…', 'Handed Back', 'The board resumes the same session.'],
   'pass-check': ['Check SHA', 'Checking…', '', ''],
 };
 const WAIT = {
@@ -2083,7 +2148,7 @@ function tagFlags(v, bad) {
 const ONLY = ['golden', 'planner', 'review', 'qa', 'final_gate'];
 const CMDS = {
   'tag-add': {
-    title: 'Add Tag', sub: 'Builds a tb tag add command. The flags replace the whole tag, except ident, push remote, QA ports and database alone: those merge into the tag you have.',
+    title: 'Add Tag', sub: 'Builds a tb tag add command. The flags replace the whole tag, except ident, push remote, QA ports, database and skills off alone: those merge into the tag you have.',
     fields: [
       { k: 'name', label: 'Name', kind: 'text', ph: 'shop/api', hint: 'Lowercase letters, digits and -. Use a/b for a child.' },
       { k: 'type', label: 'Type', kind: 'select', opts: [['', 'None (a group)'], ['git', 'git'], ['folder', 'folder']] },
@@ -2094,6 +2159,7 @@ const CMDS = {
       { k: 'env-files', label: 'Env files', kind: 'text', hint: 'A comma list.' },
       { k: 'context', label: 'Context files', kind: 'text', hint: 'A comma list.' },
       { k: 'skills', label: 'Skills', kind: 'text', hint: 'A comma list.' },
+      { k: 'skills-off', label: 'Skills off', kind: 'text', hint: 'Board default skills this tag removes. A comma list.' }, // full-access-runs Phase 8
       { k: 'checks', label: 'Checks', kind: 'text', ph: '{"lint":"npm run lint"}', hint: 'A JSON object.' },
       { k: 'heavy', label: 'Heavy commands', kind: 'text', ph: '["npm ci"]', hint: 'A JSON array of command prefixes.' },
       { k: 'leak-check', label: 'Scan for leaks before a push (--leak-check)', kind: 'check' },
@@ -2106,8 +2172,9 @@ const CMDS = {
       if (v.type === 'git' && !v.base) bad('base', 'A git tag needs a base branch.');
       if (v.checks && !jsonOf(v.checks, false)) bad('checks', 'Use a JSON object, e.g. {"lint":"npm run lint"}.');
       if (v.heavy && !jsonOf(v.heavy, true)) bad('heavy', 'Use a JSON array of command prefixes.');
+      if (v['skills-off'] && !/^[\w-][\w.-]*(,[\w-][\w.-]*)*$/.test(v['skills-off'])) bad('skills-off', 'Use plain skill names, comma-separated, e.g. caveman,ponytail.'); // cli.js CHECK['skills-off']
       return words('tb tag add', shq(v.name), flag('type', v.type), v.path && `--path ${shpath(v.path)}`, flag('base', v.base), flag('setup', v.setup), flag('output', v.output),
-        flag('env-files', v['env-files']), flag('context', v.context), flag('skills', v.skills), flag('checks', v.checks), flag('heavy', v.heavy), v['leak-check'] && '--leak-check', ...tagFlags(v, bad));
+        flag('env-files', v['env-files']), flag('context', v.context), flag('skills', v.skills), flag('skills-off', v['skills-off']), flag('checks', v.checks), flag('heavy', v.heavy), v['leak-check'] && '--leak-check', ...tagFlags(v, bad));
     },
   },
   doctor: {
@@ -2291,6 +2358,78 @@ async function loadDrills(before) {
   renderHealth();
 }
 
+
+// ---------- Settings (full-access-runs Phase 8): GET /api/config, every change saved at once (POST /api/config) ----------
+// DESIGN §8 Forms + §11 Settings: grouped rows, label leading, control trailing, saved at once. A nested key goes whole,
+// built from what tbd last answered (as tb config set); tbd checks every value, a refusal shows under its control
+// (ui.cfgErr) and the view reads tbd's config again. claude_bin is shown, never changed here (tb doctor --pin).
+const MODELS = ['opus', 'sonnet', 'fable'], EFFORTS = ['low', 'medium', 'high', 'xhigh'];
+let cfgSeq = 0;
+async function loadSettings() {
+  if (!trusted || ui.locked) return;
+  const mine = ++cfgSeq;
+  let r;
+  try { r = await api('GET', '/api/config'); } catch (e) { r = { error: e.message }; }
+  if (mine !== cfgSeq) return;
+  ui.cfg = r;
+  renderSettings();
+}
+async function saveSetting(role, patch) {
+  ui.cfgErr = null;
+  try {
+    ui.cfg = await api('POST', '/api/config', patch);
+    toast('The next runs use it.', { kind: 'info', title: 'Saved' });
+    renderSettings();
+  } catch (e) {
+    ui.cfgErr = { role, text: e.message };
+    await loadSettings();
+  }
+}
+function renderSettings() { // a re-render keeps focus on the same control
+  const box = $('#settings'), a = document.activeElement, role = box.contains(a) ? a?.dataset?.role : null;
+  box.replaceChildren(settingsView(ui.cfg));
+  if (role) $(`#settings [data-role="${CSS.escape(role)}"]`)?.focus();
+}
+function settingsView(r) {
+  const c = r?.config;
+  if (!c) return el('div', { class: 'settings' }, r?.error ? el('p', { class: 'err', role: 'alert' }, r.error) : el('p', { class: 'hint' }, 'Loading…'));
+  const m = c.models || {}, need = c.memory?.phase_need_gb || {}, sub = c.subagents || {}, on = new Set(c.skills?.defaults || []);
+  const err = role => ui.cfgErr?.role === role && el('p', { class: 'err' }, ui.cfgErr.text);
+  const select = (role, label, value, opts, save) => el('select', { class: 'input', 'data-role': role, 'aria-label': label, onchange: e => save(e.target.value) },
+    !opts.some(o => String(o) === String(value)) && el('option', { value: '', selected: true, disabled: true }, DASH),
+    ...opts.map(o => el('option', { value: String(o), selected: String(o) === String(value) }, String(o))));
+  const number = (role, label, value, [min, max, step], save) => el('input', { class: 'input num', type: 'number', inputmode: 'decimal', 'data-role': role, 'aria-label': label,
+    min: String(min), max: String(max), step: String(step), value: String(value ?? ''), onchange: e => save(Number(e.target.value)) });
+  const toggle = (role, label, checked, save) => el('input', { type: 'checkbox', role: 'switch', class: 'switch', 'data-role': role, 'aria-label': label, checked: !!checked, onchange: e => save(e.target.checked) });
+  const row = (role, label, hint, ctl) => el('div', { class: 'set-row' }, el('div', { class: 'set-text' }, el('span', { class: 'set-label' }, label), hint && el('span', { class: 'cell-sub' }, hint), err(role)), ctl);
+  const head = (id, title) => el('div', { class: 'card-head' }, el('h3', { id, class: 'card-title' }, title));
+  const card = (id, title, hint, ...kids) => el('section', { class: 'card card-flush', 'aria-labelledby': id }, head(id, title), hint && el('p', { class: 'hint set-sub' }, hint), ...kids);
+  const model = (p, k) => v => saveSetting(`m-${p}-${k}`, { models: { ...m, [p]: { ...m[p], [k]: v } } });
+  const ram = p => v => saveSetting(`ram-${p}`, { memory: { ...c.memory, phase_need_gb: { ...need, [p]: v } } });
+  const subs = k => v => saveSetting(`sub-${k}`, { subagents: { ...sub, [k]: v } });
+  const skill = n => v => saveSetting(`skill-${n}`, { skills: { ...c.skills, defaults: v ? [...on, n] : [...on].filter(x => x !== n) } });
+  const phaseErr = AGENT.flatMap(p => [`m-${p}-model`, `m-${p}-effort`, `ram-${p}`]).map(err).find(Boolean);
+  return el('div', { class: 'settings' },
+    el('p', { class: 'hint' }, 'Changes save at once. A run already going keeps what it started with; the next run uses the new value.'),
+    card('set-ph', 'Phases', 'The model and effort each agent phase runs on. Memory: what a run of the phase needs before it may start, used only until a run of it is measured; after that the board uses the measured peaks.',
+      el('div', { class: 'tscroll' }, el('table', { class: 'table set-table' }, el('caption', { class: 'sr' }, 'Model, effort and memory need per phase (memory: until a run of the phase is measured)'),
+        el('thead', null, el('tr', null, ...['Phase', 'Model', 'Effort', ['Memory (GB)', 'num']].map(h => el('th', { scope: 'col', class: Array.isArray(h) ? h[1] : null }, Array.isArray(h) ? h[0] : h)))),
+        el('tbody', null, ...AGENT.map(p => el('tr', { 'data-phase': p },
+          el('td', { class: 'cell-title' }, stateLabel(p)),
+          el('td', null, select(`m-${p}-model`, `${stateLabel(p)} model`, m[p]?.model, MODELS, model(p, 'model'))),
+          el('td', null, select(`m-${p}-effort`, `${stateLabel(p)} effort`, m[p]?.effort, EFFORTS, model(p, 'effort'))),
+          el('td', { class: 'num' }, number(`ram-${p}`, `${stateLabel(p)} memory need in GB, until a run is measured`, need[p], [0.2, 4, 0.1], ram(p)))))))),
+      phaseErr && el('div', { class: 'card-pad' }, phaseErr)),
+    card('set-run', 'Runs', null,
+      row('max_concurrent', 'Tickets at once', 'Runs of different tickets at the same time (1 to 3). The memory guard still holds one that does not fit.', select('max_concurrent', 'Tickets at once', c.max_concurrent, [1, 2, 3], v => saveSetting('max_concurrent', { max_concurrent: Number(v) }))),
+      row('sub-concurrent', 'Subagents at once', 'Per run (1 to 4).', select('sub-concurrent', 'Subagents at once', sub.concurrent, [1, 2, 3, 4], v => subs('concurrent')(Number(v)))),
+      row('sub-per_session_total', 'Subagent budget', 'Subagents one session may start in all (1 to 20).', number('sub-per_session_total', 'Subagent budget per session', sub.per_session_total, [1, 20, 1], subs('per_session_total'))),
+      row('final_distinct', 'Final Gate on Another Model', 'The final gate never runs on the review phase’s model.', toggle('final_distinct', 'Final gate on another model', c.final_distinct, v => saveSetting('final_distinct', { final_distinct: v }))),
+      row('lanes', 'Parallel Lanes', 'Two working runs of one ticket at once (needs tickets at once 2 or more).', toggle('lanes', 'Parallel lanes', c.lanes?.enabled, v => saveSetting('lanes', { lanes: { ...c.lanes, enabled: v } })))),
+    card('set-sk', 'Default Skills', 'Every run names these skills; a tag adds or removes its own.',
+      ...(r.skills || []).map(n => row(`skill-${n}`, vis(n), null, el('input', { type: 'checkbox', class: 'check', 'data-role': `skill-${n}`, 'aria-label': `Default skill ${vis(n)}`, checked: on.has(n), onchange: e => skill(n)(e.target.checked) })))),
+    card('set-cl', 'Claude', null, row('claude_bin', 'Claude Binary', 'Changed in Terminal only: tb doctor --pin.', el('code', { class: 'set-code' }, vis(c.claude_bin)))));
+}
 
 // ---------- boot ----------
 function render() {

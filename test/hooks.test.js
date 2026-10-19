@@ -141,9 +141,10 @@ test('bash-guard full-access-runs: tb verb list pinned from the CLI registry; ss
   assert.deepEqual([...VERBS].sort(), /^commands: (.*)$/m.exec(help)?.[1].split(', ').sort());
   assert.doesNotMatch(fs.readFileSync(path.join(REPO, 'lib', 'verbs.js'), 'utf8'), /require\(/);
   assert.deepEqual([...fs.readFileSync(path.join(HOOKS, 'bash-guard.js'), 'utf8').matchAll(/require\('([^']+)'\)/g)].map((m) => m[1]), ['node:path', './io', '../lib/verbs']);
-  assert.deepEqual([...MUTATING].sort(), ['add', 'answer', 'approve', 'assign', 'cancel', 'close', 'doctor', 'done', 'eval', 'gc', 'lavish',
-    'move', 'new', 'notify-test', 'open', 'pass', 'promote', 'push', 'reject', 'restart', 'resume', 'rework', 'rm', 'scope', 'set', 'tag']);
-  for (const cmd of ['tb push t_x', 'tb close t_x', 'tb rework t_x --feedback y', 'tb lavish t_x', 'tb eval golden --real --yes', 'tb open --print']) {
+  // full-access-runs Phase 8 + 9 (contract change: the list gains config, handback, hold, note, set-sandbox)
+  assert.deepEqual([...MUTATING].sort(), ['add', 'answer', 'approve', 'assign', 'cancel', 'close', 'config', 'doctor', 'done', 'eval', 'gc', 'handback', 'hold', 'lavish',
+    'move', 'new', 'note', 'notify-test', 'open', 'pass', 'promote', 'push', 'reject', 'restart', 'resume', 'rework', 'rm', 'scope', 'set', 'set-sandbox', 'tag']);
+  for (const cmd of ['tb push t_x', 'tb close t_x', 'tb rework t_x --feedback y', 'tb lavish t_x', 'tb eval golden --real --yes', 'tb open --print', 'tb note t_x hi', 'tb set-sandbox t_x off']) {
     assert.match(guard(cmd, {})?.deny ?? 'allowed', /not agent commands/, cmd);
   }
   for (const cmd of ['tb list --flows', 'tb report t_x --kind review', 'tb health']) assert.equal(guard(cmd, {}), null, cmd);

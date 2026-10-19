@@ -108,6 +108,11 @@
 .run-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; color: var(--fg-muted); }
 .run-line > .status { color: var(--fg); }
 .acts, .run-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+/* full-access-runs Phase 8 + 9: the Sandbox switch (backlog), In Your Terminal (held), the note box */
+.switch-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; cursor: pointer; }
+.switch-row > span { display: grid; gap: 2px; min-width: 0; }
+.sandbox, .held, .note-box { display: grid; gap: 8px; margin-top: 16px; }
+.held > h4, .note-box > h4 { margin: 0; }
 .pick { display: inline-flex; align-items: center; gap: 8px; color: var(--fg-muted); font: 500 var(--label) var(--font); }
 .pick select { width: auto; min-height: var(--ctl-sm); }
 .log-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 16px; }

@@ -361,3 +361,49 @@ test('M5 C9 fresh config: a slot lease holds up to 75 min (slots.max_hold_min, w
   assert.equal(config.slots.max_hold_min, 75);
   assert.ok(config.slots.max_hold_min > config.liveness.wall_min.qa);
 });
+
+// full-access-runs Phase 8: the Settings keys at the store, the check behind POST /api/config and tb config set (plan
+// limits: max_concurrent 1-3, subagents concurrent 1-4 / per_session_total 1-20 / depth 1, model opus|sonnet|fable,
+// effort low..xhigh, skills installed or board defaults, memory.phase_need_gb 0.2-4 and no other memory key)
+test('Phase 8 updateConfig: each Settings key is accepted and written whole (one set back to its default leaves config.json); a bad model, a 5th subagent, an unknown skill, another memory key, 0.1 GB → 400, nothing written', () => {
+  const tbHome = path.join(root, 'p8-settings');
+  const file = path.join(tbHome, 'config.json');
+  const script = `
+    const fs = require('node:fs');
+    const s = require(${JSON.stringify(STORE)});
+    s.init();
+    const d = s.DEFAULTS, mem = d.memory;
+    const tries = {
+      max: { max_concurrent: 2 },
+      subagents: { subagents: { concurrent: 1, per_session_total: 5, depth: 1 } },
+      models: { models: { ...d.models, review: { model: 'sonnet', effort: 'high' } } },
+      final: { final_distinct: true },
+      skills: { skills: { defaults: ['learning', 'caveman'] } },
+      lanes: { lanes: { enabled: true } },
+      memory: { memory: { ...mem, phase_need_gb: { ...mem.phase_need_gb, working: 1.5 } } },
+      bad_model: { models: { ...d.models, qa: { model: 'gpt-5', effort: 'high' } } },
+      fifth: { subagents: { concurrent: 5, per_session_total: 8, depth: 1 } },
+      unknown_skill: { skills: { defaults: ['learning', 'no-such-skill'] } },
+      other_memory: { memory: { ...mem, min_free_gb: 0.1 } },
+      low_ram: { memory: { ...mem, phase_need_gb: { ...mem.phase_need_gb, qa: 0.1 } } },
+    };
+    (async () => {
+      const out = {};
+      for (const [k, p] of Object.entries(tries)) out[k] = await s.updateConfig(p).then(() => 'ok', (e) => e.status);
+      const file1 = JSON.parse(fs.readFileSync(${JSON.stringify(file)}, 'utf8'));
+      await s.updateConfig({ lanes: { enabled: false } });
+      const file2 = JSON.parse(fs.readFileSync(${JSON.stringify(file)}, 'utf8'));
+      console.log(JSON.stringify({ out, file1, file2, review: s.config.models.review }));
+      await s.flush();
+      process.exit(0);
+    })();`;
+  const r = spawnSync(process.execPath, ['-e', script], { env: isolatedEnv({ home: path.join(root, 'home'), tbHome, port: 0 }), encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  const { out, file1, file2, review } = JSON.parse(r.stdout);
+  assert.deepEqual(out, { max: 'ok', subagents: 'ok', models: 'ok', final: 'ok', skills: 'ok', lanes: 'ok', memory: 'ok', bad_model: 400, fifth: 400, unknown_skill: 400, other_memory: 400, low_ram: 400 });
+  assert.deepEqual(Object.keys(file1).sort(), ['claude_bin', 'final_distinct', 'lanes', 'max_concurrent', 'memory', 'models', 'skills', 'subagents']);
+  assert.deepEqual([file1.max_concurrent, file1.subagents, file1.models.review, file1.models.qa, file1.skills, file1.memory.phase_need_gb.working, file1.memory.phase_need_gb.qa],
+    [2, { concurrent: 1, per_session_total: 5, depth: 1 }, { model: 'sonnet', effort: 'high' }, { model: 'opus', effort: 'xhigh' }, { defaults: ['learning', 'caveman'] }, 1.5, 1.0], 'refused patches wrote nothing');
+  assert.equal('lanes' in file2, false, 'lanes back at its default: gone from config.json (overrides only)');
+  assert.deepEqual(review, { model: 'sonnet', effort: 'high' }, 'the live config has it at once');
+});
