@@ -403,7 +403,7 @@ test('phase-settings Phase 4 tree walls: working → allowWrite <common>, exactl
   const fa = (phase) => ({ phase, learning: L, wall: true, worktree: wt });
   const w = fullAccess(render('task', 'working', ctx), fa('working'));
   const rows = ['config', 'hooks', 'info', 'modules', 'worktrees/*/config.worktree', 'worktrees/*/commondir', 'worktrees/*/gitdir', 'refs/replace',
-    'HEAD', 'index', 'ORIG_HEAD', 'logs/HEAD', 'rebase-merge', 'rebase-apply', 'sequencer', 'objects/info', 'shallow', 'worktrees/*/modules', 'worktrees/sib1'].map((x) => `${C}/${x}`);
+    'commondir', 'config.worktree', 'HEAD', 'index', 'ORIG_HEAD', 'logs/HEAD', 'rebase-merge', 'rebase-apply', 'sequencer', 'objects/info', 'shallow', 'worktrees/*/modules', 'worktrees/sib1'].map((x) => `${C}/${x}`);
   const f = w.sandbox.filesystem, sorted = (a) => [...new Set(a)].sort();
   assert.ok(f.allowWrite.includes(C), 'allowWrite <common>');
   assert.deepEqual(sorted(w.permissions.deny.filter((r) => r.startsWith(`Edit(/${C}`))), sorted(rows.flatMap((p) => [`Edit(/${p})`, `Edit(/${p}/**)`])), 'Edit rows on <common>: exactly 3c');

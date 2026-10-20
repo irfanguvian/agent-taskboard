@@ -164,6 +164,7 @@ test('Phase 4 treeLinks + cloneRefused tree branch: a fresh worktree is clean an
     }, /commondir does not lead to /],
     ['gitfile hard-linked', (x) => fs.linkSync(path.join(x.wt, '.git'), path.join(x.wt, 'gf')), /is not a plain file with one link/],
     ['config edited through a hard link', (x) => { fs.linkSync(path.join(x.common_dir, 'config'), path.join(x.wt, 'cfg')); fs.appendFileSync(path.join(x.wt, 'cfg'), '[core]\n\tfsmonitor = /tmp/x\n'); }, /config changed since the Task started/],
+    ['commondir planted in the common dir (git would read refs and config from where it points)', (x) => fs.writeFileSync(path.join(x.common_dir, 'commondir'), `${path.dirname(fake(x.root))}\n`), /\.git\/commondir exists/],
     ['config.worktree switched on', (x) => { fs.writeFileSync(path.join(x.git_dir, 'config.worktree'), '[core]\n\tfsmonitor = /tmp/x\n'); git(x.repo, ['config', 'extensions.worktreeConfig', 'true']); }, /config changed since the Task started/],
   ];
   for (const [name, harm, why] of cases) {

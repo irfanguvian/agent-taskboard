@@ -188,6 +188,8 @@ test('worktree pin negatives (design test 5): config, commondir, gitfile and HEA
     assert.match(t.waiting.why, re);
   };
   await refusedAt('include.path', path.join(dir3, 'extra.cfg'), new RegExp(`your git config includes ${path.join(dir3, 'extra.cfg')}, a file the agent can write: move it out of the folder`));
+  // review HIGH: a relative include resolves from the config file's folder (<repo>/.git), not from tbd's cwd
+  await refusedAt('include.path', '../extra.cfg', new RegExp(`your git config includes ${path.join(dir3, 'extra.cfg')}, a file the agent can write: move it out of the folder`));
   await refusedAt('core.hooksPath', path.join(dir3, 'githooks'), /your hooks folder .*\/githooks is one the agent can write: set a relative core.hooksPath/);
   await refusedAt('core.hooksPath', '.git/myhooks', /your hooks folder .*\/\.git\/myhooks is inside \.git, where the agent can write: use \.git\/hooks or a folder in the repo/);
   git(dir3, 'config', 'core.hooksPath', '.git/hooks');
@@ -210,4 +212,33 @@ test('git link belts (design test 16): a swapped worktree git folder → Continu
   const words = `the worktree's git links changed: do not open a terminal in ${k.worktree}: Cancel`;
   await assert.rejects(pageTools.openTerminal(id, {}), (/** @type {any} */ e) => e.status === 409 && e.message === `${id}: ${words}`);
   assert.deepEqual(await task.pushTo(k, tag), { push_to: null, push_why: words });
+});
+
+test('My Folder start point refuses a relative include the agent can write (review HIGH: include.path=../.gitconfig resolved from tbd\'s cwd before)', async () => {
+  git(dir3, 'config', 'include.path', '../.gitconfig');
+  try {
+    const r = await task.baseline({ id: 't_fold01', tag: 'pin', worktree: dir3, task: { mode: 'folder', real: dir3 } });
+    assert.deepEqual(r.reasons, [`your git config includes ${path.join(dir3, '.gitconfig')}, a file the agent can write: move it out of the folder`]);
+  } finally {
+    git(dir3, 'config', '--unset', 'include.path');
+  }
+});
+
+test('a Task mid-add (design section 4, the adding set): its new tb/<x> is no reason in another Task\'s check, even on a commit with Claude config; once the add is over with no base_sha it Blocks', async () => {
+  const t = await startedAt();
+  const x = await assigned('pin'); // assigned, its add not saved: no common_dir, no base_sha yet
+  const env = { ...process.env, GIT_INDEX_FILE: path.join(ROOT, `idx-${x}`), GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
+  const g = (/** @type {string[]} */ ...a) => execFileSync('/usr/bin/git', ['-C', dir3, ...a], { encoding: 'utf8', env, input: '{"hooks": {}}\n' }).trim();
+  g('read-tree', 'HEAD');
+  g('update-index', '--add', '--cacheinfo', `100644,${g('hash-object', '-w', '--stdin')},.claude/settings.json`);
+  git(dir3, 'update-ref', `refs/heads/tb/${x}`, g('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit-tree', g('write-tree'), '-p', 'HEAD', '-m', 'mid-add'));
+  task.adding.add(x);
+  try {
+    assert.deepEqual(await task.check(store.getTicket(t)), []);
+  } finally {
+    task.adding.delete(x);
+  }
+  assert.match((await task.check(store.getTicket(t))).join('\n'), new RegExp(`refs/heads/tb/${x} has new commits that touch \\.claude/settings\\.json`));
+  git(dir3, 'update-ref', '-d', `refs/heads/tb/${x}`);
+  await fsm.transition(store, x, 'cancelled', 'you');
 });
