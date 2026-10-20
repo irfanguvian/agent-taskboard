@@ -214,6 +214,19 @@ test('plain-folder Task S1: claude\'s own .claude/.cc-writes is not a change; a 
   assert.equal((await task.check({ ...t, task: { base } })).length, 1, 'a real .claude config is a change');
 });
 
+test('Task assign refuses a token header in .git/config: the plain http.extraheader key too (design 4: shared EXTRAHEADER), never echoing it', async (t) => {
+  const dir = repo();
+  const tbd = await boot(t, [], dir);
+  for (const key of ['http.extraheader', 'http.https://h.example/.extraheader']) {
+    git(dir, 'config', key, 'Authorization: Bearer SECRET123');
+    const r = await tbd.api('POST', '/api/flows', { text: 'Add a line to the README', kind: 'task', tag: 'acme', start: true });
+    assert.deepEqual([r.status, r.json.started, r.json.ticket.state], [201, false, 'backlog'], `${key}: ${r.text}`); // create + start: a refused assign stays in backlog
+    assert.match(r.json.why, /a token in .*\/\.git\/config would be readable by the agent: move it to your credential helper$/);
+    assert.ok(!r.text.includes('SECRET123'), `${key}: the token never reaches the answer`);
+    git(dir, 'config', '--unset', key);
+  }
+});
+
 test('unclone never removes a folder that is not TB_HOME/worktrees/<id> (a Task\'s worktree is Irfan\'s folder)', async () => {
   process.env.TB_HOME = fs.mkdtempSync(path.join(ROOT, 'tbhome-'));
   const dir = repo();
@@ -241,4 +254,82 @@ test('Continue in Terminal on a Task waiting for you: held, Done → 409 while c
   const done = await tbd.api('POST', `/api/tickets/${id}/close`, {});
   assert.equal(done.status, 200, done.text);
   assert.equal(read(tbd, id).state, 'done');
+});
+
+// ---- Phase 4 Own Worktree (design .omc/plans/2026-10-20-phase4-one-kind-design.md, revision 6), build step 1 ----
+const flowAt = (tbd, where, extra = {}) => tbd.api('POST', '/api/flows', { text: 'Add a line to the README', kind: 'task', tag: 'acme', where, ...extra });
+const trees = (dir) => git(dir, 'worktree', 'list', '--porcelain').split('\n\n');
+const branch = (dir, id) => git(dir, 'branch', '--list', `tb/${id}`);
+
+test('Own Worktree assign (design test 6): a repo with submodules, then one with Git LFS → 409 "use My Folder", the ticket stays in backlog, no folder, git folder or branch', async (t) => {
+  const dir = repo();
+  const tbd = await boot(t, [], dir);
+  for (const [file, text, why] of /** @type {[string, string, RegExp][]} */ ([['.gitmodules', '[submodule "x"]\n\tpath = x\n\turl = ../x.git\n', /submodules/], ['assets/.gitattributes', '*.bin filter=lfs diff=lfs merge=lfs -text\n', /Git LFS/]])) {
+    if (file !== '.gitmodules') git(dir, 'rm', '-q', '.gitmodules');
+    fs.mkdirSync(path.dirname(path.join(dir, file)), { recursive: true });
+    fs.writeFileSync(path.join(dir, file), text);
+    git(dir, 'add', '-A');
+    commit(dir, file);
+    const r = await flowAt(tbd, 'worktree', { start: true });
+    assert.deepEqual([r.status, r.json.started, r.json.ticket.state], [201, false, 'backlog'], r.text);
+    assert.match(r.json.why, why);
+    assert.match(r.json.why, /: use My Folder$/);
+    const id = r.json.ticket.id;
+    assert.equal(fs.existsSync(path.join(tbd.tbHome, 'worktrees', id)), false, 'no worktree folder');
+    assert.equal(fs.existsSync(path.join(dir, '.git', 'worktrees', id)), false, 'no worktree git folder');
+    assert.equal(branch(dir, id), '', 'no branch');
+    assert.equal(trees(dir).length, 1, 'git worktree list: the main checkout only');
+  }
+});
+
+test('Own Worktree add after a crash (design test 6): a locked worktree + tb/<id> left at that path, the ticket with no git_dir → the add works: locked worktree on tb/<id> at the new HEAD, the exact git folder, the fields saved, untracked hook files copied', async (t) => {
+  const dir = repo();
+  const p = fs.realpathSync(dir);
+  const tbd = await boot(t, [], dir);
+  const r = await flowAt(tbd, 'worktree');
+  const id = r.json.ticket.id;
+  const wt = path.join(fs.realpathSync(tbd.tbHome), 'worktrees', id);
+  git(dir, 'worktree', 'add', '-q', '--lock', '-b', `tb/${id}`, wt, 'HEAD'); // the crash's leftover
+  fs.writeFileSync(path.join(wt, 'stale.txt'), 'x\n');
+  fs.writeFileSync(path.join(dir, 'README.md'), 'hello\nagain\n');
+  git(dir, 'add', 'README.md');
+  commit(dir, 'again');
+  const head = git(dir, 'rev-parse', 'HEAD');
+  fs.writeFileSync(path.join(dir, '.husky', 'local-hook'), 'echo hi\n'); // untracked (husky's .husky/_ is)
+  fs.writeFileSync(path.join(dir, 'notes.txt'), 'Irfan\'s open change\n');
+  assert.equal((await tbd.api('POST', `/api/tickets/${id}/assign`)).status, 200);
+  await until(() => read(tbd, id).git_dir, 30_000, 'the add saved');
+  const k = read(tbd, id);
+  assert.deepEqual([k.worktree, k.git_dir, k.common_dir, k.base_sha, k.clone], [wt, `${p}/.git/worktrees/${id}`, `${p}/.git`, head, { real: true, tree: true }]);
+  assert.deepEqual([k.task.mode, k.task.repo, k.task.real, k.task.from], ['worktree', p, wt, 'main']);
+  assert.ok(trees(dir).includes(`worktree ${wt}\nHEAD ${head}\nbranch refs/heads/tb/${id}\nlocked taskboard ${id}`), trees(dir).join('\n---\n'));
+  assert.equal(trees(dir).length, 2);
+  assert.equal(git(dir, 'rev-parse', `tb/${id}`), head, '-B reset the leftover branch');
+  assert.equal(fs.existsSync(path.join(wt, 'stale.txt')), false, 'the leftover folder went first');
+  assert.equal(fs.readFileSync(path.join(wt, '.husky', 'local-hook'), 'utf8'), 'echo hi\n');
+  assert.equal(fs.readFileSync(path.join(wt, '.husky', 'pre-commit'), 'utf8'), 'npm test\n', 'the tracked hook as checked out');
+  assert.equal(fs.existsSync(path.join(wt, 'notes.txt')), false, 'Irfan\'s open change stays in his repo');
+  assert.equal(git(dir, 'symbolic-ref', '--short', 'HEAD'), 'main');
+});
+
+test('Task lock by area (design test 4): two Own Worktree Tasks on one repo both get their worktree; then a My Folder Task there waits folder_busy with no run, and a Code ticket assign → 409 naming the repo', async (t) => {
+  const dir = repo();
+  const p = fs.realpathSync(dir);
+  const tbd = await boot(t, [], dir);
+  const ids = [];
+  for (const n of [1, 2]) {
+    const r = await flowAt(tbd, 'worktree', { start: true });
+    assert.equal(r.json.started, true, r.text);
+    ids.push(r.json.ticket.id);
+    await until(() => read(tbd, r.json.ticket.id).git_dir, 30_000, `worktree Task ${n} has its worktree`);
+  }
+  assert.equal(trees(dir).length, 3);
+  const b = await flowAt(tbd, 'folder', { start: true });
+  assert.equal(b.json.started, true, b.text);
+  await until(() => read(tbd, b.json.ticket.id).waiting?.reason === 'folder_busy', 30_000, 'My Folder Task folder_busy');
+  assert.equal(read(tbd, b.json.ticket.id).state, 'planning');
+  assert.equal(tbd.dump(1), null, 'no run');
+  const code = await tbd.api('POST', '/api/flows', { text: 'x', kind: 'code', tag: 'acme', start: true });
+  assert.deepEqual([code.status, code.json.started], [201, false], code.text);
+  assert.ok(ids.some((id) => code.json.why.endsWith(`a Task works in ${p} (${id}): assign this once it ends`)), code.json.why);
 });

@@ -261,3 +261,30 @@ test('Phase 8 POST /api/config: cookie without X-TB-CSRF → 403, with it → 20
   const done = await note('t_sbx003', 'too late');
   assert.deepEqual([done.status, done.json], [409, { error: 't_sbx003: done: no run takes a note' }]);
 });
+
+// Phase 4 design (revision 6) test 7: POST /api/flows and promote take `where` (Own Worktree | My Folder) for a Task only
+test('Phase 4 where: plain tag + worktree → 400, \'x\' → 400, kind code → 400; left out → task.mode null; promote passes where', async (t) => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'where-')));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const repo = path.join(root, 'repo');
+  fs.mkdirSync(path.join(root, 'notes'));
+  require('node:child_process').execFileSync('/usr/bin/git', ['init', '-q', repo]);
+  const own = await startTbd({ files: { 'config.json': { terminal: { task_tickets: true } },
+    'tags.json': { acme: { type: 'git', path: repo, base: 'main' }, notes: { type: 'folder', path: path.join(root, 'notes') } } } });
+  t.after(() => own.stop());
+  const flow = (body) => own.api('POST', '/api/flows', { text: 'Add a line', ...body });
+  for (const [body, error] of [[{ kind: 'task', tag: 'notes', where: 'worktree' }, 'a plain folder has no git: use My Folder'],
+    [{ kind: 'task', tag: 'acme', where: 'x' }, 'where must be one of worktree, folder'], [{ kind: 'code', tag: 'acme', where: 'folder' }, 'where is only for kind task']]) {
+    const r = await flow(body);
+    assert.deepEqual([r.status, r.json], [400, { error }], JSON.stringify(body));
+  }
+  assert.deepEqual((await own.api('GET', '/api/state')).json.flows, [], 'nothing made');
+  const none = await flow({ kind: 'task', tag: 'acme' });
+  assert.deepEqual([none.status, none.json.ticket.task], [201, { mode: null }]);
+  assert.deepEqual((await flow({ kind: 'task', tag: 'notes', where: 'folder' })).json.ticket.task, { mode: 'folder' });
+  const { json } = await own.api('POST', '/api/reminders', { title: 'Scan the docs' });
+  const p = await own.api('POST', `/api/tickets/${json.reminder.id}/promote`, { kind: 'task', tag: 'acme', where: 'worktree' });
+  assert.deepEqual([p.status, p.json.ticket.task, p.json.ticket.promoted_from], [201, { mode: 'worktree' }, json.reminder.id]);
+  const bad = await own.api('POST', `/api/tickets/${(await own.api('POST', '/api/reminders', { title: 'Other' })).json.reminder.id}/promote`, { kind: 'task', tag: 'notes', where: 'worktree' });
+  assert.deepEqual([bad.status, bad.json], [400, { error: 'a plain folder has no git: use My Folder' }]);
+});

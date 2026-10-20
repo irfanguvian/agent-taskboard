@@ -2746,7 +2746,7 @@ function openNew(mode = 'reminder', typed = '') { // typed: the title / goal tex
     add.disabled = true;
     // empty optional fields are undefined: JSON leaves them out. An Inbox add goes on top (the old composer line's body);
     // another column keeps the server's default, as the old More… sheet posted
-    const sent = await addItem(flow, () => (flow ? api('POST', '/api/flows', { text: v.text, title: v.title || undefined, kind: v.kind, tag: v.tag && v.tag !== ADD_TAG ? v.tag : undefined, sandbox: v.sandbox || undefined, start: v.start || undefined })
+    const sent = await addItem(flow, () => (flow ? api('POST', '/api/flows', { text: v.text, title: v.title || undefined, kind: v.kind, tag: v.tag && v.tag !== ADD_TAG ? v.tag : undefined, sandbox: v.sandbox || undefined, where: v.where || undefined, start: v.start || undefined })
       : api('POST', '/api/reminders', { title: v.title, status: v.status, pos: v.status === 'inbox' ? 'top' : undefined, due: v.due || undefined, project: v.project || undefined, note: v.note || undefined, tag: v.tag || undefined })));
     if (sent && form.onsubmit === submit && sheetOpen()) closeSheet(true); // a Reminder ↔ Flow switch (or another sheet) since: not this one to close
     add.disabled = false;
