@@ -387,3 +387,21 @@ test('Done after review round 1: a remove that fails (a folder it cannot empty) 
   assert.deepEqual([d3.state, d3.task.tree_left], ['done', true]);
   assert.ok(fs.existsSync(d3.worktree) && fs.existsSync(d3.git_dir), 'the folder and its git folder stay');
 });
+
+test('review round 2 (D-0239): Done ends a held lease as cancelled, yet tb gc still asks his terminal: claude --resume still on the session → the remove is refused, the folder stays; once it closed → removed', async () => {
+  const session = '11111111-2222-4333-8444-555555555555';
+  const x = await startedAt();
+  await store.updateTicket(x, (k) => ({ ...k, state: 'working', waiting: { reason: 'you', since: new Date().toISOString() }, lease: { gen: 1, phase: 'working', round: k.round, pid: 1, exit: 'held', session } }));
+  let open = true;
+  const busy = `${x}: claude --resume ${session} still runs: close your terminal session first`;
+  // runner.terminalFree's rule: only a held lease with a session is asked about
+  const free = async (/** @type {string} */ i, l = store.getTicket(i).lease) => { if (l?.exit === 'held' && l.session && open) throw new Error(busy); };
+  const d = await actions.done(x, 'ui', { free });
+  assert.deepEqual([d.state, d.lease.exit, d.task.tree_left], ['done', 'cancelled', true]);
+  const r = await gc.remove({ ids: [`worktree/${x}`] }, { free });
+  assert.deepEqual([r.deleted, r.skipped], [[], [{ id: `worktree/${x}`, reason: busy }]]);
+  assert.ok(fs.existsSync(d.worktree) && fs.existsSync(d.git_dir), 'the folder and its git folder stay');
+  open = false;
+  assert.deepEqual((await gc.remove({ ids: [`worktree/${x}`] }, { free })).deleted.map((i) => i.id), [`worktree/${x}`]);
+  assert.equal(fs.existsSync(d.worktree), false);
+});

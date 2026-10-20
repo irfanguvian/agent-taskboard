@@ -511,4 +511,26 @@ describe('Own Worktree Task branches', () => {
     assert.equal(r.skipped[0]?.reason, `tb/${w.id} is checked out in a worktree (or a rebase or bisect is on it): remove that first`);
     assert.equal(w.sha(), was, 'the branch stays');
   });
+
+  test('round 2 review: a call that listed a branch, then waits on an earlier item while another call deletes it, does not write the delete again (no sha-null line: no Task Blocked)', async () => {
+    const w = treeWorld();
+    const started = path.join(w.root, 'started');
+    const go = path.join(w.root, 'go');
+    const du = path.join(w.root, 'du-slow'); // cache/a waits for `go` (at most 10 s); every other size at once
+    fs.writeFileSync(du, `#!/bin/sh\ncase "$2" in */cache/a) touch "${started}"; i=0; while [ ! -f "${go}" ] && [ $i -lt 100 ]; do sleep 0.1; i=$((i+1)); done;; esac\nprintf '4\\t%s\\n' "$2"\n`, { mode: 0o755 });
+    const gc = createGc({ store: { listTickets: () => w.tickets }, tbHome: w.tbHome, du });
+    const sha = w.sha();
+    const id = `branch/tb/${w.id}`;
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    const b = gc.remove({ ids: ['cache/a', id] }); // B lists the branch, then is busy sizing cache/a
+    for (let i = 0; i < 100 && !fs.existsSync(started); i++) await wait(50);
+    assert.ok(fs.existsSync(started), 'B is on its first item');
+    const a = gc.remove({ ids: [id] });
+    await Promise.race([a, wait(1000)]);
+    fs.writeFileSync(go, '');
+    const [rb, ra] = await Promise.all([b, a]);
+    assert.deepEqual([...rb.deleted, ...ra.deleted].map((d) => d.id).filter((x) => x === id), [id], JSON.stringify([rb, ra]));
+    assert.deepEqual([...rb.skipped, ...ra.skipped], [{ id, reason: 'not in the current gc list' }]);
+    assert.deepEqual(fs.readFileSync(w.rec, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)), [{ common: w.tickets[0].common_dir, ref: `refs/heads/tb/${w.id}`, sha }]);
+  });
 });
