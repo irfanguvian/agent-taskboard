@@ -240,7 +240,7 @@ test('AC5 step 6: crash and interrupted count, the 4th failure → Blocked with 
 
 test('AC1 double resume: two Resumes + a Restart at once → exactly one wins by the gen CAS; Resume refused while live or while a recovery runs', async (t) => {
   const w = world(t);
-  const a = await w.ticket({ state: 'blocked', blocked_from: 'planning', rework: 2, lease: ended({ exit: 'max_turns' }) });
+  const a = await w.ticket({ round: 2, state: 'blocked', blocked_from: 'planning', rework: 2, lease: ended({ round: 1, exit: 'max_turns' }) }); // fsm.move bumps the round into Blocked: the run's + 1
   const res = await Promise.allSettled([w.runner.resume(a), w.runner.resume(a), w.runner.restart(a)]);
   assert.deepEqual(res.map((r) => (r.status === 'fulfilled' ? r.value : r.reason.message)), [true, false, false], 'losers stop quietly');
   assert.deepEqual(w.spawns.map((s) => [s.resume, s.session]), [[true, ended().session]], 'one run, same session');

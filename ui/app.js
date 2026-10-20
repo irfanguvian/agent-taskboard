@@ -15,7 +15,13 @@ const FLOW_COLS = [
 ];
 const YOU = new Set(['clarify', 'plan_approval', 'blocked']); // states that wait on Irfan
 // board-terminal-parity Phase 2 task 4: a run's Approve card or auto mode's block waits on him too (ticket.waiting)
-const needsYou = f => YOU.has(f.state) || f.waiting?.reason === 'approve' || f.waiting?.reason === 'blocked_action' || f.waiting?.reason === 'you'; // Phase 4: a Task's result
+// manual / needs_scope: an unbuilt phase or a scope ask (notify.js pings them); close: squashed, waits for close or push
+const ON_YOU = ['approve', 'blocked_action', 'manual', 'needs_scope', 'close'];
+// approve right after Approve: tbd sets the branch up for minutes (waiting setup); nothing is on Irfan then
+const settingUp = f => f.state === 'plan_approval' && f.waiting?.reason === 'setup';
+// 2026-10-20 (Irfan: "finished, still on working"): a Task that waits for Irfan reads Your Turn, once the run's end is saved
+const yourTurn = f => f.kind === 'task' && f.state === 'working' && f.waiting?.reason === 'you' && !!f.lease_exit;
+const needsYou = f => !settingUp(f) && (YOU.has(f.state) || ON_YOU.includes(f.waiting?.reason) || yourTurn(f));
 const AGENT = ['planning', 'working', 'review', 'qa', 'final_gate']; // phases with agent runs (fsm.AGENT)
 const NOW_LIMIT = 3, DONE_SHOWN = 15, GB = 2 ** 30, MB = 2 ** 20, DASH = '—';
 
@@ -29,6 +35,7 @@ const ui = { drag: null, editing: null, tray: null, promote: null, pick: { kind:
   csrf: null, ask: null, gates: null, ivs: null, fb: null, pass: null, phase: new Map(), // P5: synchronizer token, the open working ask, gate / intervention pages + a feedback file (on demand), the pass check, Resume's phase pick (id → phase)
   q: '', hl: null, days: 30, follow: null, // M7: reminder search (lowercase), the Health view's data + its days, the drawer's log Follow
   fview: 'all', rfilter: null, tab: 'overview', day: null, // calm UI: Flows segment (all|you|running|done), Reminders filter from a Today highlight (overdue|today), inspector tab (overview|activity|reports), the date of the last render (midnight)
+  cont: new Set(), // flows whose Continue in Terminal was clicked on this page: Terminal opens by itself once held (heldBox)
   cfg: null, cfgErr: null, notes: new Map(), // full-access-runs Phase 8 + 9: GET /api/config's answer + the last refused setting ({role, text}), note drafts (id → text)
   pres: new Map(), shown: new Map(), // board-terminal-parity 3: the drawer's kept <pre>s (data-role → {key, node, text}), see keptPre; when each plan round first showed (`${id}:${n}` → ms, approve)
   tc: null, // board-terminal-parity Phase 2 task 6: Settings → Terminal check ({busy, res, err, live, tags, tag, cost, armedAt})
@@ -129,6 +136,17 @@ const STAGE_HUE = Object.assign(Object.create(null), {
   qa: 'lavender', final_gate: 'lavender', blocked: 'peach', done: 'mint', cancelled: 'gray',
 });
 const stagePill = s => pill(STAGE_HUE[s] || 'gray', stateLabel(s));
+// 2026-10-20 (Irfan: "a status change if you need me"): every wait on him reads in words, never a running-looking stage
+const NEED_PILL = { clarify: ['butter', 'Questions'], plan_approval: ['butter', 'Approve Plan'] };
+const WAIT_PILL = { approve: ['butter', 'Approve Action'], blocked_action: ['peach', 'Action Blocked'], manual: ['butter', 'Your Call'], needs_scope: ['butter', 'Your Call'], close: ['butter', 'Close or Push'] };
+// a pill that already says what the flow waits on: the row skips its "waiting: …" line
+const pilled = f => settingUp(f) || yourTurn(f) || !!WAIT_PILL[f.waiting?.reason];
+const flowPill = (f, s = f.state) => {
+  const g = { ...f, state: s };
+  const x = settingUp(g) ? ['lavender', 'Setting Up'] : yourTurn(g) ? ['butter', 'Your Turn'] : WAIT_PILL[f.waiting?.reason]
+    || (s === 'clarify' && f.clarify_class && f.clarify_class !== 'questions' ? ['butter', 'Your Call'] : NEED_PILL[s]); // a working ask (scope, protected, deps, policy) is a call, not questions
+  return x ? pill(...x) : stagePill(s);
+};
 
 // ---------- theme: Auto follows the system (foundation.css light-dark()), Light / Dark pin it with data-theme ----------
 const root = document.documentElement;
@@ -806,12 +824,12 @@ const waitLabel = (w, tag) => (w?.reason === 'qa_lock' ? `qa:${tag}` : w?.reason
 // needs a <tr> as containing block (engine-dependent); a click handler has no such ceiling.
 function flowRow(f) {
   const w = f.waiting, run = ui.runs.get(f.id);
-  const waits = w?.reason && `waiting: ${waitLabel(w, f.tag)}${w.reason === 'children' ? ` ${w.done ?? '?'}/${w.total ?? '?'}` : ''}`;
+  const waits = w?.reason && !pilled(f) && `waiting: ${waitLabel(w, f.tag)}${w.reason === 'children' ? ` ${w.done ?? '?'}/${w.total ?? '?'}` : ''}`;
   return el('tr', { class: 'go', 'data-flow': f.id, 'aria-current': ui.open === f.id ? 'true' : null, onclick: () => openTicket(f.id) },
     el('td', { class: 'f-flow' },
       el('button', { type: 'button', class: 'row-open cell-title', 'data-id': f.id, 'aria-label': vis(f.title || f.id) }, vis(f.title || f.id)),
       el('span', { class: 'cell-sub' }, [f.kind, f.tag && `#${f.tag}`, f.id, f.fix_of && `Fix of ${f.fix_of}`, f.promoted_from && 'From reminder'].filter(Boolean).join(' · '))),
-    el('td', { class: 'f-stage' }, stagePill(f.state),
+    el('td', { class: 'f-stage' }, flowPill(f),
       (waits || f.rework > 0) && el('span', { class: 'stage-sub' }, waits, f.rework > 0 && pill('rose', `Rework ${f.rework}`))),
     el('td', { class: 'f-run', 'data-run': f.id }, run ? runStats(run) : DASH),
     el('td', { class: 'num f-upd' }, f.updated_at ? el('span', { 'data-ago': f.updated_at }, ago(f.updated_at)) : DASH));
@@ -836,7 +854,7 @@ function onRun(e) {
 
 // Segments (plan round 1 Q3): Needs You = clarify, plan approval, blocked; Running = an agent phase or a live run; Done =
 // done and cancelled; All = every flow but cancelled. Rows: needs you, running, backlog, then done; newest update first.
-const isRunning = f => AGENT.includes(f.state) || !!ui.runs.get(f.id)?.live;
+const isRunning = f => !needsYou(f) && (settingUp(f) || AGENT.includes(f.state) || !!ui.runs.get(f.id)?.live); // a ticket waiting on Irfan is Needs You, not Running
 const isOver = f => f.state === 'done' || f.state === 'cancelled';
 const FSEGS = [['all', 'All', f => f.state !== 'cancelled'], ['you', 'Needs You', needsYou], ['running', 'Running', isRunning], ['done', 'Done', isOver]];
 const FEMPTY = { all: 'Nothing open. Finished and cancelled flows are under Done.', you: 'Nothing needs you right now.', running: 'No running flows.', done: 'Nothing finished yet.' };
@@ -957,32 +975,57 @@ function tabKeys(e) {
   setTab(t);
   $(`#itab-${t}`)?.focus();
 }
+const NEEDS_BY = { manual: 'Pass this phase on or send it back, below.', needs_scope: 'Pass this phase on or send it back, below.',
+  approve: 'The run asks for your OK. Answer below.', blocked_action: 'Auto mode blocked an action. Allow it or dismiss it, below.' };
+const NEEDS = { clarify: 'The agent asked you questions. Answer them below; it goes on after you do.', plan_approval: 'A plan is ready. Read it below, then approve it or ask for changes.',
+  blocked: 'Blocked. Read why in the run below, then Resume, Restart, Continue in Terminal or Cancel.' };
 function drawerBody(f, ticket, error) {
   const foc = drawerFocus(), scroll = logScroll();
   const dd = (k, v) => v == null || v === '' ? null : [el('dt', null, k), el('dd', null, String(v))];
   const k = ticket || {};
   const w = waitLabel(ticket ? k.waiting : f.waiting, f.tag || k.tag), tg = f.tag || k.tag, td = tagDef(tg);
   // L7: once frozen (plan_hash) the plan shown is the one approve froze (GET's plan), never a newer round file
+  const qr = ui.round?.kind === 'questions' && Array.isArray(ui.round.questions) ? ui.round : null; // a Task's ask from working has a plan_hash: r is then the plan, the questions are the newest round
   const r = ticket ? (k.plan_hash && ui.plan ? { ...ui.plan, n: ui.round?.n } : ui.round) : null, st = k.state;
   const plan = r?.kind === 'plan' && (st === 'plan_approval' || k.plan_hash) ? planView(f.id, k, r) : null; // a rejected plan (hash cleared) is not shown
   const live = !!ui.runs.get(f.id)?.live || (!!k.lease && !k.lease.exit), reports = isObj(k.review) || isObj(k.qa) || isObj(k.final);
   const tab = (v, label, mark) => el('button', { type: 'button', role: 'tab', id: `itab-${v}`, value: v, 'data-role': `tab-${v}`, 'aria-selected': String(ui.tab === v),
     'aria-controls': `ipane-${v}`, tabindex: ui.tab === v ? '0' : '-1', onclick: () => setTab(v) },
     label, mark && el('span', { class: `tab-mark ${v}` }, el('span', { class: 'sr-only' }, mark)));
+  // what the pills and the Needs You box judge: the ticket's own waiting, lease end and ask class once it is loaded (a stale board row after fsm.move says less)
+  const row = { ...f, kind: f.kind || k.kind, state: st || f.state, waiting: ticket ? k.waiting : f.waiting, lease_exit: ticket ? k.lease?.exit : f.lease_exit, clarify_class: ticket ? k.clarify_origin?.class : f.clarify_class };
+  const you = ticket && yourTurn(row), reason = row.waiting?.reason;
+  const cards = ticket && (reason === 'approve' || reason === 'blocked_action') && actionCards(f.id, k); // in the box, not also below
+  const stage = ticket && ['review', 'qa', 'final_gate'].includes(st) && (reason === 'manual' || reason === 'needs_scope' || reason === 'close'); // pass / send back / Close / Push
   const runSec = el('section', { id: 'runbox', class: 'part runbox', 'aria-labelledby': 'run-h' }, ...runBox(f.id, ticket));
+  // 2026-10-20 (Irfan: "when it blocks I can't decide anything"): ONE box right under the step bar for every flow that waits on
+  // him: what to do in a sentence (the wait's own text when it has one), then the questions / plan / result / Resume buttons
+  const body = st === 'clarify' ? (k.clarify_origin?.phase === 'working' && k.kind !== 'task' ? askPanel(f.id, k, ui.ask) // Phase 4: a Task's asks are planning rounds
+      : qr ? clarifyForm(f.id, qr) : el('p', { class: 'hint' }, 'No open questions found.'))
+    : st === 'plan_approval' ? (settingUp(row) ? null : plan || el('p', { class: 'hint' }, 'No plan found.'))
+    : you ? youCard(f.id, k) // the run's end saved: Done never meets a live run
+    : st === 'blocked' ? runSec : null; // Resume / Restart / Cancel / the refusal live here (plan Q5), not behind Activity
+  const nt = ticket && notice(f.id, k.waiting), why = typeof k.waiting?.why === 'string' ? k.waiting.why : '';
+  // a block reason WAIT has no text for (interrupted, policy, deps, a gate): the wait's own why, as text
+  const box = ticket && needsYou(row) && el('section', { class: 'part you card needs', 'data-role': 'needs-you', 'aria-labelledby': 'ny-h' }, el('h3', { id: 'ny-h' }, 'Needs You'),
+    nt || [el('p', null, NEEDS[st] ?? NEEDS_BY[reason] ?? 'Your turn.'), why && el('pre', { class: 'log', 'data-role': 'wait-why', tabindex: '0', 'aria-label': 'Why it waits' }, vis(why))],
+    body, cards, stage && [stageActs(f.id, k), pushView(f.id, k, tg)]);
+  // the parts inside the box sit one level under its heading
+  if (box) for (const h of box.querySelectorAll('h3:not(#ny-h)')) h.setAttribute('aria-level', '4');
   $('#drawer').replaceChildren(el('div', { class: 'insp', 'data-tab': ui.tab },
     el('header', { class: 'insp-head material' },
       el('div', { class: 'insp-top' },
         el('h2', { class: 'insp-title' }, vis(f.title || f.id)),
         el('button', { type: 'button', class: 'icon-btn insp-close', 'data-role': 'close', 'aria-label': 'Close', onclick: () => $('#drawer').close() }, icon('close'))),
-      el('p', { class: 'insp-sub' }, (st || f.state) && stagePill(st || f.state), el('span', null, [f.kind || k.kind, tg && `#${tg}`, f.id].filter(Boolean).join(' · '))),
+      el('p', { class: 'insp-sub' }, (st || f.state) && flowPill(row, st || f.state), el('span', null, [f.kind || k.kind, tg && `#${tg}`, f.id].filter(Boolean).join(' · '))),
       el('div', { class: 'seg insp-tabs', role: 'tablist', 'aria-label': 'Flow sections', onkeydown: tabKeys },
         tab('overview', 'Overview'), tab('activity', 'Activity', live && ', run live'), tab('reports', 'Reports', reports && ', has reports'))),
     el('div', { class: 'pane', 'data-pane': 'overview', role: 'tabpanel', id: 'ipane-overview', 'aria-labelledby': 'itab-overview' },
       ticket && [
-        progress(f.id, k),
-        actionCards(f.id, k),
-        notice(f.id, k.waiting),
+        progress(f.id, k, box),
+        !cards && actionCards(f.id, k),
+        !box && nt,
+        !['done', 'cancelled'].includes(st) && subagentsPart(f.id, k),
         st === 'backlog' && el('section', { class: 'part', 'aria-labelledby': 'as-h' },
           el('h3', { id: 'as-h' }, 'Assign'),
           el('p', { class: 'hint' }, 'Assign starts planning: the planner reads the code, then asks you questions or writes a plan.'),
@@ -990,14 +1033,10 @@ function drawerBody(f, ticket, error) {
           errLine(f.id, 'assign'), k.kind !== 'task' && sandboxPart(f.id, k)), // Phase 4 F: a Task never takes a locked run
         st === 'planning' && k.reject_comment && el('p', { class: 'hint' }, 'Your comment on the last plan: ', el('q', null, k.reject_comment)),
         st === 'planning' && k.must_ask && el('p', { class: 'hint' }, 'You asked for more: the planner asks you questions before it plans.'),
-        st === 'clarify' && (k.clarify_origin?.phase === 'working' && k.kind !== 'task' ? askPanel(f.id, k, ui.ask) // Phase 4: a Task's asks are planning rounds
-          : r?.kind === 'questions' && Array.isArray(r.questions) ? clarifyForm(f.id, r) : el('p', { class: 'hint' }, 'No open questions found.')),
-        st === 'plan_approval' && (plan || el('p', { class: 'hint' }, 'No plan found.')),
-        k.kind === 'task' && st === 'working' && k.waiting?.reason === 'you' && !!k.lease?.exit && youCard(f.id, k), // the run's end saved: Done never meets a live run
-        ['review', 'qa', 'final_gate'].includes(st) && stageActs(f.id, k),
-        pushView(f.id, k, tg),
+        contSec(f.id, k, you), // Continue in Terminal (a Blocked flow's is in its Run section below)
+        !stage && ['review', 'qa', 'final_gate'].includes(st) && stageActs(f.id, k),
+        !stage && pushView(f.id, k, tg),
       ],
-      st === 'blocked' && runSec, // Blocked waits on you: Resume / Restart live in Overview (plan Q5), not behind Activity
       el('section', { class: 'part', 'aria-labelledby': 'fa-h' }, el('h3', { id: 'fa-h' }, 'Details'),
         el('dl', { class: 'facts' },
           dd('Waiting', w), dd('Rework', k.rework ?? f.rework), dd('Fix', k.fixes > 0 ? `${k.fixes}/${ui.fixMax}` : null),
@@ -1012,7 +1051,7 @@ function drawerBody(f, ticket, error) {
       ticket && family(k),
       el('section', { class: 'part', 'aria-labelledby': 'rq-h' }, el('h3', { id: 'rq-h' }, 'Request'),
         el('p', { class: 'ticket-text' }, error || (ticket ? vis(ticket.text) || 'No text.' : 'Loading…'))),
-      st !== 'plan_approval' && plan),
+      (st !== 'plan_approval' || !box) && plan),
     el('div', { class: 'pane', 'data-pane': 'activity', role: 'tabpanel', id: 'ipane-activity', 'aria-labelledby': 'itab-activity' },
       ui.feed?.id === f.id && el('section', { id: 'feedbox', class: 'part', 'aria-labelledby': 'fd-h' }, ...feedBox(f.id)),
       st === 'blocked' ? el('p', { class: 'hint' }, 'Resume, Restart and the log are under Overview.') : runSec,
@@ -1044,7 +1083,7 @@ const track = (cls, label, items) => el('ol', { class: cls, 'aria-label': label 
   el('li', { class: at, 'aria-current': at === 'now' ? 'step' : null },
     at === 'done' ? icon('check') : el('i', { class: `dot${at === 'now' ? ' hue-lavender' : ''}`, 'aria-hidden': 'true' }),
     el('span', null, text, at === 'done' && el('span', { class: 'sr-only' }, ', done')), extra)));
-function progress(id, k) {
+function progress(id, k, needs) { // needs: the Needs You box, right under the step bar
   const st = k.state, isTask = k.kind === 'task', steps = isTask ? TASK_STEPS : STEPS.filter(([s]) => s !== 'qa' || k.kind !== 'brainstorm');
   const at = s => steps.findIndex(([x]) => x === s);
   let from = st === 'blocked' ? k.blocked_from : st;
@@ -1057,13 +1096,56 @@ function progress(id, k) {
   return el('section', { class: 'part progress', 'aria-label': 'Progress' },
     track('stepbar', 'Flow steps', steps.map(([, label], i) => [label, i === cur ? 'now' : i < upto ? 'done' : 'next', i === cur && st === 'blocked' && pill('rose', 'Blocked')])),
     st === 'cancelled' && el('p', null, pill('gray', 'Cancelled')),
+    needs,
     nowCard(id, k, w),
     tasks.length > 0 && [el('h4', null, 'Plan Tasks'),
-      track('ptasks', 'Plan tasks', tasks.map(x => [vis(x.title || 'Task'), by.get(x.id) === 'done' ? 'done' : x.id === w.task ? 'now' : 'next']))]);
+      track('ptasks', 'Plan tasks', tasks.map(x => [vis(x.title || 'Task'), by.get(x.id) === 'done' ? 'done' : x.id === w.task ? 'now' : 'next'])),
+      parallelPart(id, k, tasks)]);
+}
+// flow-form-parallel-terminal Phase 3: which plan tasks may run in parallel (k.parallel from GET …/tickets/:id, one helper
+// on the server = what the next gap does), "Allow Back to Parallel" (POST …/lane op allow), "Run in Parallel Next" (op next)
+const PAR = { running: ['mint', 'Running in parallel'], can: ['sky', 'Can run in parallel'] };
+function parallelPart(id, k, tasks) {
+  const p = k.parallel;
+  if (!isObj(p) || !isObj(p.tasks)) return null;
+  const rows = tasks.filter(x => isObj(p.tasks[x.id]));
+  return el('div', { class: 'parallel' },
+    el('p', { class: 'hint', 'data-role': 'parallel-top' }, 'Parallel lanes: ', vis(p.top)),
+    rows.length > 0 && el('ul', { class: 'par-list' }, ...rows.map(x => {
+      const b = p.tasks[x.id], [hue, text] = PAR[b.badge] ?? ['gray', `One at a time: ${b.why}`];
+      return el('li', { 'data-task': vis(x.id) }, el('span', null, vis(x.title || 'Task')), ' ', pill(hue, vis(text)),
+        b.badge === 'can' && (b.next ? el('span', { class: 'hint' }, 'Next: starts at the next gap between the main run’s tasks.')
+          : actBtn(id, `lane-next:${x.id}`, () => post(id, 'lane', { task: x.id, op: 'next' }, `lane-next:${x.id}`, 'lane-next'), { sent: 'lane-next', aria: `Run in Parallel Next: ${vis(x.title || 'Task')}` })),
+        b.badge === 'one' && b.serial === true && b.security !== true && actBtn(id, `lane-allow:${x.id}`, () => post(id, 'lane', { task: x.id, op: 'allow' }, `lane-allow:${x.id}`, 'lane-allow'), { sent: 'lane-allow', aria: `Allow Back to Parallel: ${vis(x.title || 'Task')}` }));
+    })),
+    errLine(id, ...rows.flatMap(x => [`lane-next:${x.id}`, `lane-allow:${x.id}`])));
+}
+// "Subagents for This Ticket" (POST …/subagents {concurrent: 1-4 | null}): its next runs; any kind
+function subagentsPart(id, k) {
+  const n = k.subagents?.concurrent, def = ui.cfg?.config?.subagents?.concurrent ?? 2;
+  return el('div', { class: 'sandbox' },
+    el('label', { class: 'pick' }, 'Subagents for This Ticket',
+      el('select', { class: 'input', name: 'subagents', 'data-role': 'subagents', disabled: ui.busy.has(id),
+        onchange: e => post(id, 'subagents', { concurrent: e.target.value ? Number(e.target.value) : null }, 'subagents') },
+        el('option', { value: '', selected: n == null }, `Default (${def})`),
+        ...[1, 2, 3, 4].map(v => el('option', { value: String(v), selected: n === v }, String(v))))),
+    el('p', { class: 'hint' }, 'How many subagents one run may use at once. It applies from the next run.'),
+    (n ?? def) >= 3 && el('p', { class: 'hint', 'data-role': 'subagents-warn' }, pill('butter', '3 or 4 subagents at once can slow down or pause runs on this 8 GB Mac.')),
+    errLine(id, 'subagents'));
 }
 // The Now card: the run live, or the lease's last run. Line 1 the stage (working: task n of m and its title), then model
 // and effort, what it does now and since when (live) or how it ended, its subagents, context, refusals, cost, elapsed.
 // Money arrives as integer micro-USD: divided only here, for display.
+// how the last run ended, in words (Irfan: the raw log must never be needed to know it)
+const EXIT = { result: 'finished', crash: 'crashed', interrupted: 'stopped before it ended', stalled: 'stalled: no output', usage: 'paused: usage limit',
+  paused: 'paused', held: 'in your terminal', schema_fail: 'its answer was rejected', cancelled: 'cancelled',
+  max_turns: 'hit the turn limit', refusal: 'the model refused', wall_cap: 'stopped: time cap' };
+// a crash with no pid never started (lease.pid stays null: refusing to start, task_changed); any other exit is the run's own end
+const endWord = l => vis(l.exit === 'crash' && !Number.isInteger(l.pid) ? 'refused' : EXIT[l.exit] ?? l.exit ?? DASH);
+const lastRun = l => {
+  const err = typeof l.error === 'string' && !l.pending ? l.error.replace(BIDI, '').split('\n')[0].slice(0, 200) : '';
+  return `ended: ${endWord(l)}${err ? `: ${vis(err)}` : ''}`;
+};
 function nowCard(id, k, w) {
   const r = ui.runs.get(id), l = k.lease, live = !!r?.live || (!!l && !l.exit);
   if (!live && !l?.started_at) return null;
@@ -1076,11 +1158,11 @@ function nowCard(id, k, w) {
   const idle = r?.liveness && r.liveness !== 'thinking' && r.liveness !== 'tool' ? LIVE[r.liveness]?.[1] : null; // a slot, retry or Approve wait
   const dirty = k.kind === 'task' ? k.task?.base?.dirty : null; // Phase 4: files Irfan had changed before the Task started
   return el('div', { class: 'card now-card', role: 'group', 'aria-label': 'Now' },
-    el('p', { class: 'now-stage' }, sep([stateLabel(phase), phase === 'working' && n >= 0 && `task ${n + 1} of ${tasks.length}`, title && vis(title)])),
+    el('p', { class: 'now-stage' }, sep([k.state === 'blocked' && (k.blocked_from ?? phase) !== 'blocked' ? `Blocked in ${stateLabel(k.blocked_from ?? phase)}` : stateLabel(phase), phase === 'working' && n >= 0 && `task ${n + 1} of ${tasks.length}`, title && vis(title)])),
     model && el('p', { class: 'hint' }, model),
     Number.isInteger(dirty) && dirty > 0 && el('p', { class: 'hint' }, `${dirty} ${dirty === 1 ? 'file was' : 'files were'} already uncommitted`),
     live ? el('p', null, doing || idle || 'Thinking or writing', doing && r.tool_at && [' · ', el('span', { 'data-since': r.tool_at }, span(r.tool_at))])
-      : el('p', null, `Last run · ended: ${vis(l.exit ?? DASH)}`),
+      : el('p', null, `Last run · ${lastRun(l)}`),
     subs.length > 0 && el('ul', { class: 'now-subs', 'aria-label': 'Subagents' }, ...subs.map(s => el('li', null,
       el('span', { class: 'now-sub' }, el('span', null, vis(s.desc || s.type || 'Subagent')),
         el('span', { class: 'hint' }, sep([s.type && vis(s.type), s.tool && vis(s.tool), Number.isFinite(s.tokens) && `${kilo(s.tokens)} tokens`]))),
@@ -1100,8 +1182,8 @@ function runBox(id, k) {
   const out = [el('h3', { id: 'run-h' }, 'Run')];
   out.push(!l ? el('p', { class: 'hint' }, k ? 'No run yet.' : 'Loading…') : el('p', { class: 'run-line' }, r && liveTag(r),
     el('span', null, [l.phase && stateLabel(l.phase), n && `run ${n}`, l.started_at && `started ${hhmm(l.started_at)}`,
-      l.pending ? `recovering (${l.pending.why || l.pending.after})` : l.exit ? `ended: ${l.exit}` : 'live'].filter(Boolean).join(' · '))));
-  if (l?.error && !l.pending) out.push(el('p', { class: 'warnbox' }, el('strong', null, 'Run refused. '), l.error.replace(BIDI, ''))); // names agent-made files: no bidi reordering
+      l.pending ? `recovering (${l.pending.why || l.pending.after})` : l.exit ? `ended: ${endWord(l)}` : 'live'].filter(Boolean).join(' · '))));
+  if (l?.error && !l.pending) out.push(el('p', { class: 'warnbox' }, el('strong', null, endWord(l) === 'refused' ? 'Run refused. ' : `Run ended: ${endWord(l)}. `), l.error.replace(BIDI, ''))); // names agent-made files: no bidi reordering
   const can = AGENT.includes(st) || st === 'blocked';
   const sure = armed(id, 'cancel'); // Cancel's confirm click
   // Cancel is the destructive one: danger text on Gray, the confirm click in danger fill (DESIGN §8 Buttons)
@@ -1112,19 +1194,19 @@ function runBox(id, k) {
   const back = st === 'blocked' ? AGENT.filter(p => at(p) <= at(k.blocked_from) && !(p === 'qa' && k.kind === 'brainstorm')) : [];
   // full-access-runs Phase 9: held = Irfan's terminal has the session (no Resume / Restart until Hand Back)
   const held = l?.exit === 'held', open = st && st !== 'done' && st !== 'cancelled';
-  const pause = AGENT.includes(st) && !held && l?.phase === st && UUID_RE.test(l.session ?? '') && typeof k.worktree === 'string' && k.waiting?.reason !== 'close' && l.exit !== 'usage'; // squashed: nothing to pause; a usage wait: tbd refuses
+  const hold = !!k && canHold(k); // k is null while the ticket loads
   const acts = [
     back.length > 1 && el('label', { class: 'pick' }, 'Resume in',
       el('select', { class: 'input', name: 'resume-phase', 'data-role': 'resume-phase', onchange: e => ui.phase.set(id, e.target.value) },
         ...back.map(p => el('option', { value: p, selected: (ui.phase.get(id) ?? k.blocked_from) === p }, stateLabel(p))))),
     can && !held && btn('resume', { disabled: live, title: live ? 'The run is live. Resume works once it ended.' : null }),
     can && !held && btn('restart'),
-    pause && actBtn(id, 'hold', () => post(id, 'hold')),
+    hold && holdBtn(id),
     open && btn('cancel'),
   ].filter(Boolean);
   if (acts.length) out.push(el('div', { class: 'run-actions' }, ...acts));
   if (sure) out.push(el('p', { class: 'hint' }, 'Press again to cancel this flow.'));
-  if (pause) out.push(el('p', { class: 'hint' }, 'Pause and Copy stops the run at once: its turn ends, and a tool call in flight finishes or dies with it.'));
+  if (hold) out.push(el('p', { class: 'hint' }, 'Continue in Terminal stops the run at once: its turn ends, and a tool call in flight finishes or dies with it.'));
   out.push(errLine(id, 'hold'));
   if (held && open && (AGENT.includes(st) || st === 'blocked')) out.push(heldBox(id, k)); // a cancelled or closed flow keeps no Hand Back; blocked + held: Hand Back resumes from Blocked
   out.push(el('p', { class: 'hint', 'aria-live': 'polite' }, outcome(id, k, running)));
@@ -1133,7 +1215,8 @@ function runBox(id, k) {
   const follow = ui.follow?.id === id && ui.follow.on;
   const raw = ui.raw || follow; // board-terminal-parity 3: the Activity feed is the default view, this tail sits behind Show Raw Log (Follow keeps it shown)
   const rawBtn = () => { ui.raw = !raw; if (!ui.raw) ui.follow = null; renderRunBox(); };
-  if (l?.log || shown) out.push(el('div', { class: 'log-head' }, el('h4', null, 'Log Tail'),
+  // the heading only over a shown tail: alone it read as the title of the card below it (Irfan 2026-10-20)
+  if (l?.log || shown) out.push(el('div', { class: 'log-head' }, raw ? el('h4', null, 'Log Tail') : el('span'),
     el('span', { class: 'log-acts' },
       raw && l?.log && el('button', { type: 'button', class: 'link-btn', 'data-role': 'follow', 'aria-pressed': String(follow), onclick: () => toggleFollow(id) }, follow ? 'Following' : 'Follow'),
       raw && l?.log && el('button', { type: 'button', class: 'link-btn', 'data-role': 'log', onclick: () => loadLog(id) }, shown ? 'Refresh' : 'Show Last 200 Lines'),
@@ -1143,7 +1226,29 @@ function runBox(id, k) {
   return out;
 }
 
-// full-access-runs Phase 9: Pause and Copy → "In Your Terminal": the resume line built only from shq() (the worktree)
+// Continue in Terminal (op hold): the run's phase is the ticket's, or the one it blocked in. Squashed (waiting close):
+// nothing to pause; a usage wait: tbd refuses; a start refused before any spawn that was no resume: no session yet.
+const canHold = k => {
+  const l = k.lease, blocked = k.state === 'blocked', at = blocked ? k.blocked_from : k.state;
+  // steer's cheap rules (lib/runner.js): Blocked only from planning | working, its round is the run's + 1 (fsm.move), the
+  // run's task is the ticket's, never a lane; a run that never started and was no resume has no session. The planted-config
+  // check stays on the server (the click's 409 shows through errLine)
+  return !k.lane_of && AGENT.includes(at) && (!blocked || at === 'planning' || at === 'working') && l?.exit !== 'held' && l?.phase === at
+    && l.round === (blocked ? k.round - 1 : k.round) && (l.task ?? null) === (at === 'working' ? k.work?.task ?? null : null)
+    && UUID_RE.test(l.session ?? '') && typeof k.worktree === 'string' && k.waiting?.reason !== 'close' && l.exit !== 'usage'
+    && (Number.isInteger(l.pid) || !!l.resumed);
+};
+// One click = hold; heldBox then opens Terminal by itself (Page Tools on), else its resume line + Copy shows
+const holdBtn = id => actBtn(id, 'hold', async () => { ui.cont.add(id); if (await post(id, 'hold')) ui.cont.delete(id); });
+// The Overview's part for a running agent-phase flow: the button, or (held) the In Your Terminal box. A Task's Your Turn
+// card holds the button itself (you), a Blocked flow's Run section does.
+const contSec = (id, k, you) => {
+  const held = k.lease?.exit === 'held';
+  if (!AGENT.includes(k.state) || (!held && (you || !canHold(k)))) return null;
+  return el('section', { class: 'part', 'aria-labelledby': 'ct-h' }, el('h3', { id: 'ct-h' }, 'Terminal'),
+    held ? heldBox(id, k) : [el('p', { class: 'hint' }, 'Stops the run at once and continues its session in your terminal.'), el('div', { class: 'acts' }, holdBtn(id)), errLine(id, 'hold')]);
+};
+// full-access-runs Phase 9: Continue in Terminal → "In Your Terminal": the resume line built only from shq() (the worktree)
 // and a session id that passes UUID_RE, a Copy button (copyCmd) and the one Hand Back button. While the run still dies
 // (pending) no line yet: two writers of one session never.
 const HELD_WAIT = { // a held flow's recovery in flight (lease.pending.why)
@@ -1155,6 +1260,8 @@ function heldBox(id, k) {
   const l = k.lease, cmd = UUID_RE.test(l.session ?? '') && typeof k.worktree === 'string' ? `cd ${shq(k.worktree)} && claude --resume ${l.session}` : null;
   const pre = cmd && el('pre', { class: 'log', 'data-role': 'resume-cmd', tabindex: '0', 'aria-label': 'Command, as text' }, cmd);
   const open = cmd && pageTools(); // board-terminal-parity 6.5: tbd opens Terminal with this line (POST …/terminal); the one Prominent action then
+  const clicked = !l.pending && !ui.busy.has(id) && ui.cont.delete(id); // Continue in Terminal was clicked here: taken on the first held render, Page Tools or not
+  if (clicked && open) Promise.resolve().then(() => post(id, 'terminal', {})); // once, not on every render
   return el('div', { class: 'held', 'data-role': 'held' }, el('h4', null, 'In Your Terminal'),
     l.pending ? el('p', { class: 'hint' }, HELD_WAIT[l.pending.why] ?? 'Working on it.') : [
       el('p', { class: 'hint' }, 'tbd starts nothing on this flow until you hand it back. Run this exact line in Terminal (tbd cannot see claude -c), work in the session, type /exit, then Hand Back.'),
@@ -1386,7 +1493,7 @@ async function readOpen() {
         if (a.seen && a.seen !== s && a.cursor != null) feedAdd(a, [{ at: j.ticket.updated_at ?? new Date().toISOString(), text: `Moved to ${stateLabel(s)}`, tone: 'info' }]);
         a.seen = s;
       }
-      drawerBody(flowOf(id), ui.ticket = j.lanes ? { ...j.ticket, lanes: j.lanes } : j.ticket); // M5.5: a parent's lanes ride on its ticket
+      drawerBody(flowOf(id), ui.ticket = j.lanes || j.parallel ? { ...j.ticket, lanes: j.lanes, parallel: j.parallel } : j.ticket); // M5.5: a parent's lanes (and the Phase 3 parallel view) ride on its ticket
     }
   } catch (e) {
     if (mine === openSeq && ui.open === id && !ui.ticket) drawerBody(flowOf(id), null, e.message); // else the next read tries again
@@ -1396,6 +1503,7 @@ const reloadOpen = debounce(readOpen, 200);
 
 async function openTicket(id) {
   const d = $('#drawer');
+  if (ui.open !== id) ui.cont.clear(); // a Continue in Terminal click belongs to the flow it was clicked on
   if (ui.open !== id) Object.assign(ui, { follow: null, log: null, ticket: null, round: null, plan: null, arm: null, err: null, ask: null, gates: null, ivs: null, fb: null, pass: null, qa: null, rec: null, final: null, tab: 'overview', pres: new Map(), shown: new Map(),
     raw: false, tech: false, feed: { id, rows: [], seq: 0, run: null, cursor: null, state: 'loading', pinned: true, top: 0, seen: null } });
   ui.open = id;
@@ -1419,6 +1527,7 @@ $('#drawer').addEventListener('close', () => {
   ui.open = null;
   ui.follow = null;
   ui.feed = null; // its rows and reads too
+  ui.cont.clear();
   ui.pres.clear(); // the kept log text goes with the drawer
   ui.shown.clear();
   markOpen();
@@ -1455,14 +1564,18 @@ const SENT = { // button role → [label, label while sending, toast title, toas
   push: ['Push', 'Pushing…', 'Push Started', 'Leak scan first, then git push. The outcome shows in the drawer.'],
   close: ['Close Flow', 'Closing…', 'Flow Closed', 'The flow is done. Nothing was pushed; the worktree stays until tb gc.'],
   lavish: ['Open in Lavish', 'Opening…', 'Opening Lavish', 'The questions page opens in your browser.'],
-  // full-access-runs Phase 8 + 9: the Sandbox switch, a note, Pause and Copy, Hand Back
+  // full-access-runs Phase 8 + 9: the Sandbox switch, a note, Continue in Terminal, Hand Back
   sandbox: ['Sandbox', 'Saving…', 'Locked Run On', 'Its runs are locked: seatbelt on, project settings only.'],
+  // flow-form-parallel-terminal Phase 3: the parallel buttons and the Subagents pick
+  'lane-allow': ['Allow Back to Parallel', 'Saving…', 'Allowed Back to Parallel', 'It can run in a parallel lane again, at the next gap between the main run’s tasks.'],
+  'lane-next': ['Run in Parallel Next', 'Saving…', 'Parallel Next', 'It starts in a parallel lane at the next gap between the main run’s tasks, if there is room.'],
+  subagents: ['Subagents', 'Saving…', 'Subagents Saved', 'The new number applies from the next run.'],
   'sandbox-off': ['Sandbox', 'Saving…', 'Locked Run Off', 'Its runs get full access.'], // board-terminal-parity 6.3
   // board-terminal-parity 6.5 + 6.8
   terminal: ['Open in Terminal', 'Opening…', 'Terminal Opened', 'Work in the session, type /exit, then Hand Back. macOS may ask once to let tbd use Terminal.'],
   'push-close': ['Push and Close', 'Pushing…', 'Push Started', 'Leak scan first, then git push; the flow closes once the push is green.'],
   note: ['Send Note', 'Sending…', 'Note Sent', 'A live run takes it now; else the next run starts with it.'],
-  hold: ['Pause and Copy', 'Pausing…', 'Pausing', 'The run stops; then the command to resume it shows here.'],
+  hold: ['Continue in Terminal', 'Stopping…', 'Stopping', 'The run stops; then Terminal opens with the command to continue it (or the command shows here).'],
   handback: ['Hand Back', 'Handing Back…', 'Handed Back', 'The board resumes the same session.'],
   'pass-check': ['Check SHA', 'Checking…', '', ''],
   // board-terminal-parity Phase 4: a Task's Waits-for-you card
@@ -1495,16 +1608,16 @@ const WAIT = {
   // board-terminal-parity Phase 4: a Task (task_changed: waiting.why lists each change with its undo step)
   you: 'The Task finished: your turn. Read what it did below, then press Done, send it a message, or Commit and Push.',
   folder_busy: 'Another Task works in this folder, a folder inside it, or a folder around it. It starts by itself when that one ends.',
-  task_changed: 'Blocked: your folder changed since the Task started. Look at each change below (each line says how to undo it), then Cancel and start a new Task.',
+  task_changed: 'Blocked: your folder changed since the Task started. Undo each change below (each line says how), or remove the new files, then Resume.',
 };
 const BLOCKS = ['infra', 'integrity', 'config', 'work', 'scope', 'rework', 'qa', 'db', 'task_changed'];
 const code = s => el('code', null, vis(s));
 const none = () => el('p', { class: 'hint' }, 'None.');
 
 // While a request runs its buttons are aria-disabled, not disabled: keyboard focus stays on them across re-renders.
-function actBtn(id, role, onclick, { cls = BTN2, label = undefined, sent = role, disabled = false } = {}) {
+function actBtn(id, role, onclick, { cls = BTN2, label = undefined, sent = role, disabled = false, aria = null } = {}) {
   const busy = ui.busy.get(id); // one request per ticket; other tickets stay usable
-  return el('button', { type: 'button', class: cls, 'data-role': role, disabled, 'aria-disabled': busy ? 'true' : null, onclick: () => { if (!ui.busy.has(id)) onclick(); } },
+  return el('button', { type: 'button', class: cls, 'data-role': role, disabled, 'aria-label': aria, 'aria-disabled': busy ? 'true' : null, onclick: () => { if (!ui.busy.has(id)) onclick(); } },
     busy === role ? SENT[sent][1] : label ?? SENT[sent][0]);
 }
 const errLine = (id, ...roles) => ui.err?.id === id && roles.includes(ui.err.role) && el('p', { class: 'err' }, ui.err.text);
@@ -1602,7 +1715,7 @@ function family(k) {
     return el('li', null, el('button', { type: 'button', class: 'kin', 'data-role': `kin-${id}`, onclick: () => openTicket(id) },
       el('span', { class: 'kin-main' }, el('span', { class: 'kin-title' }, vis(c?.title || id)),
         c?.waiting?.reason && el('span', { class: 'kin-sub' }, `waiting: ${c.waiting.reason}`)),
-      c ? stagePill(c.state) : pill('gray', 'Not Found')));
+      c ? flowPill(c) : pill('gray', 'Not Found')));
   };
   const kids = Array.isArray(k.children) ? k.children : [];
   const done = kids.filter(id => ['done', 'cancelled'].includes(state.flows.find(x => x.id === id)?.state)).length; // J4
@@ -1774,10 +1887,10 @@ function youCard(id, k) {
     t.summary && el('p', { class: 'summary' }, vis(t.summary)),
     typeof t.done_when_met === 'boolean' && el('p', null, `Done when met: ${t.done_when_met ? 'yes' : 'no'}`),
     t.commit_message && [el('h4', null, 'Commit Message'), el('pre', { class: 'log', tabindex: '0', 'aria-label': 'Commit message' }, vis(t.commit_message))],
-    el('div', { class: 'acts' }, actBtn(id, 'task-done', () => post(id, 'close', {}, 'task-done'), { cls: can ? BTN2 : BTN1 })),
+    el('div', { class: 'acts' }, actBtn(id, 'task-done', () => post(id, 'close', {}, 'task-done'), { cls: can ? BTN2 : BTN1 }), canHold(k) && holdBtn(id)),
     el('div', { class: 'field' }, el('label', { for: 'ys' }, 'Message to the Agent'), box),
     el('div', { class: 'acts' }, actBtn(id, 'task-send', send)),
-    errLine(id, 'task-done', 'task-send'),
+    errLine(id, 'task-done', 'task-send', 'hold'),
     p ? [el('h4', null, `Files to Commit · ${n}`),
       n ? el('ul', { class: 'plist' }, ...files.map(f => el('li', null, code(f)))) : none(),
       ahead > 0 && el('p', { class: 'hint' }, `${ahead} ${ahead === 1 ? 'commit was' : 'commits were'} already on this branch: the push sends ${ahead === 1 ? 'it' : 'them'} too.`),
@@ -2094,7 +2207,7 @@ const CALLER = { review: 'reviewer', qa: 'QA agent', final_gate: 'final reviewer
 // Phase 4: a Task's answers always go back into the asking session (planning or working)
 const sentOf = r => (CALLER[r.phase] || ui.ticket?.kind === 'task' ? ['answer-on', 'decide-now'] : ['answer', 'plan-now']);
 function clarifyForm(id, r) {
-  const d = draftOf(id, r.n), who = CALLER[r.phase] ?? 'planner', [ans, now] = sentOf(r);
+  const d = draftOf(id, r.n), who = CALLER[r.phase] ?? (r.phase === 'working' || ui.ticket?.kind === 'task' ? 'agent' : 'planner'), [ans, now] = sentOf(r);
   return el('section', { class: 'part you', 'aria-labelledby': 'cq-h' },
     el('h3', { id: 'cq-h' }, `Questions · Round ${r.n}`),
     el('p', { class: 'hint' }, `Answer each one, or press ${SENT[now][0]}: what you leave open is the ${who}’s call.`),
@@ -2266,6 +2379,8 @@ function sendReject(id, r, ask) {
 // ---------- toolbar: search (⌘K), New (N) ----------
 // flows need a leaf tag that has a path (a tag with children is only a group)
 const leafTags = tags => Object.keys(tags).filter(n => tags[n]?.path && !Object.keys(tags).some(o => o.startsWith(`${n}/`))).sort();
+const ADD_TAG = '+add-tag'; // the New sheet's Tag list: its last option opens Add Tag, it is never a value
+const addTagOpt = () => el('option', { value: ADD_TAG }, 'Add Tag…');
 const tagOptions = sel => [el('option', { value: '' }, 'No Tag'), ...ui.tags.map(n => el('option', { value: n, selected: n === sel }, n))];
 // board-terminal-parity 6.7: a toast title for a refusal. tbd's own words are the toast text (err.message): the title is
 // the action that failed; "Not Available Yet" only for a 409 that came without words
@@ -2278,7 +2393,7 @@ async function loadTags() {
     ui.tagsLoaded = true;
     $('#tag-names')?.replaceChildren(...[...new Set([...ui.tags, ...Object.keys(ui.tagDefs)])].sort().map(n => el('option', { value: n })));
     const ft = $('#sheet select[name="tag"]');
-    if (ft) ft.replaceChildren(...tagOptions(ft.value));
+    if (ft) ft.replaceChildren(...tagOptions(ft.value), addTagOpt());
     if (ui.promote) renderReminders();
   } catch (e) { toast(e.message, { title: 'Couldn’t Load Tags' }); }
 }
@@ -2330,12 +2445,12 @@ async function addItem(flow, send) {
 // Desktop: centered on --canvas, fields a grouped list on --surface, Cancel (Gray) then the action (Prominent) bottom right.
 // Phones: a bottom sheet with a grabber (foundation). Esc, Cancel and a click outside close it; while the New sheet holds
 // typed text (sheetGuard) they ask first, inline in the action row.
-let sheetOpener = null, sheetGuard = null, asking = null; // asking: the action row's buttons while the question shows
+let sheetOpener = null, sheetGuard = null, asking = null, sheetBack = null; // asking: the action row's buttons while the question shows; sheetBack: what runs after this sheet closes (Add Tag from the New sheet → New again)
 const sheetOpen = () => $('#sheet').classList.contains('open');
 function openSheet(title, sub, fields, actions, first, { head, after = [], inline = false } = {}) { // inline: label leading, control trailing
   const form = $('#sheet .sheet');
   if (!sheetOpen()) sheetOpener = document.activeElement; // a Reminder ↔ Flow switch opens over itself: keep the first opener
-  sheetGuard = asking = form.onkeydown = null;
+  sheetGuard = asking = sheetBack = form.onkeydown = null;
   form.replaceChildren(el('div', { class: 'grabber', 'aria-hidden': 'true' }),
     el('div', { class: 'sheet-head' }, el('div', null, el('h2', { class: 'sheet-title', id: 'sheet-title' }, title), sub && el('p', { class: 'sheet-sub' }, sub)), head),
     el('div', { class: `sheet-fields${inline ? ' inline' : ''}` }, ...fields), ...after, el('div', { class: 'sheet-actions' }, ...actions));
@@ -2350,6 +2465,9 @@ function closeSheet(force) { // force === true: no question (added, or Discard);
   $('.shell').inert = false;
   sheetGuard = asking = null;
   sheetOpener?.focus();
+  const back = sheetBack;
+  sheetBack = null;
+  back?.();
 }
 function askDiscard(discard = () => closeSheet(true)) { // discard: what Discard does (close, or a Reminder ↔ Flow switch)
   const row = $('#sheet .sheet-actions');
@@ -2399,20 +2517,22 @@ function sheetFields(specs, init, onChange) {
   return { nodes, vals, fail, ctl };
 }
 
+// flow-form-parallel-terminal Phase 1: `@` at a word start lists the picked tag's files the same way (GET /api/files?tag=&q=,
+// asked as the word is typed, 150 ms after the last key, an older answer dropped); a pick inserts `@path `. No chips for files.
 // board-terminal-parity 5 (B7): skills in the Goal box. `/` at a word start lists the skills tbd knows for the tag (GET
 // /api/skills?tag=, read once per tag while the sheet is open): the textarea is an ARIA combobox over a listbox; ↑ ↓
 // move, Enter / Tab insert `/name `, Esc closes, a click picks. The text is the one source: the chips under it mirror its
 // /names that name a known skill (× takes that token out); Add Skill opens the list to add at the end. Names and
 // descriptions come from SKILL.md files (a tag repo's too): text only, vis(). → {nodes (under the box), wire(textarea, tag select)}
 const ASK_RE = /(^|\s)\/([a-z0-9][\w:.-]{0,63})(?=$|[\s,;!?)])/g; // the same in lib/skills.js ASK_RE (the /names tbd reads from the goal): keep both identical
-const AT_SLASH = /(^|\s)\/([\w:.-]{0,63})$/; // the /word the caret ends, while it is typed
+const AT_WORD = /(^|\s)(?:\/([\w:.-]{0,63})|@(\S{0,200}))$/; // the /word (group 2) or @word (group 3) the caret ends, while it is typed
 const SKILLS_SHOWN = 50; // ponytail: the first 50 matches render (tbd lists ≤ 500); typing narrows the rest
 function skillsBox() {
   const list = el('ul', { id: 'skill-list', role: 'listbox', class: 'popmenu skill-pop', 'aria-label': 'Skills', hidden: true, onmousedown: e => e.preventDefault() }); // a scrollbar click keeps the box focused: the list stays open
   const chips = el('div', { class: 'skill-chips' });
   const add = el('button', { type: 'button', class: 'link-btn', 'data-role': 'add-skill' }, 'Add Skill');
   const cache = new Map(); // tag → its skills (a promise)
-  let ta, tagSel, all = [], loading = true, open = false, items = [], at = 0, query = '', from = null; // from: where the /word starts; -1: the end of the text (Add Skill)
+  let ta, tagSel, all = [], loading = true, open = false, items = [], at = 0, query = '', from = null, kind = '/', files = [], filesMore = false, filesBusy = false, filesSeq = 0, filesFailed = null; // from: where the /word starts; -1: the end of the text (Add Skill); kind: / skills, @ files
 
   const mirror = () => {
     const names = new Set(all.map(s => s.name));
@@ -2441,31 +2561,59 @@ function skillsBox() {
   };
   const show = () => { // prefix matches first, then the rest that hold the query
     const q = query.toLowerCase(), low = s => String(s.name).toLowerCase();
-    items = [...all.filter(s => low(s).startsWith(q)), ...all.filter(s => !low(s).startsWith(q) && low(s).includes(q))].slice(0, SKILLS_SHOWN);
+    items = kind === '@' ? files.map(name => ({ name })) // the server matched them
+      : [...all.filter(s => low(s).startsWith(q)), ...all.filter(s => !low(s).startsWith(q) && low(s).includes(q))].slice(0, SKILLS_SHOWN);
+    list.setAttribute('aria-label', kind === '@' ? 'Files' : 'Skills');
     at = Math.min(at, Math.max(items.length - 1, 0));
     list.replaceChildren(...(items.length ? items.map((s, i) => el('li', { id: `skill-opt-${i}`, role: 'option', class: 'popmenu-item skill-opt', 'aria-selected': String(i === at),
       onmousedown: e => e.preventDefault(), onclick: () => pick(i) }, // mousedown: the box keeps focus
-    el('span', { class: 'skill-name' }, `/${vis(s.name)}`), s.description && el('span', { class: 'skill-desc' }, vis(s.description))))
-      : [el('li', { role: 'option', 'aria-disabled': 'true', class: 'skill-none' }, loading ? 'Loading skills…' : all.length ? 'No skill matches.' : 'No skills found.')]));
+    el('span', { class: 'skill-name' }, `${kind}${vis(s.name)}`), s.description && el('span', { class: 'skill-desc' }, vis(s.description))))
+      : [el('li', { role: 'option', 'aria-disabled': 'true', class: 'skill-none' }, kind === '@' ? (!tagSel.value ? 'Pick a tag to list its files.' : filesBusy ? 'Loading files…' : 'No file matches.')
+        : loading ? 'Loading skills…' : all.length ? 'No skill matches.' : 'No skills found.')]).concat(kind === '@' && filesMore && items.length ? [el('li', { role: 'option', 'aria-disabled': 'true', class: 'skill-none' }, 'More files: type more of the name.')] : []));
     open = true;
     list.hidden = false;
     ta.setAttribute('aria-expanded', 'true');
     if (items.length) ta.setAttribute('aria-activedescendant', `skill-opt-${at}`); else ta.removeAttribute('aria-activedescendant');
     $(`#skill-opt-${at}`)?.scrollIntoView?.({ block: 'nearest' });
   };
-  const refresh = () => { // the /word at the caret opens, narrows or closes the list (Add Skill's list stays until a pick or Esc)
+  const fetchFiles = debounce(async () => { // the old list stays until the reply; a closed list reads nothing
+    const tag = tagSel.value, q = query, mine = ++filesSeq;
+    if (!tag || !open || kind !== '@') return void (filesBusy = false);
+    let got = [], more = false;
+    try {
+      const r = await api('GET', `/api/files?tag=${enc(tag)}&q=${enc(q)}`);
+      got = r.files;
+      more = r.more === true;
+      filesFailed = null;
+    } catch (e) {
+      if (filesFailed !== tag) toast(e.message, { title: 'Couldn’t Load Files' }); // once per tag, not per word
+      filesFailed = tag;
+    }
+    if (mine !== filesSeq) return; // typed on, or the tag changed: a newer read fills the list
+    files = Array.isArray(got) ? got.filter(x => typeof x === 'string') : [];
+    filesMore = more;
+    filesBusy = false;
+    if (open && kind === '@') show();
+  }, 150);
+  const readFiles = () => { // @: ask tbd for the tag's files that match the word, once typing pauses
+    filesBusy = !!tagSel.value;
+    fetchFiles();
+  };
+  const refresh = () => { // the /word or @word at the caret opens, narrows or closes the list (Add Skill's list stays until a pick or Esc)
     if (from === -1) return;
-    const end = ta.selectionStart, m = ta.selectionEnd === end && AT_SLASH.exec(ta.value.slice(0, end));
+    const end = ta.selectionStart, m = ta.selectionEnd === end && AT_WORD.exec(ta.value.slice(0, end));
     if (!m) return close();
-    if (m[2] !== query) at = 0;
-    from = end - m[2].length - 1;
-    query = m[2];
+    const k = m[3] === undefined ? '/' : '@', word = m[3] ?? m[2];
+    if (word !== query || k !== kind) { at = 0; if (k === '@') readFiles(); }
+    from = end - word.length - 1;
+    query = word;
+    kind = k;
     show();
   };
   const pick = i => {
     const s = items[i], v = ta.value;
     if (!s) return close();
-    const ins = `/${s.name} `;
+    const ins = kind === '@' && /\s/.test(s.name) ? `@"${s.name}" ` : `${kind}${s.name} `; // a path with a space is quoted: the agent reads @"my file.js"
     let pos;
     if (from === -1) {
       ta.value = `${v}${v && !/\s$/.test(v) ? ' ' : ''}${ins}`;
@@ -2517,26 +2665,26 @@ function skillsBox() {
     ta.addEventListener('keyup', e => { if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) refresh(); });
     ta.addEventListener('keydown', keys);
     ta.addEventListener('blur', close);
-    tagSel.addEventListener('change', () => { loading = true; load(); });
-    add.addEventListener('click', () => { ta.focus(); from = -1; query = ''; at = 0; show(); });
+    tagSel.addEventListener('change', () => { loading = true; load(); if (kind === '@') { files = []; filesMore = false; filesFailed = null; readFiles(); if (open) show(); } });
+    add.addEventListener('click', () => { ta.focus(); from = -1; query = ''; kind = '/'; at = 0; show(); });
     load();
   }
   return { nodes: [list, el('div', { class: 'skill-bar' }, chips, add)], wire };
 }
 
 // The New sheet (D-0149 / D-0156 / D-0166 fields, calm plan Q4): a reminder with column, due, project, note and tag, or a
-// flow with a goal (skills: skillsBox), short title, kind, tag, fix-of, locked run and Start Now. mode 'reminder' | 'flow' (the Flows view's empty state calls
+// flow with a goal (skills: skillsBox), short title, kind, tag, locked run and Start Now. mode 'reminder' | 'flow' (the Flows view's empty state calls
 // openNew('flow')); typed carries the title / goal across a Reminder ↔ Flow switch (asked first when another field holds
 // text: it would be lost). Enter adds; in a note or goal Shift+Enter is a new line.
-function openNew(mode = 'reminder', typed = '') {
+function openNew(mode = 'reminder', typed = '') { // typed: the title / goal text, or (Add Tag came back) the flow's whole draft {text, title, kind, tag, sandbox, start}
   const flow = mode === 'flow', main = flow ? 'text' : 'title';
   const sk = flow && skillsBox();
   const specs = flow ? [
     { k: 'text', label: 'Goal for the Agent', kind: 'area', after: sk.nodes },
     { k: 'title', label: 'Short Title', kind: 'text', hint: 'Optional. The board shows it instead of the goal.' },
     { k: 'kind', label: 'Kind', kind: 'select', opts: kinds().map(k => [k, kindLabel(k)]) },
-    { k: 'tag', label: 'Tag', kind: 'select', opts: [['', 'No Tag'], ...ui.tags.map(n => [n, n])] },
-    { k: 'fix_of', label: 'Fix Of', kind: 'select', opts: [['', 'None'], ...(state?.flows ?? []).map(f => [f.id, vis(f.title)])] },
+    { k: 'tag', label: 'Tag', kind: 'select', opts: [['', 'No Tag'], ...ui.tags.map(n => [n, n]), [ADD_TAG, 'Add Tag…']],
+      after: [el('button', { type: 'button', class: 'link-btn', 'data-role': 'add-tag', onclick: () => addTagFrom() }, 'Add Tag…')] },
     { k: 'sandbox', label: 'Locked run: for untrusted text (an issue, a pasted log). Fewer tools, slower.', kind: 'check' },
     // board-terminal-parity 6.1: create and assign in one step (tbd's assign checks); the choice is remembered
     { k: 'start', label: 'Start Now', kind: 'check', hint: 'Planning starts at once. If it can’t, the flow stays in Backlog and says why.' },
@@ -2548,9 +2696,25 @@ function openNew(mode = 'reminder', typed = '') {
     { k: 'note', label: 'Note', kind: 'area' },
     { k: 'tag', label: 'Tag', kind: 'text', ph: 'shop/api' },
   ];
-  const f = sheetFields(specs, flow ? { text: typed, kind: kinds()[0], start: safe(() => localStorage.getItem('tb-start-now')) !== '0' } : { title: typed, status: 'inbox' }, () => {});
+  const f = sheetFields(specs, flow ? { kind: kinds()[0], start: safe(() => localStorage.getItem('tb-start-now')) !== '0', ...(typeof typed === 'string' ? { text: typed } : typed) } : { title: typed, status: 'inbox' }, () => {});
+  // Add Tag replaces this sheet; it comes back with every field kept, on the new tag (or the old one after Cancel)
+  const addTagFrom = () => {
+    const d = { ...f.vals(), text: f.ctl.text.value };
+    addTag(async name => {
+      if (name) { await loadTags(); if (!ui.tags.includes(name)) ui.tags = [...ui.tags, name].sort(); } // a failed read still shows the new tag
+      else ui.tagsLoaded = false; // the copy form may have added it: read again
+      openNew('flow', name ? { ...d, tag: name } : d);
+    });
+  };
   if (flow) {
     loadTags();
+    let tagWas = f.ctl.tag.value;
+    f.ctl.tag.addEventListener('change', e => { // before the skills box hears it: the sentinel is no tag
+      if (e.target.value !== ADD_TAG) return void (tagWas = e.target.value);
+      e.stopImmediatePropagation();
+      e.target.value = tagWas;
+      addTagFrom();
+    });
     sk.wire(f.ctl.text, f.ctl.tag);
     f.ctl.start.addEventListener('change', e => safe(() => localStorage.setItem('tb-start-now', e.target.checked ? '1' : '0')));
     // Phase 4 F: a Task never takes a locked run (tbd refuses it): the box hides and clears while Kind is Task
@@ -2582,7 +2746,7 @@ function openNew(mode = 'reminder', typed = '') {
     add.disabled = true;
     // empty optional fields are undefined: JSON leaves them out. An Inbox add goes on top (the old composer line's body);
     // another column keeps the server's default, as the old More… sheet posted
-    const sent = await addItem(flow, () => (flow ? api('POST', '/api/flows', { text: v.text, title: v.title || undefined, kind: v.kind, tag: v.tag || undefined, fix_of: v.fix_of || undefined, sandbox: v.sandbox || undefined, start: v.start || undefined })
+    const sent = await addItem(flow, () => (flow ? api('POST', '/api/flows', { text: v.text, title: v.title || undefined, kind: v.kind, tag: v.tag && v.tag !== ADD_TAG ? v.tag : undefined, sandbox: v.sandbox || undefined, start: v.start || undefined })
       : api('POST', '/api/reminders', { title: v.title, status: v.status, pos: v.status === 'inbox' ? 'top' : undefined, due: v.due || undefined, project: v.project || undefined, note: v.note || undefined, tag: v.tag || undefined })));
     if (sent && form.onsubmit === submit && sheetOpen()) closeSheet(true); // a Reminder ↔ Flow switch (or another sheet) since: not this one to close
     add.disabled = false;
@@ -2798,8 +2962,8 @@ function cmdSheet(id, preset = {}) {
 // terminal used (GET /api/folders/recent) or Choose Folder… (the Mac dialog, POST /api/pick-folder); tbd reads it
 // (POST /api/folders/branches: git or a plain folder, its branches) and Add posts /api/tags/quick (tbd checks it all again).
 // More Options opens the copy-command form with what was typed. Page Tools off: that form.
-function addTag() {
-  if (!pageTools()) return cmdSheet('tag-add');
+function addTag(back) { // back(name): runs when the sheet closes (name: the tag added, else undefined); the New sheet opens again from it
+  if (!pageTools()) { cmdSheet('tag-add'); sheetBack = back ? () => back() : null; return; }
   const choose = el('button', { type: 'button', class: 'btn btn-sm btn-gray', 'data-role': 'pick-folder', onclick: () => pickFolder() }, 'Choose Folder…');
   const kind = el('p', { class: 'hint', 'aria-live': 'polite' });
   const folders = el('datalist', { id: 'tag-folders' });
@@ -2854,10 +3018,11 @@ function addTag() {
   const add = el('button', { type: 'submit', class: 'btn', 'data-role': 'tag-add' }, 'Add');
   const form = openSheet('Add Tag', 'A tag is a folder flows work in. tbd checks the folder and adds the tag.', f.nodes, [cancelBtn(), add], f.ctl.name, {
     inline: true,
-    after: [folders, el('p', null, el('button', { type: 'button', class: 'link-btn', 'data-role': 'tag-more', onclick: () => cmdSheet('tag-add', preset()) }, 'More Options…'))],
+    after: [folders, el('p', null, el('button', { type: 'button', class: 'link-btn', 'data-role': 'tag-more', onclick: () => { const b = sheetBack; cmdSheet('tag-add', preset()); sheetBack = b; } }, 'More Options…'))],
   });
+  sheetBack = back ? () => back() : null;
   api('GET', '/api/folders/recent').then(r => folders.replaceChildren(...(Array.isArray(r.folders) ? r.folders.filter(isObj) : []).map(x => el('option', { value: String(x.path) }, vis(x.name)))), () => {});
-  form.onsubmit = async e => {
+  const mine = form.onsubmit = async e => {
     e.preventDefault();
     if (add.disabled) return;
     add.disabled = true;
@@ -2872,12 +3037,15 @@ function addTag() {
     }
     try {
       const r = await api('POST', '/api/tags/quick', { name: v.name, path: v.path, base: info.type === 'git' ? v.base : undefined });
+      if (form.onsubmit !== mine || !sheetOpen()) { ui.tagsLoaded = false; return; } // Cancel (or another sheet) since: back already ran, not this sheet to close
+      sheetBack = null;
       closeSheet(true);
       toast(`#${r.tag?.name ?? v.name} is ready for flows.`, { kind: 'info', title: 'Tag Added' });
       ui.tagsLoaded = false; // the New sheet and Promote read the tags again
       loadHealth();
+      back?.(r.tag?.name ?? v.name);
     } catch (err) {
-      if (err.cliOnly) { cmdSheet('tag-add', preset()); toast(err.message, { kind: 'warn', title: 'Copy the Command' }); }
+      if (err.cliOnly) { cmdSheet('tag-add', preset()); sheetBack = back ? () => back() : null; toast(err.message, { kind: 'warn', title: 'Copy the Command' }); }
       else f.fail({ [err.status === 409 ? 'name' : 'path']: err.message });
     }
     add.disabled = false;

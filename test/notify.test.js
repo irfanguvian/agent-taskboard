@@ -88,6 +88,19 @@ test('AC6 plan_approval, blocked, waiting manual / needs_scope / memory (D-0079)
   assert.equal(s.sounds(), 5);
 });
 
+// 2026-10-20 review of the Needs You UX: a squashed ticket waits on Irfan (close); an approved plan being set up does not
+test('waiting close pings "Waits for close"; plan_approval with waiting setup is silent, then pings once setup fails', async (t) => {
+  const s = setup(t, '2026-10-07T03:00:00Z');
+  const k = await s.flow('Ticket C');
+  await move(k.id, { state: 'plan_approval', waiting: { reason: 'setup', since: '2026-10-07T03:00:00Z' } });
+  assert.deepEqual(s.banners(), [], 'setup runs by itself: no banner');
+  await move(k.id, { waiting: { reason: 'setup_failed', since: '2026-10-07T03:00:00Z' } });
+  await move(k.id, { state: 'final_gate', waiting: { reason: 'close', since: '2026-10-07T03:00:00Z' } });
+  assert.deepEqual(s.banners().map((b) => b.title), ['Plan ready to approve', 'Waits for close']);
+  s.tickAfter(31);
+  assert.equal(s.banners().at(-1).title, 'Still waiting: Waits for close', 're-pings like the others');
+});
+
 // board-terminal-parity Phase 2 task 4: an Approve card and an auto-mode block wait on Irfan (ticket.waiting): a ping each
 test('Phase 2 task 4: waiting approve / blocked_action each ping at once', async (t) => {
   const s = setup(t, '2026-10-07T03:00:00Z');

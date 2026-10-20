@@ -7,9 +7,9 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { execFileSync } = require('node:child_process');
+const { execFileSync, spawn } = require('node:child_process');
 const { startTbd } = require('./helpers/tbd');
-const { FAKE, RUN_SPY, read, until, reap, pidsOf } = require('./helpers/runs');
+const { FAKE, RUN_SPY, read, until, alive, reap, pidsOf } = require('./helpers/runs');
 
 const ROOT = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'task-')));
 after(() => fs.rmSync(ROOT, { recursive: true, force: true }));
@@ -219,4 +219,26 @@ test('unclone never removes a folder that is not TB_HOME/worktrees/<id> (a Task\
   const dir = repo();
   await assert.rejects(require('../lib/planning').unclone('t_abc123', dir, path.join(dir, '.git')), /not a board clone/);
   assert.ok(fs.existsSync(path.join(dir, 'README.md')));
+});
+
+test('Continue in Terminal on a Task waiting for you: held, Done → 409 while claude --resume <session> runs in his terminal, Done → 200 once it is closed', async (t) => {
+  const dir = repo();
+  const tbd = await boot(t, [result(PLAN), result(DONE)], dir);
+  const id = await create(tbd);
+  await until(() => read(tbd, id).state === 'plan_approval', 30_000, 'plan_approval');
+  assert.equal((await tbd.api('POST', `/api/tickets/${id}/approve`, {})).status, 202);
+  await until(() => read(tbd, id).waiting?.reason === 'you' && read(tbd, id).lease?.exit === 'result', 30_000, 'waiting you, run ended');
+  assert.equal((await tbd.api('POST', `/api/tickets/${id}/hold`)).status, 202);
+  await until(() => read(tbd, id).lease.exit === 'held' && !read(tbd, id).lease.pending, 30_000, 'held');
+  const { session } = read(tbd, id).lease;
+  const term = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1 << 30)', '--', '--resume', session], { stdio: 'ignore' });
+  t.after(() => term.kill('SIGKILL'));
+  const busy = await tbd.api('POST', `/api/tickets/${id}/close`, {});
+  assert.deepEqual([busy.status, busy.json], [409, { error: `${id}: claude --resume ${session} still runs: close your terminal session first` }]);
+  assert.equal(read(tbd, id).state, 'working', 'not closed');
+  term.kill('SIGKILL');
+  await until(() => !alive(term.pid), 10_000, 'the terminal session closed');
+  const done = await tbd.api('POST', `/api/tickets/${id}/close`, {});
+  assert.equal(done.status, 200, done.text);
+  assert.equal(read(tbd, id).state, 'done');
 });

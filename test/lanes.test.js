@@ -655,3 +655,90 @@ test('K4 + lanes: T3 accepted before lane T2 merges (branch T1 T3 T2, plan T1 T2
   await until(() => planner(), 30_000, 'the planner run');
   assert.deepEqual(json(planner().env.TB_PLAN_CTX).keep_ok, ['T1']);
 });
+
+// ---- flow-form-parallel-terminal Phase 3: the parallel view, Allow Back to Parallel, Run in Parallel Next ----------------
+// Memory "warn" keeps the first gap (before T1 starts) from making a lane; the test acts while T1 is held, then lets memory
+// be normal and T1 finish: the next gap (T2 is the parent's task) is where a lane starts.
+const T1Held = (name) => ({ T1: [done('src/T1.js', 'T1', [hold(marker(name))])] });
+const lanePost = (w, body) => w.tbd.api('POST', `/api/tickets/${w.id}/lane`, body);
+const view = async (w) => (await w.tbd.api('GET', `/api/tickets/${w.id}`)).json.parallel;
+const ivRows = (w) => lines(tk(w.tbd, w.id, 'interventions.jsonl')).filter((l) => l.verb !== 'answer').map((l) => [l.verb, l.task]); // not the seed's answer
+const t1Runs = (w) => until(() => w.k().work?.tasks?.[0]?.status === 'running' && Number.isInteger(w.k().lease?.pid), 30_000, 'T1 runs');
+
+test('Phase 3 Allow Back to Parallel (+/−): a serial task shows why, allow takes it off work.serial (one intervention row) and it becomes a lane at the next gap; a task not in serial → 409, nothing written', async (t) => {
+  const w = await parent(t, { tasks: [task('T1'), task('T2'), task('T3')], sessions: T1Held('p3-allow'), pressure: 'warn',
+    seed: (base) => cursor([wtask('T1', { attempt: 1, pre: base }), wtask('T2'), wtask('T3')], { serial: ['T3'] }) });
+  await t1Runs(w);
+  assert.deepEqual((await view(w)).tasks.T3, { badge: 'one', why: 'it came back from a parallel run', serial: true, security: false });
+  assert.equal((await lanePost(w, { task: 'T2', op: 'allow' })).status, 409);
+  assert.deepEqual([w.k().work.serial, ivRows(w)], [['T3'], []]);
+  assert.equal((await lanePost(w, { task: 'T3', op: 'allow' })).status, 200);
+  assert.deepEqual([w.k().work.serial, ivRows(w)], [[], [['lane-allow', 'T3']]]);
+  w.pressure('normal');
+  go('p3-allow');
+  await until(() => Object.hasOwn(w.k().work.lanes ?? {}, 'T3'), 45_000, 'T3 became a lane');
+});
+
+test('Phase 3 Run in Parallel Next (+/−): the pick beats the first ready task (T5 not T3) and is spent when its lane starts; the main run\'s task, a task that waits and a bad body are refused; the badges say why', async (t) => {
+  const w = await parent(t, { tasks: [task('T1'), task('T2'), task('T3'), task('T4', { blocked_by: ['T2'] }), task('T5'), task('T6', { files: ['src/T1.js'] })],
+    sessions: T1Held('p3-next'), pressure: 'warn' });
+  await t1Runs(w);
+  const v = await view(w);
+  assert.equal(v.top, 'on, up to 1 extra at once');
+  assert.deepEqual(['T1', 'T3', 'T4', 'T6'].map((x) => v.tasks[x]), [undefined, { badge: 'can', next: false },
+    { badge: 'one', why: 'it waits for task T2' }, { badge: 'one', why: 'it shares a file with task T1' }]);
+  for (const x of ['T1', 'T4']) assert.equal((await lanePost(w, { task: x, op: 'next' })).status, 409, x);
+  for (const bad of [{ task: 'T5' }, { task: 'T5', op: 'next', extra: 1 }, { task: 5, op: 'next' }, { task: 'T5', op: 'zap' }]) assert.equal((await lanePost(w, bad)).status, 400, JSON.stringify(bad));
+  assert.deepEqual([w.k().work.lane_pick, ivRows(w)], [undefined, []]);
+  assert.equal((await lanePost(w, { task: 'T5', op: 'next' })).status, 200);
+  assert.deepEqual([w.k().work.lane_pick, (await view(w)).tasks.T5, ivRows(w)], ['T5', { badge: 'can', next: true }, [['lane-next', 'T5']]]);
+  w.pressure('normal');
+  go('p3-next');
+  await until(() => Object.keys(w.k().work.lanes ?? {}).length > 0, 45_000, 'a lane started');
+  assert.deepEqual([Object.keys(w.k().work.lanes), 'lane_pick' in w.k().work], [['T5'], false]);
+});
+
+test('Phase 3 (−): lanes off → the top line says off and every pending task says why; a pick is refused (old contract: accepted unless serial; now it follows the badge: lanes off, a serial task, a shared file, a built-in step)', async (t) => {
+  const w = await parent(t, { tasks: [task('T1'), task('T2'), task('T3')], sessions: T1Held('p3-off'), config: { lanes: { enabled: false } },
+    seed: (base) => cursor([wtask('T1', { attempt: 1, pre: base }), wtask('T2'), wtask('T3')], { serial: ['T3'] }) });
+  await t1Runs(w);
+  const v = await view(w);
+  assert.match(v.top, /^off: parallel lanes are off/);
+  assert.match(v.tasks.T2.why, /^parallel lanes are off/);
+  assert.deepEqual(v.tasks.T3, { badge: 'one', why: v.tasks.T3.why, serial: true, security: false }, 'a serial task keeps its Allow flag under a gate reason');
+  for (const x of ['T3', 'T2']) assert.equal((await lanePost(w, { task: x, op: 'next' })).status, 409, x);
+  assert.deepEqual([w.k().work.lane_pick, ivRows(w)], [undefined, []]);
+  go('p3-off');
+});
+
+test('Phase 3 (−) security: a task sent back to serial for agent-planted config or an integrity failure cannot be allowed (409, serial unchanged, no Allow flag); a plain serial task still can', async (t) => {
+  const w = await parent(t, { tasks: [task('T1'), task('T2'), task('T3')], sessions: T1Held('p3-sec'), pressure: 'warn',
+    seed: (base) => cursor([wtask('T1', { attempt: 1, pre: base }), wtask('T2'), wtask('T3')], { serial: ['T2', 'T3'], serial_why: { T3: 'security' } }) });
+  await t1Runs(w);
+  const v = await view(w);
+  assert.deepEqual([v.tasks.T2.security, v.tasks.T3.security, v.tasks.T3.why], [false, true, 'it came back from a parallel run for a security reason (agent-planted config or an integrity failure)']);
+  const r = await lanePost(w, { task: 'T3', op: 'allow' });
+  assert.deepEqual([r.status, r.json.error], [409, `${w.id}: T3 refused: this task came back for agent-planted config or an integrity failure`]);
+  assert.deepEqual([w.k().work.serial, ivRows(w)], [['T2', 'T3'], []]);
+  assert.equal((await lanePost(w, { task: 'T2', op: 'allow' })).status, 200);
+  assert.deepEqual(w.k().work.serial, ['T3']);
+  go('p3-sec');
+});
+
+test('Phase 3 (−): a ticket that is not working gets no buttons from whyOf (the routes would 409)', () => {
+  const { whyOf } = require('../lib/lanes');
+  const v = whyOf({ id: 't_x', state: 'blocked', work: { task: 'T1', tasks: [wtask('T1'), wtask('T2')], serial: ['T2'] } }, null);
+  assert.deepEqual(v, { top: 'off: the flow is not in its working step', tasks: {} });
+});
+
+test('Phase 3 Subagents for This Ticket (+/−): sets and clears ticket.subagents (one intervention row each); 5, 0, text and extra keys → 400, nothing written', async (t) => {
+  const w = await parent(t, { tasks: [task('T1')], sessions: T1Held('p3-sub') });
+  const sub = (b) => w.tbd.api('POST', `/api/tickets/${w.id}/subagents`, b);
+  assert.equal((await sub({ concurrent: 4 })).status, 200);
+  assert.deepEqual([w.k().subagents, ivRows(w)], [{ concurrent: 4 }, [['subagents', null]]]);
+  for (const bad of [{ concurrent: 5 }, { concurrent: 0 }, { concurrent: '2' }, { concurrent: 2, x: 1 }, {}]) assert.equal((await sub(bad)).status, 400, JSON.stringify(bad));
+  assert.deepEqual([w.k().subagents, ivRows(w).length], [{ concurrent: 4 }, 1]);
+  assert.equal((await sub({ concurrent: null })).status, 200);
+  assert.equal('subagents' in w.k(), false);
+  go('p3-sub');
+});

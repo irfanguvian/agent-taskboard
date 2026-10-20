@@ -41,11 +41,17 @@ const WT = path.join(ROOT, "it's the worktree");
 const TERMINAL = { bash_all_steps: false, folder_mcp: false, git_bridge: false, auto_mode: false, task_tickets: false, page_tools: false, approve_min: 10 };
 let tbd, ui, csrf;
 before(async () => {
+  // a real checkout: Open in Terminal runs the planted-config check on the worktree first (review HIGH 3)
+  write(path.join(WT, 'README.md'), 'shop\n');
+  git(WT, 'init', '-q', '-b', 'main');
+  git(WT, 'add', '.');
+  git(WT, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'init');
+  const base_sha = git(WT, 'rev-parse', 'HEAD');
   tbd = await startTbd({
     env: { TB_OSASCRIPT: FAKE, TB_PHASES_DIR: path.join(ROOT, 'no-phases') }, // no phase built: no run starts
     files: {
-      'tickets/t_held01/ticket.json': ticket('t_held01', { state: 'working', worktree: WT, lease: { phase: 'working', round: 1, gen: 2, log: 'runs/1.jsonl', exit: 'held', session: UUID } }),
-      'tickets/t_free01/ticket.json': ticket('t_free01', { state: 'working', worktree: WT, lease: { phase: 'working', round: 1, gen: 2, log: 'runs/1.jsonl', exit: 'paused', session: UUID } }),
+      'tickets/t_held01/ticket.json': ticket('t_held01', { state: 'working', worktree: WT, base_sha, lease: { phase: 'working', round: 1, gen: 2, log: 'runs/1.jsonl', exit: 'held', session: UUID } }),
+      'tickets/t_free01/ticket.json': ticket('t_free01', { state: 'working', worktree: WT, base_sha, lease: { phase: 'working', round: 1, gen: 2, log: 'runs/1.jsonl', exit: 'paused', session: UUID } }),
     },
   });
   fs.mkdirSync(path.join(ROOT, 'claude-real')); // ~/.claude a link to another folder, before page-tools reads its roots (once)
@@ -155,6 +161,13 @@ test('task 6.5 POST /api/tickets/:id/terminal: a held run → 202, osascript get
   const got = await until(() => argvs().length > start && argvs().slice(start), 10_000, 'osascript ran');
   assert.deepEqual(got, [['-e', 'on run argv', '-e', 'tell application "Terminal" to do script (item 1 of argv)', '-e', 'tell application "Terminal" to activate', '-e', 'end run',
     `cd '${ROOT}/it'\\''s the worktree' && claude --resume ${UUID}`]]);
+  // review HIGH 3: Claude config the run left in the worktree is loaded by his `claude --resume` outside the wall: 409, no osascript
+  write(path.join(WT, '.claude', 'settings.json'), '{"hooks":{}}\n');
+  const after = argvs().length;
+  const planted = await tbd.api('POST', '/api/tickets/t_held01/terminal', {}, csrf);
+  fs.rmSync(path.join(WT, '.claude'), { recursive: true });
+  assert.deepEqual([planted.status, planted.json], [409, { error: `t_held01: ${WT} has .claude/settings.json: agent-planted config, remove by hand` }]);
+  assert.equal(argvs().length, after, 'no osascript ran');
 });
 
 // default phases (code/working + planning built): flows can be made and assigned
@@ -188,6 +201,33 @@ test('task 5 GET /api/skills: user skill (folded description), enabled plugin sk
   assert.deepEqual((await own.api('GET', `/api/tickets/${f.json.ticket.id}`)).json.ticket.skills_asked, ['tdd', 'shop:deploy']);
   const none = await own.api('POST', '/api/flows', { text: 'no /nope skills here', kind: 'code' });
   assert.equal('skills_asked' in none.json.ticket, false);
+});
+
+test('GET /api/files: a git tag lists tracked files that match q (name or folder prefix first), never untracked or ignored ones; limit caps and sets more; unknown tag → 400', async (t) => {
+  const own = await startTbd();
+  t.after(() => own.stop());
+  const dir = repo('files-shop', { 'src/Cart.js': '', 'src/cart-util.js': '', 'docs/notes-cart.md': '', 'src/other.js': '', '.gitignore': 'secret.txt\n' });
+  write(path.join(dir, 'secret.txt'), 'x'); // ignored
+  write(path.join(dir, 'node_modules/cart/index.js'), 'x'); // untracked
+  assert.equal((await own.api('POST', '/api/tags', { name: 'sandbox/files', def: { type: 'git', path: dir, base: 'main' } })).status, 201);
+  const get = (q) => own.api('GET', `/api/files?tag=sandbox/files&${q}`);
+
+  const hit = await get('q=CART');
+  assert.deepEqual([hit.status, hit.json], [200, { files: ['src/Cart.js', 'src/cart-util.js', 'docs/notes-cart.md'], more: false }]);
+  assert.deepEqual((await get('q=secret')).json, { files: [], more: false });
+  assert.deepEqual((await get('q=node_modules')).json, { files: [], more: false });
+  assert.deepEqual((await get('q=src/&limit=2')).json, { files: ['src/Cart.js', 'src/cart-util.js'], more: true });
+  assert.equal((await own.api('GET', '/api/files?tag=sandbox/nope&q=a')).status, 400);
+
+  // a plain folder is walked: no dot-folders, no node_modules, no dot-files, no symlinks
+  const plain = path.join(ROOT, 'files-plain');
+  write(path.join(plain, 'src/app.js'), 'x');
+  write(path.join(plain, '.hidden/secret.js'), 'x');
+  write(path.join(plain, 'node_modules/dep/index.js'), 'x');
+  write(path.join(plain, '.env'), 'KEY=1');
+  fs.symlinkSync(path.join(plain, 'src/app.js'), path.join(plain, 'link.js'));
+  assert.equal((await own.api('POST', '/api/tags', { name: 'sandbox/plain', def: { type: 'folder', path: plain } })).status, 201);
+  assert.deepEqual((await own.api('GET', '/api/files?tag=sandbox/plain&q=')).json, { files: ['src/app.js'], more: false });
 });
 
 test('task 6.1 Start now: POST /api/flows {start: true} with a folder tag → started, planning; tb new --start without a tag → stays backlog, the line says why', async (t) => {

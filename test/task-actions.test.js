@@ -65,3 +65,14 @@ test('Phase 4 grantOk: another gen, branch or a file outside the grant → card;
   assert.equal(await ask({}), 'card', 'single use: the same push again is a card');
   assert.equal(scans, 6, 'every push that got past the folder check was leak-scanned');
 });
+
+test('Done while Continue in Terminal is still stopping the run (lease.pending) → 409 and the Task stays working; nothing is written onto a done ticket', async () => {
+  const store = require('../lib/store');
+  const id = 't_tact02';
+  fs.mkdirSync(path.join(home, 'tickets', id), { recursive: true });
+  fs.writeFileSync(path.join(home, 'tickets', id, 'ticket.json'), JSON.stringify({ id, type: 'ticket', kind: 'task', state: 'working', title: 'x', text: 'x' }));
+  store.init();
+  await store.updateTicket(id, (k) => ({ ...k, waiting: { reason: 'you' }, lease: { gen: 2, phase: 'working', exit: 'result', pending: { why: 'hold', after: 'hold' } } }));
+  await assert.rejects(require('../lib/task-actions').done(id, 'ui'), { status: 409, message: `${id}: a recovery (Continue in Terminal or Hand Back) is still running: try again in a moment` });
+  assert.equal(store.getTicket(id).state, 'working');
+});

@@ -92,12 +92,15 @@ const UI_ONLY = new Set([
   'GET /api/tickets/:id/feedback/:id', 'GET /api/tickets/:id/pass', // feedback file and pass preview
   // board-terminal-parity Phase 1, page-only (Page Tools): the 3-field tag form (the CLI has tb tag add), its folder list,
   // branches and the Mac folder dialog, Open in Terminal (the CLI is the terminal), the Goal box's / skill list
-  'POST /api/tags/quick', 'GET /api/folders/recent', 'POST /api/folders/branches', 'POST /api/pick-folder', 'POST /api/tickets/:id/terminal', 'GET /api/skills',
+  'POST /api/tags/quick', 'GET /api/folders/recent', 'POST /api/folders/branches', 'POST /api/pick-folder', 'POST /api/tickets/:id/terminal', 'GET /api/skills', 'GET /api/files',
+  // flow-form-parallel-terminal Phase 3, page-only (tb verbs suggested, not built): Allow Back to Parallel / Run in Parallel Next, Subagents for This Ticket
+  'POST /api/tickets/:id/lane', 'POST /api/tickets/:id/subagents',
 ]);
 const EXEMPT_KEYS = new Set(['pos', 'note', 'tag']); // reminder add: the UI drags for pos, edits for note and tag (m7-build.md)
+const EXEMPT_ROUTE_KEYS = new Set(['POST /api/flows fix_of']); // the New Flow form dropped Fix Of (flow-form-parallel-terminal Phase 1), tb new --fix-of stays: this route only
 
 // the gaps, as a sorted list of strings
-function gaps(cli, ui, { cliOnly = CLI_ONLY, uiOnly = UI_ONLY, exempt = EXEMPT_KEYS } = {}) {
+function gaps(cli, ui, { cliOnly = CLI_ONLY, uiOnly = UI_ONLY, exempt = EXEMPT_KEYS, exemptRoute = EXEMPT_ROUTE_KEYS } = {}) {
   const out = [];
   for (const k of cli.keys()) if (!ui.has(k) && !cliOnly.has(k)) out.push(`cli route ${k} has no UI`);
   for (const k of ui.keys()) if (!cli.has(k) && !uiOnly.has(k)) out.push(`ui route ${k} has no CLI`);
@@ -105,7 +108,7 @@ function gaps(cli, ui, { cliOnly = CLI_ONLY, uiOnly = UI_ONLY, exempt = EXEMPT_K
     const u = ui.get(k);
     if (!u) continue;
     for (const q of c.query) if (!u.query.has(q) && !exempt.has(q)) out.push(`${k}: query ${q} missing in the UI`);
-    if (c.body && u.body) for (const b of c.body) if (!u.body.has(b) && !exempt.has(b)) out.push(`${k}: body key ${b} missing in the UI`);
+    if (c.body && u.body) for (const b of c.body) if (!u.body.has(b) && !exempt.has(b) && !exemptRoute.has(`${k} ${b}`)) out.push(`${k}: body key ${b} missing in the UI`);
   }
   return out.sort();
 }
@@ -113,7 +116,7 @@ function gaps(cli, ui, { cliOnly = CLI_ONLY, uiOnly = UI_ONLY, exempt = EXEMPT_K
 test('UP1: every CLI route is in the UI or CLI-only, every UI route in the CLI or UI-only, shared routes share their query and body keys', () => {
   const cli = routesOf(read('lib/cli.js')), ui = routesOf(read('ui/app.js'));
   assert.ok(cli.size > 25 && ui.size > 25, `routes found: cli ${cli.size}, ui ${ui.size}`);
-  assert.ok(cli.get('POST /api/flows').body.has('fix_of') && ui.get('POST /api/flows').body.has('fix_of'), 'the extractor reads body keys on both sides');
+  assert.ok(cli.get('POST /api/flows').body.has('kind') && ui.get('POST /api/flows').body.has('kind'), 'the extractor reads body keys on both sides');
   assert.ok(ui.get('GET /api/tickets/:id/report').query.has('n') && ui.get('GET /api/tickets/:id/log').query.has('after'), 'and query keys');
   assert.deepEqual(gaps(cli, ui), []);
 });

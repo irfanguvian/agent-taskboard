@@ -178,7 +178,7 @@ test('P5c routes: CSRF on the cookie verbs, RO6 cookie scope-allow 401, answer d
   assert.equal((await tbd.api('GET', '/api/gc', undefined, { 'x-tb-token': undefined, cookie: (await tbd.unlock()) })).status, 401);
   const s = (await tbd.api('GET', '/api/state')).json;
   assert.deepEqual(Object.keys(s).sort(), ['calendar', 'flows', 'reminders', 'system']);
-  assert.deepEqual(Object.keys(s.flows[0]).sort(), ['id', 'kind', 'merged_at', 'rework', 'state', 'tag', 'title', 'updated_at', 'waiting']);
+  assert.deepEqual(Object.keys(s.flows[0]).sort(), ['clarify_class', 'id', 'kind', 'lease_exit', 'merged_at', 'rework', 'state', 'tag', 'title', 'updated_at', 'waiting']);
 });
 
 test('P5c reads: gates newest first, paged (default 20, 1-100, cursor n), ≤ 64 KB a page (a huge one cut to fit); a check log gunzipped as a stream (no link, no path out of gates/); interventions paged by cursor', async (t) => {

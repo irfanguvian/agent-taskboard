@@ -510,6 +510,16 @@ test('local copies: CLAUDE.local.md + .claude/settings.local.json copied fresh i
 });
 
 // ---- full-access-runs Phase 4: Skill + Agent, the subagent cap, the final_distinct knob -------------------------------
+test('Phase 3 Subagents for This Ticket: the ticket\'s own number is the cap in the process env and the settings env; none → the board\'s default', async () => {
+  const { DEFAULTS } = require('../lib/store');
+  const config = { ...CONFIG, subagents: DEFAULTS.subagents, models: { planning: DEFAULTS.models.planning }, max_turns: { planning: DEFAULTS.max_turns.planning },
+    liveness: { wall_min: { planning: 30 } } };
+  const own = await run({ phase: 'planning', config, resume: false, ticket: { subagents: { concurrent: 4 } } });
+  assert.deepEqual([own.d.env.CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS, settingsOf(own.ticketDir).env.CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS], ['4', '4']);
+  const dflt = await run({ phase: 'planning', config, resume: false });
+  assert.deepEqual([dflt.d.env.CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS, settingsOf(dflt.ticketDir).env.CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS], ['2', '2']);
+});
+
 test('Phase 4 planning: full access allows Skill + Agent (+ its 2.1.302 name Task; no --disallowedTools) with the default cap 2 (env + settings env); sandbox: no Agent, Skill only once a skill was copied', async () => {
   const { DEFAULTS } = require('../lib/store');
   const config = { ...CONFIG, subagents: DEFAULTS.subagents, models: { planning: DEFAULTS.models.planning }, max_turns: { planning: DEFAULTS.max_turns.planning },

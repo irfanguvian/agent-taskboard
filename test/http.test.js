@@ -250,6 +250,7 @@ test('Phase 8 POST /api/config: cookie without X-TB-CSRF → 403, with it → 20
   const hold = await own.api('POST', '/api/tickets/t_sbx001/hold', undefined, csrf);
   assert.deepEqual([hold.status, hold.json], [409, { error: 't_sbx001: no backlog run with a session in a worktree to pause' }]);
   for (const op of ['hold', 'handback', 'note']) assert.equal((await own.api('POST', `/api/tickets/t_sbx001/${op}`, op === 'note' ? { text: 'x' } : undefined, ui)).status, 403, `${op} without X-TB-CSRF`);
+  for (const [op, body] of [['lane', { op: 'allow', task: 't1' }], ['subagents', { concurrent: 2 }]]) assert.equal((await own.api('POST', `/api/tickets/t_sbx001/${op}`, body, ui)).status, 403, `${op} without X-TB-CSRF`);
   assert.equal((await own.api('POST', '/api/tickets/t_sbx001/note', { note: 'x' })).status, 400, 'body must be {text}');
   const note = (id, text) => own.api('POST', `/api/tickets/${id}/note`, { text }, csrf);
   const big = await note('t_sbx001', 'x'.repeat(10_001));

@@ -78,6 +78,11 @@ function walk(n, out = { text: [], attrs: [], tags: [] }) {
   return out;
 }
 
+// every node under n (preorder), and the ones whose data-role is r
+const flat = (n) => (n instanceof Object && Array.isArray(n.kids) ? [n, ...n.kids.flatMap(flat)] : []);
+const roles = (n, r) => flat(n).filter((x) => x.attrs?.['data-role'] === r);
+const textOf = (n) => walk(n).text.join(' ');
+
 test('XSS: agent strings in the P5 drawer (gate tail, why, file names, changes, question, notes, feedback, sha subject) render as text only', () => {
   assert.doesNotMatch(SRC, /innerHTML|outerHTML|insertAdjacentHTML|document\.write|new Function|\beval\(/, 'no HTML sink in app.js');
   const ctx = sandbox();
@@ -168,6 +173,151 @@ test('M5.2 C9: waiting qa_lock reads qa:<tag> on the card and in the drawer fact
   run(`drawerBody(${JSON.stringify(f)}, ${JSON.stringify({ ...f, qa: { n: 1, head: 'a' } })})`);
   const t = walk(drawer).text;
   assert.equal(t[t.indexOf('Waiting') + 1], 'qa:self/tb');
+});
+
+// 2026-10-20 (Irfan: "finished, still on working"): a Task waiting for Irfan reads Your Turn, not Working, and is not Running
+test('a Task waiting you reads "Your Turn" in its row and drawer head and is not Running; a Task mid-run still reads Working and is Running', () => {
+  const ctx = sandbox();
+  const run = (code) => vm.runInContext(code, ctx);
+  const drawer = new Node('dialog');
+  /** @type {any} */ (ctx.document).querySelector = (s) => (s === '#drawer' ? drawer : new Node('stub'));
+  // contract change (2026-10-20 review): a board row carries lease_exit (tbd's /api/state flows); Your Turn needs the run's end saved
+  const you = { id: 't_you001', title: 't', kind: 'task', tag: 'self/tb', state: 'working', lease_exit: 'result', waiting: { reason: 'you', since: '2026-10-20T05:41:14.678Z' } };
+  const busy = { ...you, id: 't_run001', waiting: null };
+  run(`state = { reminders: [], flows: ${JSON.stringify([you, busy])}, system: {}, calendar: {} }; ui.open = "t_you001";`);
+  const pillOf = (f) => { const t = walk(run(`flowRow(${JSON.stringify(f)})`)).text; return t[t.indexOf('task · #self/tb · ' + f.id) + 1]; };
+  assert.deepEqual([pillOf(you), pillOf(busy)], ['Your Turn', 'Working']);
+  assert.deepEqual([run(`isRunning(${JSON.stringify(you)})`), run(`isRunning(${JSON.stringify(busy)})`)], [false, true]);
+  // the run's end not saved yet: still Working and Running, not Needs You
+  const early = { ...you, id: 't_early1', lease_exit: null };
+  assert.deepEqual([pillOf(early), run(`isRunning(${JSON.stringify(early)})`), run(`needsYou(${JSON.stringify(early)})`)], ['Working', true, false]);
+  // the pill says it: the row does not repeat "waiting: your turn" / "waiting: close"
+  const close = { id: 't_cls001', title: 't', kind: 'code', tag: 'self/tb', state: 'final_gate', waiting: { reason: 'close' } };
+  for (const g of [you, close]) assert.ok(!textOf(run(`flowRow(${JSON.stringify(g)})`)).includes('waiting:'), `no second waiting line: ${g.id}`);
+  assert.ok(textOf(run(`flowRow(${JSON.stringify({ ...close, waiting: { reason: 'folder_busy' } })})`)).includes('waiting: folder busy'), 'a reason without its own pill keeps the line');
+  run(`drawerBody(${JSON.stringify(you)}, ${JSON.stringify({ ...you, lease: { phase: 'working', exit: 'result' } })})`);
+  const t = walk(drawer).text;
+  assert.equal(t[t.indexOf('task · #self/tb · t_you001') - 1], 'Your Turn', 'the drawer head pill');
+  // the board row is stale after fsm.move (waiting approve), the loaded ticket is not: the head follows the ticket
+  const stale = { id: 't_stl001', title: 't', kind: 'code', tag: 'self/tb', state: 'working', waiting: { reason: 'approve' } };
+  run(`drawerBody(${JSON.stringify(stale)}, ${JSON.stringify({ ...stale, waiting: null })})`);
+  const t2 = walk(drawer).text;
+  assert.equal(t2[t2.indexOf('code · #self/tb · t_stl001') - 1], 'Working');
+});
+
+// 2026-10-20 (Irfan: "when it blocks I can't decide anything, I need the raw log"): the Overview's first box says what he must do
+test('Blocked task_changed: the Needs You box sits under the step bar with the reason, the undo lines, the refusal in words and Resume / Restart / Cancel once each', () => {
+  const ctx = sandbox();
+  const run = (code) => vm.runInContext(code, ctx);
+  const drawer = new Node('dialog');
+  /** @type {any} */ (ctx.document).querySelector = (s) => (s === '#drawer' ? drawer : new Node('stub'));
+  const f = { id: 't_blk001', title: 't', kind: 'task', tag: 'self/tb', state: 'blocked', waiting: { reason: 'task_changed', why: 'changed: a.js (undo: git checkout -- a.js)\nnew: b.js (undo: rm b.js)' } };
+  // tbd's real shape for a refused start: exit crash, no pid, the start's own message in error
+  const k = { ...f, blocked_from: 'review', lease: { phase: 'working', started_at: '2026-10-20T05:00:00.000Z', exit: 'crash', pid: null, error: 'changed since the ticket started: a.js, b.js\nmore' } };
+  run(`state = { reminders: [], flows: [${JSON.stringify(f)}], system: {}, calendar: {} }; ui.open = "t_blk001";`);
+  run(`drawerBody(${JSON.stringify(f)}, ${JSON.stringify(k)})`);
+  const all = flat(drawer), box = roles(drawer, 'needs-you')[0];
+  assert.ok(box, 'the box');
+  assert.ok(all.indexOf(all.find((n) => n.attrs?.['aria-label'] === 'Flow steps')) < all.indexOf(box), 'after the step bar');
+  const inBox = textOf(box);
+  for (const x of ['undo: git checkout -- a.js', 'undo: rm b.js', 'Run refused. ', 'changed since the ticket started: a.js, b.js\nmore', 'ended: refused']) assert.ok(inBox.includes(x), `in the box: ${x}`);
+  assert.ok(!inBox.includes('ended: crash'), 'no raw exit word');
+  for (const r of ['resume', 'restart', 'cancel']) assert.deepEqual([roles(drawer, r).length, roles(box, r).length], [1, 1], `${r}: once, inside the box`);
+  const t = walk(drawer).text;
+  assert.ok(t.includes('Blocked in Review') && t.includes('Last run · ended: refused: changed since the ticket started: a.js, b.js'), 'blocked_from, not the lease phase; the run in words');
+  assert.ok(!t.join(' ').includes('Cancel and start a new Task'), 'old advice gone');
+  assert.equal(t[t.indexOf('task · #self/tb · t_blk001') - 1], 'Blocked');
+});
+
+// the words of "Last run" (Irfan: the raw log must never be needed to know how it ended): every exit tbd writes + the error shapes it stores
+test('lastRun: one plain phrase per exit (lib/stream EXITS + held), a crash with no pid is "refused", the first error line follows once', () => {
+  const run = (code) => vm.runInContext(code, sandbox());
+  const WORDS = { result: 'finished', crash: 'crashed', interrupted: 'stopped before it ended', stalled: 'stalled: no output', usage: 'paused: usage limit', paused: 'paused',
+    held: 'in your terminal', schema_fail: 'its answer was rejected', cancelled: 'cancelled', max_turns: 'hit the turn limit', refusal: 'the model refused', wall_cap: 'stopped: time cap' };
+  for (const e of [...require('../lib/stream').EXITS, 'held']) assert.ok(e in WORDS, `a phrase for ${e}`);
+  for (const [exit, word] of Object.entries(WORDS)) assert.equal(run(`lastRun(${JSON.stringify({ exit, pid: 4242 })})`), `ended: ${word}`, exit);
+  const last = (l) => run(`lastRun(${JSON.stringify(l)})`);
+  assert.equal(last({ exit: 'crash', pid: null, error: 'refusing to start: config planted by the agent\nsecond line' }), 'ended: refused: refusing to start: config planted by the agent');
+  assert.equal(last({ exit: 'crash', error: 'changed since the ticket started: a.js' }), 'ended: refused: changed since the ticket started: a.js');
+  assert.equal(last({ exit: 'crash', pid: 77, error: 'exit code 1' }), 'ended: crashed: exit code 1');
+  assert.equal(last({ exit: 'result', pid: 77, error: 'unit: 2 failing' }), 'ended: finished: unit: 2 failing', 'a red gate ends a run that finished');
+  assert.equal(last({ exit: 'schema_fail', pid: 77, error: 'status DONE needs a commit' }), 'ended: its answer was rejected: status DONE needs a commit');
+  assert.equal(last({ exit: 'crash', pid: null, pending: { why: 'usage' }, error: 'old' }), 'ended: refused', 'a recovering lease shows no error');
+  assert.equal(last({ exit: 'weird', pid: 1 }), 'ended: weird', 'an unknown word as it came');
+});
+
+test('Task asks from working (plan frozen): its questions and Open in Lavish show, not "No open questions found."; wait pills read in words and none is Running', () => {
+  const ctx = sandbox();
+  const run = (code) => vm.runInContext(code, ctx);
+  const drawer = new Node('dialog');
+  /** @type {any} */ (ctx.document).querySelector = (s) => (s === '#drawer' ? drawer : new Node('stub'));
+  const f = { id: 't_ask001', title: 't', kind: 'task', tag: 'self/tb', state: 'clarify' };
+  const k = { ...f, plan_hash: 'a'.repeat(64), round: 2, clarify_origin: { phase: 'working', class: 'questions' } };
+  run(`state = { reminders: [], flows: [${JSON.stringify(f)}], system: {}, calendar: {} }; ui.open = "t_ask001";
+    ui.plan = { kind: 'plan', summary: 's', steps: [], tasks: [] }; ui.round = { kind: 'questions', n: 2, phase: 'working', questions: [{ id: 'Q1', question: 'Which port?', why: 'w', options: ['a', 'b'], recommended: 'a' }] };`);
+  run(`drawerBody(${JSON.stringify(f)}, ${JSON.stringify(k)})`);
+  const t = walk(drawer).text;
+  assert.ok(t.includes('Which port?') && t.includes('Open in Lavish'), 'the questions and the lavish button');
+  assert.ok(!t.includes('No open questions found.'));
+  assert.ok(t.some((x) => x.includes('is the agent’s call')), 'a Task\'s ask from working: the agent decides what is left open, not "the planner"');
+  const pill = (x) => { const w = walk(run(`flowPill(${JSON.stringify(x)})`)).text; return w[0]; };
+  /** @type {[any, string, boolean][]} [flow, pill, Needs You] */ const cases = [[{ state: 'clarify' }, 'Questions', true], [{ state: 'clarify', clarify_class: 'questions' }, 'Questions', true],
+    [{ state: 'clarify', clarify_class: 'scope' }, 'Your Call', true], [{ state: 'plan_approval' }, 'Approve Plan', true],
+    [{ state: 'working', waiting: { reason: 'approve' } }, 'Approve Action', true], [{ state: 'working', waiting: { reason: 'blocked_action' } }, 'Action Blocked', true],
+    [{ state: 'review', waiting: { reason: 'manual' } }, 'Your Call', true], [{ state: 'working', waiting: { reason: 'needs_scope' } }, 'Your Call', true],
+    [{ state: 'final_gate', waiting: { reason: 'close' } }, 'Close or Push', true],
+    [{ state: 'plan_approval', waiting: { reason: 'setup' } }, 'Setting Up', false], // approved: tbd sets up for minutes, nothing is on Irfan
+    [{ state: 'plan_approval', waiting: { reason: 'setup_failed' } }, 'Approve Plan', true]];
+  for (const [x, word, you] of cases) {
+    const g = { id: 't_p', kind: 'code', ...x };
+    assert.deepEqual([pill(g), run(`needsYou(${JSON.stringify(g)})`), run(`isRunning(${JSON.stringify(g)})`)], [word, you, word === 'Setting Up'], word);
+  }
+});
+
+// the Needs You box for every wait on Irfan (review of the Needs You UX): one box, its actions once, nothing for a setup that runs by itself
+test('drawer: Approve Action cards, a manual / close wait and an unexplained block land in the one Needs You box; a setup wait has none and no Approve Plan', () => {
+  const ctx = sandbox();
+  const run = (code) => vm.runInContext(code, ctx);
+  const drawer = new Node('dialog');
+  /** @type {any} */ (ctx.document).querySelector = (s) => (s === '#drawer' ? drawer : new Node('stub'));
+  const draw = (f, k) => {
+    run(`state = { reminders: [], flows: [${JSON.stringify(f)}], system: {}, calendar: {} }; ui.open = ${JSON.stringify(f.id)};`);
+    run(`drawerBody(${JSON.stringify(f)}, ${JSON.stringify({ ...f, ...k })})`);
+    return [roles(drawer, 'needs-you'), walk(drawer).text];
+  };
+  const base = { title: 't', kind: 'code', tag: 'self/tb' };
+  // Approve Action: the card is inside the box, once
+  let [box, t] = draw({ ...base, id: 't_apv001', state: 'working', waiting: { reason: 'approve' } }, { approvals: [{ id: 'a1', status: 'pending', tool: 'Bash', input_text: 'rm -r build', reason: 'clean' }] });
+  assert.equal(box.length, 1);
+  assert.equal(t.filter((x) => x === 'Needs Your OK').length, 1, 'the cards once');
+  assert.ok(textOf(box[0]).includes('Needs Your OK') && roles(box[0], 'yes-a1').length === 1 && roles(drawer, 'yes-a1').length === 1, 'Yes Once inside the box, once');
+  // manual wait in an unbuilt phase: pass / send back inside the box, once
+  [box, t] = draw({ ...base, id: 't_man001', state: 'review', waiting: { reason: 'manual' } }, { work: {} });
+  assert.equal(box.length, 1);
+  assert.equal(t.filter((x) => x === 'Review: Your Call').length, 1);
+  assert.ok(textOf(box[0]).includes('Review: Your Call') && roles(box[0], 'pass').length === 1 && roles(box[0], 'rework').length === 1 && roles(drawer, 'pass').length === 1, 'pass and send back inside the box');
+  // waiting close: Close Flow, Push and Close, Push and the send-back box, once each, inside the box
+  run('ui.tagDefs = { "self/tb": { push: { remote: "mirror" }, ident: { name: "I", email: "i@example.com" } } };');
+  [box, t] = draw({ ...base, id: 't_cls001', state: 'final_gate', waiting: { reason: 'close' } }, { branch: 'tb/x', final: { sha: 'a'.repeat(40) }, work: {} });
+  assert.equal(box.length, 1);
+  assert.ok(t.some((x) => x.startsWith('Waits for close')) && textOf(box[0]).includes('Waits for close'), 'the wait text in the box');
+  for (const r of ['close-flow', 'push-close', 'push', 'rework-text']) assert.deepEqual([roles(box[0], r).length, roles(drawer, r).length], [1, 1], `${r}: once, inside the box`);
+  assert.equal(flat(drawer).filter((n) => n.attrs?.id === 'pu-h').length, 1, 'the Push section is not repeated below');
+  // a block WAIT has no text for: the wait's own why, as text, in the box
+  [box, t] = draw({ ...base, id: 't_blk002', state: 'blocked', waiting: { reason: 'interrupted', why: `the run was interrupted ${P}` } }, { blocked_from: 'working', lease: { phase: 'working', started_at: '2026-10-20T05:00:00.000Z', exit: 'interrupted', pid: 9 } });
+  assert.equal(box.length, 1);
+  assert.equal(roles(box[0], 'wait-why')[0]?.kids[0], `the run was interrupted ${P}`, 'the why in a pre inside the box');
+  assert.ok(t.includes('Blocked in Working') && t.includes('Last run · ended: stopped before it ended'));
+  // setup: nothing waits on Irfan: no box, no Approve Plan, the head says Setting Up
+  [box, t] = draw({ ...base, id: 't_set001', state: 'plan_approval', waiting: { reason: 'setup' } }, {});
+  assert.equal(box.length, 0, 'no box');
+  assert.ok(t.includes('Setting Up') && !t.includes('Approve Plan') && !t.includes('Needs You'));
+  // a stale board row after fsm.move: the loaded ticket decides
+  [box] = draw({ ...base, id: 't_stl002', state: 'working', waiting: { reason: 'approve' } }, { waiting: null });
+  assert.equal(box.length, 0);
+  // a family row uses the same pill words
+  run(`state.flows = [{ id: 't_kid001', title: 'kid', kind: 'code', state: 'plan_approval', waiting: { reason: 'setup' } }]`);
+  assert.ok(textOf(run(`family({ children: ['t_kid001'] })`)).includes('Setting Up'));
 });
 
 test('XSS: M5.3 push state, tag ident and the Push view (git why, ident name) render as text only; Push disabled without the tag ident', () => {
@@ -519,7 +669,7 @@ test('UX5: Older at review / QA / final n=2 asks n=1; at n=1 Older has disabled;
   assert.equal(byRole(run('finalView("t_p1", { fixes: 0 })'), 'final-older').attrs.disabled, '', 'final n=1');
 });
 
-test('UX6: the flow sheet with title + fix-of posts {text, title, kind, tag, fix_of} once; fix-of "None" leaves the key out; an empty goal posts nothing', async () => {
+test('UX6: the flow sheet with title posts {text, title, kind, tag} once; an empty goal posts nothing; no Fix Of field (contract change)', async () => {
   const sheet = new Node('form'), scrim = new Node('div');
   const ctx = sandbox({ '#sheet .sheet': sheet, '#sheet': scrim });
   const run = (code) => vm.runInContext(code, ctx);
@@ -527,23 +677,21 @@ test('UX6: the flow sheet with title + fix-of posts {text, title, kind, tag, fix
   // board-terminal-parity 6.2: the kinds are the built ones tbd names (system.kinds)
   run(`state = { reminders: [], flows: [{ id: "t_a1", title: "Earlier flow", state: "done" }], system: { kinds: ["code"] }, calendar: {} }; ui.tags = ["acme/api"];`);
   run('openNew("flow")'); // calm UI: the New sheet (N / New) replaced the composer line and its More… sheet
-  assert.deepEqual(find(sheet, (x) => x.tag === 'label').map((l) => txt(l)), ['Goal for the Agent', 'Short Title', 'Kind', 'Tag', 'Fix Of',
+  assert.deepEqual(find(sheet, (x) => x.tag === 'label').map((l) => txt(l)), ['Goal for the Agent', 'Short Title', 'Kind', 'Tag',
     'Locked run: for untrusted text (an issue, a pasted log). Fewer tools, slower.', 'Start Now']); // board-terminal-parity 6.3 words, 6.1 Start Now
   const ids = find(sheet, (x) => x.tag === 'label').map((l) => l.attrs.for);
-  assert.deepEqual(ids.map((id) => find(sheet, (x) => x.attrs.id === id).length), [1, 1, 1, 1, 1, 1, 1], 'each label points at one control');
-  assert.deepEqual(find(byName(sheet, 'fix_of'), (x) => x.tag === 'option').map((o) => o.attrs.value), ['', 't_a1']);
+  assert.deepEqual(ids.map((id) => find(sheet, (x) => x.attrs.id === id).length), [1, 1, 1, 1, 1, 1], 'each label points at one control');
+  assert.deepEqual(find(byName(sheet, 'tag'), (x) => x.tag === 'option').map((o) => o.attrs.value), ['', 'acme/api', '+add-tag'], 'Add Tag… is the last option');
   byName(sheet, 'text').value = 'Make the list sortable';
   byName(sheet, 'tag').value = 'acme/api';
   byName(sheet, 'title').value = 'Sortable list';
-  byName(sheet, 'fix_of').value = 't_a1';
   await sheet.onsubmit({ preventDefault() {} });
   assert.deepEqual(n.calls.filter((c) => c.method === 'POST').map((c) => [c.url, c.body]),
-    [['/api/flows', { text: 'Make the list sortable', title: 'Sortable list', kind: 'code', tag: 'acme/api', fix_of: 't_a1' }]]);
+    [['/api/flows', { text: 'Make the list sortable', title: 'Sortable list', kind: 'code', tag: 'acme/api' }]]);
 
-  byName(sheet, 'fix_of').value = '';
   byName(sheet, 'title').value = '';
   await sheet.onsubmit({ preventDefault() {} });
-  assert.deepEqual(n.calls.filter((c) => c.method === 'POST').at(-1).body, { text: 'Make the list sortable', kind: 'code', tag: 'acme/api' }, 'no title, no fix_of key');
+  assert.deepEqual(n.calls.filter((c) => c.method === 'POST').at(-1).body, { text: 'Make the list sortable', kind: 'code', tag: 'acme/api' }, 'no title key');
   byName(sheet, 'sandbox').checked = true; // full access is the default; the box asks for today's locked run (tb new --sandbox)
   await sheet.onsubmit({ preventDefault() {} });
   assert.deepEqual(n.calls.filter((c) => c.method === 'POST').at(-1).body, { text: 'Make the list sortable', kind: 'code', tag: 'acme/api', sandbox: true }, 'sandbox box → sandbox: true');
@@ -634,6 +782,109 @@ test('calm UI: New Flow posts once while its add is in flight (a second submit, 
   assert.equal(posts.length, 2, 'the add landed: the next submit posts');
   land();
   await again;
+});
+
+test('Add Tag from the New Flow sheet: the Add Tag… option opens Add Tag and the Tag stays on its old value; Cancel brings the New sheet back with goal, title and tag kept', async () => {
+  const sheet = new Node('form'), scrim = new Node('div');
+  const ctx = sandbox({ '#sheet .sheet': sheet, '#sheet': scrim });
+  const run = (code) => vm.runInContext(code, ctx);
+  trust(ctx);
+  run('state = { reminders: [], flows: [], system: { kinds: ["code"] }, calendar: {} }; ui.tags = ["acme/api", "acme/web"]; ui.tagsLoaded = true;');
+  run('openNew("flow")');
+  byName(sheet, 'text').value = 'Make the list sortable';
+  byName(sheet, 'title').value = 'Sortable';
+  byName(sheet, 'tag').value = 'acme/web';
+  for (const h of byName(sheet, 'tag').handlers.change) h({ target: byName(sheet, 'tag') }); // the user picked acme/web
+  byName(sheet, 'tag').value = '+add-tag';
+  for (const h of byName(sheet, 'tag').handlers.change) h({ target: byName(sheet, 'tag'), stopImmediatePropagation() {} });
+  assert.equal(txt(find(sheet, (x) => x.attrs.id === 'sheet-title')[0]), 'Add Tag', 'Add Tag replaced the New sheet');
+  byRole(sheet, 'sheet-cancel').handlers.click[0]({});
+  await tick();
+  assert.equal(txt(find(sheet, (x) => x.attrs.id === 'sheet-title')[0]), 'New Flow', 'Cancel: New Flow is back');
+  assert.deepEqual(['text', 'title', 'tag'].map((k) => byName(sheet, k).value), ['Make the list sortable', 'Sortable', 'acme/web'], 'fields kept, the old tag');
+});
+
+test('Add Tag from the New Flow sheet, Page Tools on: Add posts the tag and New Flow comes back on it with goal, title, kind, locked run and Start Now kept; no request carries the +add-tag sentinel', async () => {
+  const sheet = new Node('form'), scrim = new Node('div');
+  const isOpen = new Set();
+  /** @type {any} */ (scrim).classList = { add: (c) => isOpen.add(c), remove: (c) => isOpen.delete(c), contains: (c) => isOpen.has(c) };
+  const ctx = sandbox({ '#sheet .sheet': sheet, '#sheet': scrim });
+  const run = (code) => vm.runInContext(code, ctx);
+  const n = trust(ctx, {
+    'GET /api/folders/recent': { status: 200, json: { folders: [] } },
+    'POST /api/folders/branches': { status: 200, json: { type: 'git', branches: ['main', 'dev'], current: 'main' } },
+    'POST /api/tags/quick': { status: 200, json: { tag: { name: 'acme/new' } } },
+    'GET /api/tags': { status: 200, json: { tags: { 'acme/api': { path: '/x/api' }, 'acme/new': { path: '/x/new' } } } },
+  });
+  run('state = { reminders: [], flows: [], system: { kinds: ["code", "research"] }, calendar: {} }; ui.cfg = { config: { terminal: { page_tools: true } } }; ui.tags = ["acme/api"]; ui.tagsLoaded = true;');
+  run('openNew("flow")');
+  byName(sheet, 'text').value = 'Make the list sortable';
+  byName(sheet, 'title').value = 'Sortable';
+  byName(sheet, 'kind').value = 'research';
+  byName(sheet, 'sandbox').checked = true;
+  byName(sheet, 'start').checked = false;
+  byName(sheet, 'tag').value = '+add-tag';
+  for (const h of byName(sheet, 'tag').handlers.change) h({ target: byName(sheet, 'tag'), stopImmediatePropagation() {} });
+  assert.equal(txt(find(sheet, (x) => x.attrs.id === 'sheet-title')[0]), 'Add Tag');
+  byName(sheet, 'name').value = 'acme/new';
+  byName(sheet, 'path').value = '/x/new';
+  await sheet.onsubmit({ preventDefault() {} });
+  await tick();
+  assert.equal(txt(find(sheet, (x) => x.attrs.id === 'sheet-title')[0]), 'New Flow', 'Add: New Flow is back');
+  assert.deepEqual(['text', 'title', 'kind', 'tag'].map((k) => byName(sheet, k).value), ['Make the list sortable', 'Sortable', 'research', 'acme/new']);
+  assert.deepEqual(['sandbox', 'start'].map((k) => byName(sheet, k).attrs.checked !== undefined), [true, false], 'the stub reads a checked box as an attribute');
+  assert.deepEqual(n.calls.filter((c) => c.method === 'POST').map((c) => [c.url, c.body]), [
+    ['/api/folders/branches', { path: '/x/new' }],
+    ['/api/tags/quick', { name: 'acme/new', path: '/x/new', base: 'main' }],
+  ]);
+  assert.ok(n.calls.every((c) => !c.url.includes('%2Badd-tag') && !c.url.includes('+add-tag') && !JSON.stringify(c.body ?? '').includes('add-tag')), 'the sentinel never reaches a request');
+});
+
+test('@ in the Goal box: fast typing makes one GET /api/files for the last word; a late older reply is ignored; a pick inserts @path and a path with a space is quoted', async () => {
+  const sheet = new Node('form');
+  const ctx = /** @type {any} */ (sandbox({ '#sheet .sheet': sheet, '#sheet': new Node('div') }));
+  const run = (code) => vm.runInContext(code, ctx);
+  const timers = [];
+  ctx.setTimeout = (fn) => timers.push(fn);
+  ctx.clearTimeout = (id) => { timers[id - 1] = null; };
+  const fire = async () => { for (const f of timers.splice(0)) f?.(); await tick(); }; // not awaited: a read waits for its reply
+  const files = {}; // q → resolve(reply)
+  const urls = [];
+  ctx.fetch = (url) => {
+    urls.push(url);
+    if (!url.startsWith('/api/files')) return Promise.resolve({ ok: true, status: 200, json: async () => ({}) });
+    return new Promise((res) => { files[new URL(url, 'http://x').searchParams.get('q')] = (reply) => res({ ok: true, status: 200, json: async () => reply }); });
+  };
+  vm.runInContext('trusted = true; ui.csrf = "tok";', ctx);
+  run('state = { reminders: [], flows: [], system: { kinds: ["code"] }, calendar: {} }; ui.tags = ["acme/web"]; ui.tagsLoaded = true;');
+  run('openNew("flow")');
+  const ta = byName(sheet, 'text'), list = find(sheet, (x) => x.attrs.id === 'skill-list')[0];
+  ta.removeAttribute = (k) => delete ta.attrs[k]; // the stub Node has none of these
+  ta.setSelectionRange = (a, b) => { ta.selectionStart = a; ta.selectionEnd = b; };
+  byName(sheet, 'tag').value = 'acme/web';
+  const type = (v) => { ta.value = v; ta.selectionStart = ta.selectionEnd = v.length; for (const h of ta.handlers.input) h({}); };
+  type('go @c');
+  type('go @ca');
+  await fire();
+  assert.deepEqual(urls.filter((u) => u.startsWith('/api/files')), ['/api/files?tag=acme%2Fweb&q=ca'], 'one read, for the last word');
+  type('go @car');
+  await fire();
+  files.car({ files: ['src/Cart.js', 'src/my cart.js'], more: true });
+  await tick();
+  files.ca({ files: ['src/old.js'], more: false }); // the older read lands late
+  await tick();
+  const opts = find(list, (x) => x.attrs.role === 'option');
+  assert.deepEqual(opts.map((o) => txt(o)), ['@src/Cart.js', '@src/my cart.js', 'More files: type more of the name.']);
+  opts[0].handlers.click[0]({});
+  assert.equal(ta.value, 'go @src/Cart.js ');
+  type('go @car');
+  await fire(); // same word again: no new read, the kept list answers
+  type('go @carx');
+  await fire();
+  files.carx({ files: ['src/my cart.js'], more: false });
+  await tick();
+  find(list, (x) => x.attrs.role === 'option')[0].handlers.click[0]({});
+  assert.equal(ta.value, 'go @"src/my cart.js" ');
 });
 
 test('calm UI: the Overdue highlight filters Reminders to open reminders due before today (never a done one); a search narrows it; the chip clears it', () => {
@@ -794,7 +1045,7 @@ test('Phase 9 held run box: "cd <shq(worktree)> && claude --resume <uuid>" arriv
   assert.deepEqual(['held', 'handback'].map((r) => !!byRole(cancelled, r)), [false, false], 'a cancelled flow keeps no Hand Back');
   const squashed = run(`el('div', null, ...runBox("t_hold01", ${JSON.stringify({ state: 'final_gate', waiting: { reason: 'close' }, worktree: wt, lease: { phase: 'final_gate', log: 'runs/1.jsonl', exit: 'result', session: uuid } })}))`);
   assert.equal(byRole(squashed, 'hold'), undefined, 'squashed, waiting close: no Pause and Copy');
-  const live = box({ session: uuid, lstart: 'x' });
+  const live = box({ session: uuid, lstart: 'x', pid: 42 });
   assert.deepEqual(['hold', 'resume', 'restart', 'note-text'].map((r) => !!byRole(live, r)), [true, true, true, true], 'a live run: Pause and Copy, the note box');
   noMarkup(walk(held));
 
@@ -812,4 +1063,90 @@ test('Phase 9 held run box: "cd <shq(worktree)> && claude --resume <uuid>" arriv
   const cmd = (v) => JSON.parse(run(`JSON.stringify(buildCmd("tag-add", ${JSON.stringify(v)}))`));
   assert.deepEqual(cmd({ name: 'acme/api', 'skills-off': 'caveman,ponytail' }), { cmd: "tb tag add 'acme/api' --skills-off 'caveman,ponytail'", errors: {} });
   assert.ok(cmd({ name: 'acme/api', 'skills-off': 'a b;rm' }).errors['skills-off']);
+});
+
+// Continue in Terminal: one button (role hold) for a running agent-phase flow (Overview part), a Task's Your Turn card and
+// a Blocked flow's Run section; none for a done / cancelled flow, nor a Blocked start that never spawned fresh. One click
+// = hold; once held with no recovery pending and Page Tools on, the page posts "terminal" once by itself.
+test('Continue in Terminal: the button shows for running, Your Turn and Blocked flows, not done / cancelled; a click holds, then Terminal opens once by itself', async () => {
+  const ctx = sandbox();
+  const run = (code) => vm.runInContext(code, ctx);
+  run('state = { reminders: [], flows: [], system: {}, calendar: {} };');
+  const uuid = '11111111-2222-4333-8444-555555555555', wt = '/tmp/w';
+  const tk = (over) => JSON.stringify({ state: 'working', worktree: wt, lease: { phase: 'working', session: uuid, pid: 42, log: 'runs/1.jsonl' }, ...over });
+  const holdIn = (code) => byRole(run(code), 'hold');
+  const running = holdIn(`el('div', null, contSec("t_c1", ${tk()}, false))`);
+  assert.equal(txt(running), 'Continue in Terminal');
+  const you = JSON.parse(tk({ kind: 'task', waiting: { reason: 'you' }, task_result: {}, lease: { phase: 'working', session: uuid, pid: 42, exit: 'result', log: 'runs/1.jsonl' } }));
+  assert.equal(txt(byRole(run(`youCard("t_c1", ${JSON.stringify(you)})`), 'hold')), 'Continue in Terminal', 'Your Turn card');
+  assert.equal(run(`contSec("t_c1", ${JSON.stringify(you)}, true)`), null, 'the card holds the button: no second one in the Overview');
+  const blockedK = { state: 'blocked', blocked_from: 'working', round: 2, worktree: wt, lease: { phase: 'working', round: 1, session: uuid, pid: 42, exit: 'crash', log: 'runs/1.jsonl' } }; // fsm.move bumps the round into Blocked: the run's + 1
+  assert.equal(txt(byRole(run(`el('div', null, ...runBox("t_c1", ${JSON.stringify(blockedK)}))`), 'hold')), 'Continue in Terminal', 'Blocked');
+  const never = { ...blockedK, lease: { ...blockedK.lease, pid: null } };
+  assert.equal(byRole(run(`el('div', null, ...runBox("t_c1", ${JSON.stringify(never)}))`), 'hold'), undefined, 'Blocked, never spawned, fresh: no session to continue');
+  assert.ok(byRole(run(`el('div', null, ...runBox("t_c1", ${JSON.stringify({ ...never, lease: { ...never.lease, resumed: true } })}))`), 'hold'), 'Blocked, never spawned but a resume: its session exists');
+  // the server's refusals, mirrored: Blocked in review | qa, an equal round (a run of another visit), a lane, a run never started in a plain state
+  const noHold = (k, why) => assert.equal(byRole(run(`el('div', null, ...runBox("t_c1", ${JSON.stringify(k)}))`), 'hold'), undefined, why);
+  noHold({ ...blockedK, blocked_from: 'review', lease: { ...blockedK.lease, phase: 'review' } }, 'Blocked in review');
+  noHold({ ...blockedK, round: 1 }, 'Blocked with the run\'s own round');
+  noHold({ ...JSON.parse(tk()), lane_of: { id: 't_par001', task: 'T2' } }, 'a lane');
+  noHold({ ...JSON.parse(tk()), lease: { phase: 'working', session: uuid, log: 'runs/1.jsonl', exit: 'crash' } }, 'never started, no resume, even in a plain state');
+  noHold({ ...JSON.parse(tk()), work: { task: 'T2' } }, 'the run is of another task than the flow\'s');
+  for (const state of ['done', 'cancelled']) {
+    assert.equal(run(`contSec("t_c1", ${tk({ state })}, false)`), null, `${state}: no Overview part`);
+    assert.equal(holdIn(`el('div', null, ...runBox("t_c1", ${tk({ state })}))`), undefined, `${state}: no button in the Run section`);
+  }
+
+  // one click = hold (the flow is remembered); held + Page Tools: terminal posted once, never on a later render
+  const n = trust(ctx);
+  running.handlers.click[0]();
+  await tick();
+  assert.deepEqual(n.calls.filter((c) => c.method === 'POST').map((c) => c.url), ['/api/tickets/t_c1/hold']);
+  run('ui.cfg = { config: { terminal: { page_tools: true } } }; ui.cont.add("t_c1");');
+  const heldK = tk({ lease: { phase: 'working', session: uuid, pid: 42, exit: 'held', log: 'runs/1.jsonl' } });
+  run(`heldBox("t_c1", ${heldK})`);
+  await tick();
+  run(`heldBox("t_c1", ${heldK})`);
+  await tick();
+  assert.deepEqual(n.calls.filter((c) => c.method === 'POST').map((c) => c.url), ['/api/tickets/t_c1/hold', '/api/tickets/t_c1/terminal']);
+  run('ui.cfg = { config: { terminal: { page_tools: false } } }; ui.cont.add("t_c2");');
+  run(`heldBox("t_c2", ${heldK})`);
+  await tick();
+  assert.equal(n.calls.filter((c) => c.url.endsWith('/t_c2/terminal')).length, 0, 'Page Tools off: only the resume line shows');
+  assert.equal(run('ui.cont.has("t_c2")'), false, 'the click is used up on the first held render, Page Tools or not: a later hold never opens Terminal by itself');
+});
+
+test('XSS: Phase 3 parallel badges, reasons and buttons render as text; Allow Back / Run Next show for the right badge; Subagents warns at 3 and 4 only', () => {
+  const ctx = sandbox();
+  const run = (code) => vm.runInContext(code, ctx);
+  const drawer = new Node('dialog');
+  /** @type {any} */ (ctx.document).querySelector = (s) => (s === '#drawer' ? drawer : new Node('stub'));
+  const role = (n, r) => (n?.attrs?.['data-role'] === r ? n : (n?.kids ?? []).map((x) => role(x, r)).find(Boolean));
+  const f = { id: 't_xss002', title: 't', kind: 'code', tag: 'acme/api', state: 'working' };
+  const task = (id, over = {}) => ({ id, status: 'pending', attempt: 0, blocked_by: [], ...over });
+  const k = (sub) => ({ ...f, ...(sub && { subagents: { concurrent: sub } }), work: { task: 'T1', serial: ['T3', 'T4'], tasks: [task('T1'), task('T2'), task('T3'), task('T4'), task('T5'), task('T6')] },
+    parallel: { top: `on, up to 1 extra at once ${P}`, tasks: { T2: { badge: 'can', next: false }, T3: { badge: 'one', why: `it came back ${P}`, serial: true, security: false },
+      T4: { badge: 'one', why: 'security', serial: true, security: true }, T5: { badge: 'can', next: true }, T6: { badge: 'one', why: 'it shares a file' } } } });
+  run(`state = { reminders: [], flows: [${JSON.stringify(f)}], system: {}, calendar: {} }; ui.open = "t_xss002"; ui.cfg = { config: { subagents: { concurrent: 2 } } };
+    ui.plan = { tasks: [{ id: "T1", title: "one" }, { id: "T2", title: ${JSON.stringify(`two ${P}`)} }, { id: "T3", title: "three" }, { id: "T4", title: "four" }, { id: "T5", title: "five" }, { id: "T6", title: "six" }] };`);
+  run(`drawerBody(${JSON.stringify(f)}, ${JSON.stringify(k(0))})`);
+  const w = walk(drawer);
+  assert.ok(w.tags.every((t) => !['img', 'script', 'iframe', 'object'].includes(t)), `no element from a payload: ${w.tags}`);
+  assert.deepEqual(w.attrs.filter((a) => /^(on\w+|src|srcdoc|formaction|href)=/i.test(a)), [], 'no payload in a handler, src or link attribute');
+  for (const s of [`on, up to 1 extra at once ${P}`, `One at a time: it came back ${P}`, 'Can run in parallel']) assert.ok(w.text.includes(s), `as text: ${s}`);
+  const li = (x) => (function find(n) { return n?.attrs?.['data-task'] === x ? n : (n?.kids ?? []).map(find).find(Boolean); })(drawer);
+  const rolesIn = (n) => (n?.attrs?.['data-role'] ? [n.attrs['data-role']] : []).concat((n?.kids ?? []).flatMap(rolesIn));
+  assert.deepEqual(['T2', 'T3', 'T4', 'T5', 'T6'].map((x) => rolesIn(li(x))), [['lane-next:T2'], ['lane-allow:T3'], [], [], []],
+    'Run Next only on a can row not yet picked; Allow only on a plain serial row (not security, not a gate-only reason)');
+  assert.ok(!role(drawer, 'subagents-warn'), 'default 2 does not warn');
+  for (const n of [3, 4]) {
+    run(`drawerBody(${JSON.stringify(f)}, ${JSON.stringify(k(n))})`);
+    assert.ok(role(drawer, 'subagents-warn'), `${n} warns`);
+    assert.equal(role(drawer, 'subagents').value, String(n), `${n} is the selected option`);
+  }
+  run(`ui.cfg = { config: { subagents: { concurrent: 3 } } }; drawerBody(${JSON.stringify(f)}, ${JSON.stringify(k(0))})`);
+  assert.deepEqual([role(drawer, 'subagents').value, !!role(drawer, 'subagents-warn')], ['', true], 'no own pick: the default 3 warns too');
+  run('ui.cfg = { config: { subagents: { concurrent: 2 } } }');
+  run(`drawerBody(${JSON.stringify(f)}, ${JSON.stringify(k(2))})`);
+  assert.equal(role(drawer, 'subagents-warn'), undefined, '2 does not warn');
 });

@@ -112,6 +112,8 @@
 .switch-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; cursor: pointer; }
 .switch-row > span { display: grid; gap: 2px; min-width: 0; }
 .sandbox, .held, .note-box { display: grid; gap: 8px; margin-top: 16px; }
+.par-list { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 8px; }
+.par-list > li { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
 .held > h4, .note-box > h4 { margin: 0; }
 .pick { display: inline-flex; align-items: center; gap: 8px; color: var(--fg-muted); font: 500 var(--label) var(--font); }
 .pick select { width: auto; min-height: var(--ctl-sm); }
@@ -314,3 +316,6 @@
   .ftable tr:not(.rdetail) td:nth-child(3)::after { content: " confidence"; }
   .insp .ftable tr.closed td:not(:first-child):not(:last-child) { display: none; } /* a closed finding keeps only its id and how */
 }
+
+/* the Needs You box (a foundation .card): a butter edge, its parts sit inside it */
+.needs { border-color: var(--butter); align-content: start; }
