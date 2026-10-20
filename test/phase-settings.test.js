@@ -392,3 +392,59 @@ test('gitProfile: the run wall for tb-git (real sandbox-exec + real git): ssh ke
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+// Phase 4 Own Worktree, design test 8 (wall contract, pure; the lists = design 3c, measured under real claude in step 0b):
+// a worktree Task's working run writes <common> minus the 3c rows (both layers) and each sibling's git folder; planning
+// keeps the whole <common> deny; the tag's .learning gets the planted-name and .git denies in any kind's working run
+test('phase-settings Phase 4 tree walls: working → allowWrite <common>, exactly the 3c rows in both layers, its commit paths writable; planning → <common> denied whole; a sibling name with a " stops the run; .learning planted + .git denies in working (any kind); My Folder gets none of it', () => {
+  const { fullAccess } = require('../lib/phase-settings');
+  const wt = `${H}/worktrees/t_tree08`, repo = '/u/code/repo', C = `${repo}/.git`, L = `${repo}/.learning`;
+  const ctx = { ...CTX, WORKTREE: wt, TAG_PATH: wt, TAG_GIT: C, CLONE: false, TREE: true, TREE_OTHERS: ['sib1'], NODE_MODULES: false, ENV_FILES: [] };
+  const fa = (phase) => ({ phase, learning: L, wall: true, worktree: wt });
+  const w = fullAccess(render('task', 'working', ctx), fa('working'));
+  const rows = ['config', 'hooks', 'info', 'modules', 'worktrees/*/config.worktree', 'worktrees/*/commondir', 'worktrees/*/gitdir', 'refs/replace',
+    'HEAD', 'index', 'ORIG_HEAD', 'logs/HEAD', 'rebase-merge', 'rebase-apply', 'sequencer', 'objects/info', 'shallow', 'worktrees/*/modules', 'worktrees/sib1'].map((x) => `${C}/${x}`);
+  const f = w.sandbox.filesystem, sorted = (a) => [...new Set(a)].sort();
+  assert.ok(f.allowWrite.includes(C), 'allowWrite <common>');
+  assert.deepEqual(sorted(w.permissions.deny.filter((r) => r.startsWith(`Edit(/${C}`))), sorted(rows.flatMap((p) => [`Edit(/${p})`, `Edit(/${p}/**)`])), 'Edit rows on <common>: exactly 3c');
+  assert.deepEqual(sorted(f.denyWrite.filter((p) => p.startsWith(`${C}`))), sorted(rows), 'denyWrite rows on <common>: exactly 3c');
+  assert.deepEqual([w.permissions.deny.includes(`Edit(/${wt}/.git)`), f.denyWrite.includes(`${wt}/.git`)], [true, true], 'the gitfile');
+  const covers = (r, p) => new RegExp(`^${r.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*\*/g, '\0').replace(/\*/g, '[^/]*').replace(/\0/g, '.*')}(/.*)?$`).test(p);
+  const denied = (s, p) => s.sandbox.filesystem.denyWrite.some((r) => covers(r, p)) || s.permissions.deny.some((r) => { const m = /^Edit\(\/(\/.*)\)$/.exec(r); return !!m && covers(m[1], p); });
+  for (const p of ['worktrees/t_tree08/index', 'worktrees/t_tree08/HEAD', 'worktrees/t_tree08/ORIG_HEAD', 'worktrees/t_tree08/logs/HEAD', 'objects/ab/cdef', 'objects/pack/p.pack',
+    'refs/heads/tb/t_tree08', 'refs/remotes/origin/tb/t_tree08', 'logs/refs/heads/tb/t_tree08', 'packed-refs'].map((x) => `${C}/${x}`)) assert.equal(denied(w, p), false, `working: ${p} writable (the agent commits)`);
+  for (const p of [...rows.map((r) => r.replace('*', 't_tree08')), `${C}/worktrees/sib1/HEAD`, `${wt}/.git`]) assert.equal(denied(w, p), true, `working: ${p} denied`);
+  const p = fullAccess(render('task', 'planning', ctx), fa('planning'));
+  assert.deepEqual([p.sandbox.filesystem.denyWrite.includes(C), p.permissions.deny.includes(`Edit(/${C}/**)`), (p.sandbox.filesystem.allowWrite ?? []).includes(C)], [true, true, false], 'planning: <common> whole');
+  assert.throws(() => render('task', 'working', { ...ctx, TREE_OTHERS: ['sib1', 'a"b'] }), (/** @type {any} */ e) => e.code === 'PLANTED' && /^a worktree of this repo has a name tbd cannot wall \("a\\"b"\): rename it with git worktree move$/.test(e.message));
+  // .learning (design 3c/3e), any kind's working run; planning denies it whole
+  const lrows = [...['.claude/**', 'CLAUDE.md', 'CLAUDE.local.md', '.mcp.json', 'AGENTS.md'].flatMap((x) => [`${L}/${x}`, `${L}/**/${x}`]), `${L}/.git`, `${L}/.git/**`, `${L}/**/.git`, `${L}/**/.git/**`];
+  const lwrite = [...['.claude', 'CLAUDE.md', 'CLAUDE.local.md', '.mcp.json', 'AGENTS.md'].flatMap((x) => [`${L}/${x}`, `${L}/**/${x}`]), `${L}/.git`, `${L}/**/.git`];
+  for (const [k, s] of [['task tree', w], ['code', fullAccess(render('code', 'working', CTX), fa('working'))]]) {
+    assert.deepEqual(sorted(s.permissions.deny.filter((r) => r.startsWith(`Edit(/${L}/`))), sorted(lrows.map((x) => `Edit(/${x})`)), `${k}: .learning Edit denies`);
+    assert.deepEqual(sorted(s.sandbox.filesystem.denyWrite.filter((x) => x.startsWith(`${L}/`))), sorted(lwrite), `${k}: .learning write denies`);
+  }
+  assert.deepEqual(p.permissions.deny.filter((r) => r.startsWith(`Edit(/${L}`)), [`Edit(/${L}/**)`], 'planning: .learning denied whole');
+  // My Folder (TAG_GIT = <cwd>/.git, CLONE true): no tree rows, its .git stays writable for its commits; TREE there is refused
+  const F = '/u/code/folder', mine = { ...CTX, WORKTREE: F, TAG_PATH: F, TAG_GIT: `${F}/.git`, CLONE: true };
+  const m = render('task', 'working', mine);
+  assert.deepEqual([(m.sandbox.filesystem.allowWrite ?? []).includes(`${F}/.git`), denied(m, `${F}/.git/HEAD`), denied(m, `${F}/.git/index`), denied(m, `${F}/.git/ORIG_HEAD`)], [false, false, false, false]);
+  assert.throws(() => render('task', 'working', { ...mine, CLONE: false, TREE: true, TREE_OTHERS: [] }), /TREE needs TAG_GIT = the repo's git dir/);
+});
+
+// design test 8, sibling listing (spawn.treeOthers on a temp <common>/worktrees): a real folder with a gitdir file is
+// listed; the Task's own, a folder without gitdir and a link are not; no worktrees folder → none
+test('spawn treeOthers: real worktree git folders only, minus the Task\'s own', async () => {
+  const { treeOthers } = require('../lib/spawn');
+  const common = fs.mkdtempSync(path.join(os.tmpdir(), 'others-'));
+  try {
+    assert.deepEqual(await treeOthers({ id: 't_self01', common_dir: common }), []);
+    const wts = path.join(common, 'worktrees');
+    for (const n of ['t_self01', 'sib', 'nogit']) fs.mkdirSync(path.join(wts, n), { recursive: true });
+    for (const n of ['t_self01', 'sib']) fs.writeFileSync(path.join(wts, n, 'gitdir'), '/x/.git\n');
+    fs.symlinkSync(path.join(wts, 'sib'), path.join(wts, 'lnk'));
+    assert.deepEqual(await treeOthers({ id: 't_self01', common_dir: common }), ['sib']);
+  } finally {
+    fs.rmSync(common, { recursive: true, force: true });
+  }
+});

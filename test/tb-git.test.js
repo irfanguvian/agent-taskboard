@@ -14,7 +14,7 @@ const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const { startTbd, REPO } = require('./helpers/tbd');
 const { FAKE, RUN_SPY, ticket, lines, until, reap, pidsOf } = require('./helpers/runs');
-const { parse, gitEnv } = require('../lib/tbgit');
+const { parse, gitEnv, Refused } = require('../lib/tbgit');
 const { cloneAt, cloneConfig } = require('../lib/util');
 
 test('tb-git words: fetch, pull, push, ls-remote in the bridge\'s shapes; an unknown flag, a push without a branch or to the base, clone ext::sh refused; git\'s env from the run file, never the caller\'s', () => {
@@ -128,4 +128,62 @@ test('tb-git in a run (real profile, local bare remote): fetch ok; push to the b
   assert.equal(git(remote, 'rev-parse', 'refs/heads/tb/t_git001-feat'), feat, 'landed after Yes: that sha');
   assert.deepEqual([git(remote, 'branch', '--list', 'feat'), git(remote, 'branch', '--list', 'tb/t_git001-ci')], ['', ''], 'refused pushes pushed nothing');
   assert.deepEqual((await cards()).map((a) => a.kind), ['push', 'remote'], 'the refused pushes, clone and forged ask asked nothing');
+});
+
+// Phase 4 Own Worktree, design test 9 (3g): run.clone.tree → fetch and pull refused, GIT_COMMON_DIR in git's env; the
+// real bin/tb-git pushes tb/<id> from a real linked worktree (git worktree add --lock, as lib/task.js addTree) to a local
+// bare remote (file_remote: what spawn writes from TB_GIT_FILE_REMOTE) under the real profile, built from the worktree
+// Task's working wall + the tracking-ref paths spawn adds (extra); the tracking ref in the repo's common dir moves.
+// tbd.sock here: a socket that answers every approve.ask yes (the card itself is covered above).
+test('tb-git Own Worktree: fetch and pull refused, GIT_COMMON_DIR set; a push of tb/<id> under the real profile lands and updates refs/remotes/origin/tb/<id> in the repo', async (t) => {
+  const tree = { base: 'main', ticket: 't_tree09', kind: 'task', own: ['tb/t_tree09'], home: '/Users/x', user: 'x', lang: 'en_US.UTF-8', common_dir: '/u/repo/.git', clone: { real: true, tree: true } };
+  for (const argv of [['fetch', 'origin'], ['pull'], ['pull', 'origin', 'main', '--ff-only']]) assert.throws(() => parse(argv, tree), (e) => e instanceof Refused && e.message === 'fetch or pull from your terminal', argv.join(' '));
+  assert.deepEqual(parse(['push', 'origin', 'tb/t_tree09'], tree), { verb: 'push', remote: 'origin', branch: 'tb/t_tree09' });
+  assert.equal(gitEnv(tree).GIT_COMMON_DIR, '/u/repo/.git');
+  assert.equal(gitEnv({ ...tree, clone: { real: true } }).GIT_COMMON_DIR, undefined, 'My Folder: no GIT_COMMON_DIR');
+  const net = require('node:net');
+  const { render, fullAccess, gitProfile } = require('../lib/phase-settings');
+  const { realConfig, realHash } = require('../lib/util');
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'tbt-')));
+  const home = path.join(root, 'home'), tbHome = path.join(root, 'tbhome'), td = path.join(tbHome, 'tickets', 't_tree09');
+  const remote = path.join(root, 'remote.git'), repo = path.join(root, 'repo'), wt = path.join(tbHome, 'worktrees', 't_tree09');
+  for (const d of [home, repo, path.dirname(wt), td]) fs.mkdirSync(d, { recursive: true });
+  git(root, 'init', '-q', '--bare', remote);
+  git(repo, 'init', '-q', '-b', 'main');
+  fs.writeFileSync(path.join(repo, 'a.txt'), 'a\n');
+  git(repo, 'add', '-A');
+  git(repo, 'commit', '-q', '-m', 'base');
+  git(repo, 'remote', 'add', 'origin', remote);
+  git(repo, 'push', '-q', 'origin', 'main');
+  const base = git(repo, 'rev-parse', 'HEAD');
+  git(repo, 'worktree', 'add', '-q', '--lock', '-B', 'tb/t_tree09', wt, base);
+  fs.writeFileSync(path.join(wt, 'b.txt'), 'b\n');
+  git(wt, 'add', '-A');
+  git(wt, 'commit', '-q', '-m', 'agent commit');
+  const sha = git(wt, 'rev-parse', 'HEAD');
+  const common = path.join(repo, '.git'), gitDir = path.join(common, 'worktrees', 't_tree09');
+  const realGit = fs.realpathSync(execFileSync('/usr/bin/xcrun', ['-f', 'git'], { encoding: 'utf8' }).trim());
+  const s = fullAccess(render('task', 'working', { WORKTREE: wt, TICKET_DIR: td, OUT_DIR: path.join(td, 'out'), TB_HOME: tbHome, TAG_PATH: wt, SKILLS_DIR: path.join(td, 'skills'),
+    TB_CODE: REPO, TB_NODE: process.execPath, TB_PORT: 7777, HEAVY: [], TAG_GIT: common, CLONE: false, TREE: true, TREE_OTHERS: [], NODE_MODULES: false }), { phase: 'working', learning: null, wall: true, worktree: wt });
+  const extra = ['refs/remotes', 'logs/refs/remotes'].map((x) => path.join(common, x)); // as lib/spawn.js passes it
+  const profile = path.join(root, 'git.sb');
+  fs.writeFileSync(profile, gitProfile(s.sandbox, { home, cwd: wt, git: realGit, remote, extra }));
+  const sock = path.join(root, 's.sock');
+  const asks = [];
+  const server = net.createServer((c) => c.on('data', (d) => { asks.push(JSON.parse(String(d)).kind); c.end('{"ok":true,"yes":true}\n'); }));
+  await new Promise((r) => server.listen(sock, () => r(null)));
+  t.after(() => { server.close(); fs.rmSync(root, { recursive: true, force: true }); });
+  const run = path.join(root, 'git.json');
+  fs.writeFileSync(run, JSON.stringify({ ticket: 't_tree09', kind: 'task', n: 1, ask_token: 'x', repo: wt, git_dir: gitDir, common_dir: common,
+    clone: { real: true, tree: true, config: realHash(/** @type {string[]} */ (await realConfig(common))), alternates: null }, base: 'main', base_sha: base,
+    remotes: { origin: { url: remote } }, registered: [remote], hooks: '', git: realGit, profile, own: ['tb/t_tree09'], ssh_auth_sock: '', home, user: 'x', lang: 'en_US.UTF-8', sock, file_remote: remote }));
+  const tbGit = (...a) => new Promise((r) => { const c = require('node:child_process').spawn(path.join(REPO, 'bin', 'tb-git'), a, { cwd: wt, env: { TB_NODE: process.execPath, TB_GIT_RUN: run, PATH: '/usr/bin:/bin' } });
+    let err = ''; c.stderr.on('data', (d) => { err += d; }); c.on('close', (status) => r({ status, err })); });
+  const f = await tbGit('fetch', 'origin');
+  assert.deepEqual([f.status, /fetch or pull from your terminal/.test(f.err)], [2, true], f.err);
+  const p = await tbGit('push', 'origin', 'tb/t_tree09');
+  assert.equal(p.status, 0, p.err);
+  assert.deepEqual(asks, ['push'], 'one approve.ask, for the push');
+  assert.equal(git(remote, 'rev-parse', 'refs/heads/tb/t_tree09'), sha, 'landed on the remote');
+  assert.equal(git(repo, 'rev-parse', 'refs/remotes/origin/tb/t_tree09'), sha, 'tracking ref updated in the common dir');
 });

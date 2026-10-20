@@ -124,3 +124,57 @@ test('M7 eachLine: lines across a 64 KB edge whole, CRLF and a last line without
   await util.eachLine(path.join(ROOT, 'link.jsonl'), (v) => void none.push(v));
   assert.deepEqual(none, []);
 });
+
+// Phase 4 Own Worktree (design 3f, 3h): a worktree tbd made (git worktree add --lock -B tb/<id>, as lib/task.js addTree),
+// its ticket pin {worktree, git_dir, common_dir, clone: {real, tree, config, alternates}} as the start point takes it
+async function tree(id) {
+  const root = fs.mkdtempSync(path.join(ROOT, 'tree-'));
+  const repo = path.join(root, 'repo'), wt = path.join(root, 'tbhome', 'worktrees', id);
+  fs.mkdirSync(repo);
+  fs.mkdirSync(path.dirname(wt), { recursive: true });
+  git(repo, ['init', '-q', '-b', 'main']);
+  const base_sha = commit(repo, 'a.txt', 'a\n');
+  git(repo, ['worktree', 'add', '-q', '--lock', '-B', `tb/${id}`, wt, base_sha]);
+  const common_dir = path.join(repo, '.git'), git_dir = path.join(common_dir, 'worktrees', id);
+  const clone = { real: true, tree: true, config: util.realHash(/** @type {string[]} */ (await util.realConfig(common_dir))), alternates: null };
+  return { root, repo, wt, git_dir, common_dir, t: { id, worktree: wt, git_dir, common_dir, base_sha, clone } };
+}
+
+test('Phase 4 treeLinks + cloneRefused tree branch: a fresh worktree is clean and pinned git runs in it with GIT_COMMON_DIR; a rewritten gitfile, commondir or gitdir file, the git folder moved, linked or replaced, a hard-linked gitfile, a config edit through a hard link and config.worktree switched on are each refused', async () => {
+  const fresh = await tree('t_tree01');
+  assert.equal(await util.treeLinks(fresh.t), null);
+  assert.equal(await util.cloneRefused(fresh.t), null);
+  assert.equal(util.cfgDir(fresh.t), fresh.common_dir, 'an Own Worktree Task\'s config lives in the common dir');
+  const r = await util.git(fresh.wt, ['rev-parse', '--path-format=absolute', '--git-dir', '--git-common-dir', '--abbrev-ref', 'HEAD'], { dirs: fresh.t });
+  assert.deepEqual([r.err, r.stdout.trim().split('\n')], [null, [fresh.git_dir, fresh.common_dir, 'tb/t_tree01']]);
+  // a fake git folder an agent made: what a rewritten link would point Irfan's git at
+  const fake = (root) => { const d = path.join(root, 'fake.git'); fs.mkdirSync(path.join(d, 'refs'), { recursive: true }); fs.writeFileSync(path.join(d, 'HEAD'), 'ref: refs/heads/main\n'); return d; };
+  /** @type {[string, (x: any) => void, RegExp][]} */
+  const cases = [
+    ['gitfile rewritten', (x) => fs.writeFileSync(path.join(x.wt, '.git'), `gitdir: ${fake(x.root)}\n`), /\.git does not lead to /],
+    ['commondir rewritten', (x) => fs.writeFileSync(path.join(x.git_dir, 'commondir'), `${path.dirname(fake(x.root))}\n`), /commondir does not lead to /],
+    ['gitdir file rewritten', (x) => fs.writeFileSync(path.join(x.git_dir, 'gitdir'), `${path.join(x.root, 'elsewhere', '.git')}\n`), /gitdir does not name /],
+    ['git folder moved away', (x) => fs.renameSync(x.git_dir, `${x.git_dir}.x`), /is not a real folder in /],
+    ['git folder a link', (x) => { fs.renameSync(x.git_dir, `${x.git_dir}.x`); fs.symlinkSync(`${x.git_dir}.x`, x.git_dir); }, /is not a real folder in /],
+    ['git folder replaced (no commondir: git would read its own config)', (x) => {
+      fs.renameSync(x.git_dir, `${x.git_dir}.x`);
+      fs.mkdirSync(x.git_dir);
+      for (const f of ['HEAD', 'gitdir']) fs.copyFileSync(path.join(`${x.git_dir}.x`, f), path.join(x.git_dir, f));
+      fs.writeFileSync(path.join(x.git_dir, 'config'), '[core]\n\tfsmonitor = /tmp/x\n');
+    }, /commondir does not lead to /],
+    ['gitfile hard-linked', (x) => fs.linkSync(path.join(x.wt, '.git'), path.join(x.wt, 'gf')), /is not a plain file with one link/],
+    ['config edited through a hard link', (x) => { fs.linkSync(path.join(x.common_dir, 'config'), path.join(x.wt, 'cfg')); fs.appendFileSync(path.join(x.wt, 'cfg'), '[core]\n\tfsmonitor = /tmp/x\n'); }, /config changed since the Task started/],
+    ['config.worktree switched on', (x) => { fs.writeFileSync(path.join(x.git_dir, 'config.worktree'), '[core]\n\tfsmonitor = /tmp/x\n'); git(x.repo, ['config', 'extensions.worktreeConfig', 'true']); }, /config changed since the Task started/],
+  ];
+  for (const [name, harm, why] of cases) {
+    const x = await tree('t_tree02');
+    harm(x);
+    assert.match(String(await util.cloneRefused(x.t)), why, name);
+    const g = await util.git(x.wt, ['rev-parse', 'HEAD'], { dirs: x.t });
+    assert.deepEqual([g.err?.code, g.stdout], ['PLANTED', ''], `${name}: pinned git refused, nothing run`);
+  }
+  // design 3f: config.worktree alone is inert (git reads it only with extensions.worktreeConfig, which the pin watches)
+  const inert = await tree('t_tree03');
+  fs.writeFileSync(path.join(inert.git_dir, 'config.worktree'), '[core]\n\tfsmonitor = /tmp/x\n');
+  assert.equal(await util.cloneRefused(inert.t), null);
+});
