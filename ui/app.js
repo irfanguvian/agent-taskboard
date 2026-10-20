@@ -43,9 +43,14 @@ const ui = { drag: null, editing: null, tray: null, promote: null, pick: { kind:
 
 // board-terminal-parity 6.2: the New Flow and Promote kinds are the built ones tbd names (GET /api/state system.kinds)
 const kinds = () => (Array.isArray(state?.system?.kinds) ? state.system.kinds : []);
-// board-terminal-parity Phase 4: while Task tickets are on (system.kinds holds task), Code and Task say how they differ
-const KIND_WORDS = Object.assign(Object.create(null), { code: 'Code — copy of the repo, checks, review', task: 'Task — your folder, like the terminal' });
-const kindLabel = k => (kinds().includes('task') && KIND_WORDS[k]) || String(k).charAt(0).toUpperCase() + String(k).slice(1);
+const kindLabel = k => String(k).charAt(0).toUpperCase() + String(k).slice(1);
+// Phase 4 design section 7: while Task tickets are on (system.kinds holds task) New Flow and Promote make a Task, and pick
+// its Where instead of a Kind: Own Worktree (default) or My Folder. A plain-folder tag (type not git) is My Folder only.
+const tasksOn = () => kinds().includes('task');
+const WHERE = [['worktree', 'Own Worktree'], ['folder', 'My Folder']];
+const WHERE_HINT = { worktree: 'Its own copy of your repo, on a new branch from your current commit. Your open changes stay where they are. Best for code.',
+  folder: 'Works in your folder itself, like your terminal. Best for docs and scans.', plain: 'A plain folder has no git: My Folder only.' };
+const plainTag = n => { const d = tagDef(n); return !!d && d.type !== 'git'; };
 // Page Tools (Settings → Terminal): on, the page runs Check Setup, Clean Up, Add Tag and Open in Terminal itself
 const pageTools = () => ui.cfg?.config?.terminal?.page_tools === true;
 
@@ -586,7 +591,7 @@ function tray(t, i, total) {
       ui.promote = ui.promote === t.id ? null : t.id;
       loadTags();
       renderReminders();
-      $('[data-role="promote-kind"]')?.focus();
+      $('.promote select')?.focus(); // Kind, or Where while Task tickets are on
     }, { 'data-role': 'promote', 'aria-expanded': String(ui.promote === t.id) }),
     ui.promote === t.id && promoteForm(t),
     el('div', { class: 'popmenu-sep' }),
@@ -598,25 +603,41 @@ const detailLine = t => el('p', { class: 'detail', 'data-role': 'detail' },
   [`Id ${t.id}`, t.created && `Created ${t.created}`, t.status === 'done' && t.done_at && `Done ${t.done_at}`].filter(Boolean).join(' · '));
 
 function promoteForm(t) {
-  const pick = (name, opts) => el('label', null, name,
-    el('select', { name: `promote-${name.toLowerCase()}`, class: 'input mini', 'data-role': `promote-${name.toLowerCase()}`, onchange: ev => { ui.pick[name.toLowerCase()] = ev.target.value; } }, ...opts));
+  const sel = (name, opts, then) => el('select', { name: `promote-${name.toLowerCase()}`, class: 'input mini', 'data-role': `promote-${name.toLowerCase()}`, onchange: ev => { ui.pick[name.toLowerCase()] = ev.target.value; then?.(); } }, ...opts);
+  const pick = (name, s) => el('label', null, name, s);
   if (!kinds().includes(ui.pick.kind)) ui.pick.kind = kinds()[0] ?? ''; // the shown first option is the one sent
+  // Phase 4 section 7: Task tickets on → a Where select; a plain tag disables Own Worktree and shows My Folder (Irfan's
+  // own pick comes back on a git tag). promote() sends what shows.
+  const where = tasksOn() && sel('Where', WHERE.map(([v, l]) => el('option', { value: v }, l)));
+  const why = where && el('p', { class: 'hint', id: 'promote-where-hint', 'data-role': 'promote-where-hint' }); // why Own Worktree is off (one tray open at a time)
+  if (where) where.setAttribute('aria-describedby', 'promote-where-hint');
+  const whereFor = () => {
+    if (!where) return;
+    const plain = plainTag(ui.pick.tag);
+    where.children[0].disabled = plain;
+    where.value = promoteWhere();
+    why.replaceChildren(...(plain ? [WHERE_HINT.plain] : []));
+  };
+  whereFor();
   return el('form', { class: 'promote', 'aria-label': 'Promote to flow', onsubmit: ev => { ev.preventDefault(); promote(t); } },
-    pick('Kind', kinds().map(k => el('option', { value: k, selected: k === ui.pick.kind }, kindLabel(k)))),
-    pick('Tag', tagOptions(ui.pick.tag)),
+    where ? [pick('Where', where), why] : pick('Kind', sel('Kind', kinds().map(k => el('option', { value: k, selected: k === ui.pick.kind }, kindLabel(k))))),
+    pick('Tag', sel('Tag', tagOptions(ui.pick.tag), whereFor)),
     el('div', { class: 'promote-acts' },
       el('button', { type: 'submit', class: 'btn btn-sm' }, 'Promote to Flow'),
       el('button', { type: 'button', class: 'btn btn-sm btn-gray', onclick: () => { ui.promote = null; renderReminders(); } }, 'Cancel')));
 }
 
+const promoteWhere = () => (plainTag(ui.pick.tag) ? 'folder' : ui.pick.where ?? 'worktree'); // what the Where select shows
+
 async function promote(t) {
   try {
-    await api('POST', `/api/tickets/${encodeURIComponent(t.id)}/promote`, { kind: ui.pick.kind, tag: ui.pick.tag || undefined });
+    const task = tasksOn(), kd = task ? 'task' : ui.pick.kind;
+    await api('POST', `/api/tickets/${encodeURIComponent(t.id)}/promote`, { kind: kd, tag: ui.pick.tag || undefined, where: task ? promoteWhere() : undefined });
     state.reminders = state.reminders.filter(r => r.id !== t.id);
     ui.tray = ui.promote = null;
     render();
     refresh();
-    toast(`“${t.title}” is now a ${ui.pick.kind} flow.`, { kind: 'info', title: 'Promoted' });
+    toast(`“${t.title}” is now a ${kd} flow.`, { kind: 'info', title: 'Promoted' });
   } catch (e) { toast(e.message, { title: refused(e, 'Couldn’t Promote') }); }
 }
 
@@ -818,7 +839,8 @@ const wordPill = (w, other = 'gray', hue = WORD_HUE[String(w ?? '').toLowerCase(
 
 // what a flow waits on, as row and drawer name it: qa:<tag> while another ticket of its tag holds QA (C9)
 const waitLabel = (w, tag) => (w?.reason === 'qa_lock' ? `qa:${tag}` : w?.reason === 'blocked_action' ? 'blocked action'
-  : w?.reason === 'you' ? 'your turn' : w?.reason === 'folder_busy' ? 'folder busy' : w?.reason === 'task_changed' ? 'folder changed' : w?.reason); // Phase 4: a Task's waits
+  : w?.reason === 'you' ? 'your turn' : w?.reason === 'folder_busy' ? 'folder busy' : w?.reason === 'task_changed' ? 'folder changed'
+  : w?.reason === 'tree_wait' ? 'waits its turn' : w?.reason); // Phase 4: a Task's waits
 // One flow, one table row (DESIGN §8 Table): the whole row opens the inspector. The row holds the one click handler; the
 // title is a real button (keyboard, screen readers) whose click bubbles to it. ponytail: no ::after over the row, which
 // needs a <tr> as containing block (engine-dependent); a click handler has no such ceiling.
@@ -1005,7 +1027,7 @@ function drawerBody(f, ticket, error) {
     : st === 'plan_approval' ? (settingUp(row) ? null : plan || el('p', { class: 'hint' }, 'No plan found.'))
     : you ? youCard(f.id, k) // the run's end saved: Done never meets a live run
     : st === 'blocked' ? runSec : null; // Resume / Restart / Cancel / the refusal live here (plan Q5), not behind Activity
-  const nt = ticket && notice(f.id, k.waiting), why = typeof k.waiting?.why === 'string' ? k.waiting.why : '';
+  const nt = ticket && notice(f.id, k.waiting, k), why = typeof k.waiting?.why === 'string' ? k.waiting.why : '';
   // a block reason WAIT has no text for (interrupted, policy, deps, a gate): the wait's own why, as text
   const box = ticket && needsYou(row) && el('section', { class: 'part you card needs', 'data-role': 'needs-you', 'aria-labelledby': 'ny-h' }, el('h3', { id: 'ny-h' }, 'Needs You'),
     nt || [el('p', null, NEEDS[st] ?? NEEDS_BY[reason] ?? 'Your turn.'), why && el('pre', { class: 'log', 'data-role': 'wait-why', tabindex: '0', 'aria-label': 'Why it waits' }, vis(why))],
@@ -1146,6 +1168,19 @@ const lastRun = l => {
   const err = typeof l.error === 'string' && !l.pending ? l.error.replace(BIDI, '').split('\n')[0].slice(0, 200) : '';
   return `ended: ${endWord(l)}${err ? `: ${vis(err)}` : ''}`;
 };
+// Phase 4 design sections 6 + 7: an Own Worktree Task's folder and branch (git's names as text: code()); once done, what
+// Done did with the folder, in the Done toast's words: removed, or kept (files left, or a remove that failed: tree_left)
+const treeDone = k => {
+  const n = k.task?.kept;
+  return n > 0 ? `Worktree kept: ${n} ${n === 1 ? 'file' : 'files'} not committed. tb gc removes it.` : k.task?.tree_left ? 'Worktree kept: tbd could not remove it. tb gc removes it.'
+    : `Worktree removed, with its ignored files (build output, local logs). Branch tb/${k.id} stays.`;
+};
+const treeLines = k => {
+  if (k.kind !== 'task' || k.task?.mode !== 'worktree' || typeof k.worktree !== 'string') return null;
+  const done = k.state === 'done' && el('p', { class: 'hint', 'data-role': 'tree-done' }, treeDone(k));
+  if (done && !(k.task.kept > 0) && !k.task.tree_left) return done; // removed: no folder to name
+  return [el('p', { class: 'hint', 'data-role': 'tree' }, 'Own Worktree ', code(k.worktree), ' · branch ', code(`tb/${k.id}`), k.task.from && [' from ', code(k.task.from)]), done];
+};
 function nowCard(id, k, w) {
   const r = ui.runs.get(id), l = k.lease, live = !!r?.live || (!!l && !l.exit);
   if (!live && !l?.started_at) return null;
@@ -1161,6 +1196,7 @@ function nowCard(id, k, w) {
     el('p', { class: 'now-stage' }, sep([k.state === 'blocked' && (k.blocked_from ?? phase) !== 'blocked' ? `Blocked in ${stateLabel(k.blocked_from ?? phase)}` : stateLabel(phase), phase === 'working' && n >= 0 && `task ${n + 1} of ${tasks.length}`, title && vis(title)])),
     model && el('p', { class: 'hint' }, model),
     Number.isInteger(dirty) && dirty > 0 && el('p', { class: 'hint' }, `${dirty} ${dirty === 1 ? 'file was' : 'files were'} already uncommitted`),
+    treeLines(k),
     live ? el('p', null, doing || idle || 'Thinking or writing', doing && r.tool_at && [' · ', el('span', { 'data-since': r.tool_at }, span(r.tool_at))])
       : el('p', null, `Last run · ${lastRun(l)}`),
     subs.length > 0 && el('ul', { class: 'now-subs', 'aria-label': 'Subagents' }, ...subs.map(s => el('li', null,
@@ -1579,7 +1615,8 @@ const SENT = { // button role → [label, label while sending, toast title, toas
   handback: ['Hand Back', 'Handing Back…', 'Handed Back', 'The board resumes the same session.'],
   'pass-check': ['Check SHA', 'Checking…', '', ''],
   // board-terminal-parity Phase 4: a Task's Waits-for-you card
-  'task-done': ['Done', 'Closing…', 'Flow Done', 'Your folder is free for the next Task. After a Commit and Push it stays on the Task\'s branch (tb/<id>).'],
+  // Phase 4 section 6: an Own Worktree Task's Done says what happened to its folder (tbd's answer: the ticket)
+  'task-done': ['Done', 'Closing…', 'Flow Done', r => (r?.ticket?.task?.mode === 'worktree' ? treeDone(r.ticket) : 'Your folder is free for the next Task. After a Commit and Push it stays on the Task\'s branch (tb/<id>).')],
   'task-send': ['Send', 'Sending…', 'Sent', 'The same session goes on with your message.'],
   'commit-push': ['Commit and Push', 'Sending…', 'Commit Sent', 'The same session commits only the listed files, then pushes.'],
 };
@@ -1609,7 +1646,10 @@ const WAIT = {
   you: 'The Task finished: your turn. Read what it did below, then press Done, send it a message, or Commit and Push.',
   folder_busy: 'Another Task works in this folder, a folder inside it, or a folder around it. It starts by itself when that one ends.',
   task_changed: 'Blocked: your folder changed since the Task started. Undo each change below (each line says how), or remove the new files, then Resume.',
+  // Phase 4 design section 5: an Own Worktree Task waits before its worktree is made
+  tree_wait: 'Tasks on this repo make their worktrees one at a time, while no other Task\'s agent works there. This Task goes on by itself when its turn comes.',
 };
+const TREE_BUSY = 'A My Folder Task or a Code ticket uses this repo. It starts by itself when that one ends.'; // folder_busy, Own Worktree (section 5)
 const BLOCKS = ['infra', 'integrity', 'config', 'work', 'scope', 'rework', 'qa', 'db', 'task_changed'];
 const code = s => el('code', null, vis(s));
 const none = () => el('p', { class: 'hint' }, 'None.');
@@ -1630,8 +1670,8 @@ async function post(id, op, body, role = op, sent = role, send = () => api('POST
   ui.err = null;
   redraw();
   try {
-    await send();
-    toast(SENT[sent][3], { kind: 'info', title: SENT[sent][2] });
+    const r = await send(), msg = SENT[sent][3]; // msg: words, or words from tbd's answer
+    toast(typeof msg === 'function' ? msg(r) : msg, { kind: 'info', title: SENT[sent][2] });
     return null;
   } catch (e) {
     ui.err = { id, role, text: e.message };
@@ -1646,8 +1686,9 @@ async function post(id, op, body, role = op, sent = role, send = () => api('POST
 
 // waiting reasons the drawer explains (manual, usage, memory…: the Waiting fact says enough)
 // P5: + why working blocked (infra, integrity, config…: waiting.why), children n/m, setup_failed "base red".
-function notice(id, w) {
-  const text = w?.reason === 'children' ? `Waiting for its child tickets: ${w.done ?? '?'} of ${w.total ?? '?'} done or cancelled${w.blocked?.length ? `, ${w.blocked.length} blocked` : ''}. It finishes by itself after the last one.` : WAIT[w?.reason];
+function notice(id, w, k) { // k: the ticket (folder_busy's words follow its Task mode)
+  const text = w?.reason === 'children' ? `Waiting for its child tickets: ${w.done ?? '?'} of ${w.total ?? '?'} done or cancelled${w.blocked?.length ? `, ${w.blocked.length} blocked` : ''}. It finishes by itself after the last one.`
+    : w?.reason === 'folder_busy' && k?.task?.mode === 'worktree' ? TREE_BUSY : WAIT[w?.reason];
   if (!text) return null;
   const why = w.error || w.why;
   return el('div', { class: `notice${w.reason.endsWith('_failed') || BLOCKS.includes(w.reason) ? ' bad' : ''}` },
@@ -2389,7 +2430,7 @@ const refused = (err, fallback) => (err.status === 409 && !err.server ? 'Not Ava
 async function loadTags() {
   if (ui.tagsLoaded) return;
   try {
-    ui.tags = leafTags((await api('GET', '/api/tags')).tags || {});
+    ui.tags = leafTags(ui.tagDefs = (await api('GET', '/api/tags')).tags || {}); // tagDefs: the type (Phase 4 Where), ident, push
     ui.tagsLoaded = true;
     $('#tag-names')?.replaceChildren(...[...new Set([...ui.tags, ...Object.keys(ui.tagDefs)])].sort().map(n => el('option', { value: n })));
     const ft = $('#sheet select[name="tag"]');
@@ -2493,28 +2534,44 @@ document.addEventListener('keydown', e => {
   if (asking) keepEditing(); else closeSheet();
 });
 
-// Labelled fields of a sheet. spec {k, label, kind: text|area|date|select|check, opts [[value, label]], hint, ph, list (a
+// Labelled fields of a sheet. spec {k, label, kind: text|area|date|select|check|seg, opts [[value, label]], hint, ph, list (a
 // datalist id), after (nodes under the control)}; init {k: value}.
-// → nodes, vals() (trimmed strings, checkboxes as booleans) and fail(errors) which writes {k: message} under the fields.
+// → nodes, vals() (trimmed strings, checkboxes as booleans, a seg's pressed value), fail(errors) which writes {k: message}
+// under the fields, ctl and hint ({k: the hint node}).
 let sfn = 0;
 function sheetFields(specs, init, onChange) {
-  const ctl = {}, errs = {};
+  const ctl = {}, errs = {}, hint = {};
   const nodes = specs.map(sp => {
     const id = `sf${++sfn}`, v = init[sp.k] ?? '';
     const c = sp.kind === 'select' ? el('select', { id, name: sp.k, class: 'input', onchange: onChange }, ...sp.opts.map(([val, l]) => el('option', { value: val, selected: val === v }, l)))
+      : sp.kind === 'seg' ? segCtl(id, sp, onChange)
       : sp.kind === 'area' ? el('textarea', { id, name: sp.k, class: 'input', rows: 3, oninput: onChange })
       : sp.kind === 'check' ? el('input', { id, name: sp.k, class: 'check', type: 'checkbox', checked: !!v, onchange: onChange })
       : el('input', { id, name: sp.k, class: 'input', type: sp.kind === 'date' ? 'date' : 'text', autocomplete: 'off', spellcheck: 'false', placeholder: sp.ph, list: sp.list, oninput: onChange });
-    if (sp.kind !== 'select' && sp.kind !== 'check') c.value = v;
+    if (sp.kind === 'seg') c.pick(v); else if (sp.kind !== 'select' && sp.kind !== 'check') c.value = v;
     ctl[sp.k] = c;
     errs[sp.k] = el('p', { class: 'err', id: `${id}-err` });
+    hint[sp.k] = sp.hint && el('p', { class: 'hint', id: `${id}-hint` }, sp.hint);
     c.setAttribute('aria-describedby', `${id}-err${sp.hint ? ` ${id}-hint` : ''}`);
-    return el('div', { class: `sf${sp.kind === 'check' ? ' sf-check' : ''}` }, el('label', { for: id }, sp.label), c,
-      sp.after && el('div', { class: 'sf-after' }, ...sp.after), sp.hint && el('p', { class: 'hint', id: `${id}-hint` }, sp.hint), errs[sp.k]);
+    return el('div', { class: `sf${sp.kind === 'check' ? ' sf-check' : ''}` }, el('label', sp.kind === 'seg' ? { id: `${id}-l` } : { for: id }, sp.label), c,
+      sp.after && el('div', { class: 'sf-after' }, ...sp.after), hint[sp.k], errs[sp.k]);
   });
-  const vals = () => Object.fromEntries(specs.map(sp => [sp.k, sp.kind === 'check' ? ctl[sp.k].checked : sp.kind === 'select' ? ctl[sp.k].value : ctl[sp.k].value.trim()]));
+  const vals = () => Object.fromEntries(specs.map(sp => [sp.k, sp.kind === 'check' ? ctl[sp.k].checked : sp.kind === 'select' || sp.kind === 'seg' ? ctl[sp.k].value : ctl[sp.k].value.trim()]));
   const fail = errors => { for (const sp of specs) errs[sp.k].replaceChildren(...(errors[sp.k] ? [errors[sp.k]] : [])); };
-  return { nodes, vals, fail, ctl };
+  return { nodes, vals, fail, ctl, hint };
+}
+// a seg field (Phase 4 Where): the Reminder/Flow switch's markup, a .seg group of buttons with aria-pressed, named by the
+// field's label. c.value: the pressed value; c.pick(v) presses v. A button with aria-disabled="true" stays focusable (a
+// screen reader reads it as dimmed) and ignores clicks.
+function segCtl(id, sp, onChange) {
+  const c = el('div', { id, class: 'seg', role: 'group', 'aria-labelledby': `${id}-l`, 'data-role': sp.k });
+  c.pick = v => { c.value = v; for (const b of c.children) b.setAttribute('aria-pressed', String(b.getAttribute('value') === v)); };
+  for (const [val, l] of sp.opts) {
+    const b = el('button', { type: 'button', value: val, 'data-role': `${sp.k}-${val}` }, l);
+    b.addEventListener('click', () => { if (b.getAttribute('aria-disabled') !== 'true') { c.pick(val); onChange?.(); } });
+    c.append(b);
+  }
+  return c;
 }
 
 // flow-form-parallel-terminal Phase 1: `@` at a word start lists the picked tag's files the same way (GET /api/files?tag=&q=,
@@ -2676,19 +2733,21 @@ function skillsBox() {
 // flow with a goal (skills: skillsBox), short title, kind, tag, locked run and Start Now. mode 'reminder' | 'flow' (the Flows view's empty state calls
 // openNew('flow')); typed carries the title / goal across a Reminder ↔ Flow switch (asked first when another field holds
 // text: it would be lost). Enter adds; in a note or goal Shift+Enter is a new line.
-function openNew(mode = 'reminder', typed = '') { // typed: the title / goal text, or (Add Tag came back) the flow's whole draft {text, title, kind, tag, sandbox, start}
+function openNew(mode = 'reminder', typed = '') { // typed: the title / goal text, or (Add Tag came back) the flow's whole draft {text, title, kind, tag, sandbox, where, start}
   const flow = mode === 'flow', main = flow ? 'text' : 'title';
-  const sk = flow && skillsBox();
+  const sk = flow && skillsBox(), task = flow && tasksOn(); // Phase 4 section 7: Task tickets on → Where replaces Kind and the Locked box
   const specs = flow ? [
     { k: 'text', label: 'Goal for the Agent', kind: 'area', after: sk.nodes },
     { k: 'title', label: 'Short Title', kind: 'text', hint: 'Optional. The board shows it instead of the goal.' },
-    { k: 'kind', label: 'Kind', kind: 'select', opts: kinds().map(k => [k, kindLabel(k)]) },
+    !task && { k: 'kind', label: 'Kind', kind: 'select', opts: kinds().map(k => [k, kindLabel(k)]) },
     { k: 'tag', label: 'Tag', kind: 'select', opts: [['', 'No Tag'], ...ui.tags.map(n => [n, n]), [ADD_TAG, 'Add Tag…']],
       after: [el('button', { type: 'button', class: 'link-btn', 'data-role': 'add-tag', onclick: () => addTagFrom() }, 'Add Tag…')] },
-    { k: 'sandbox', label: 'Locked run: for untrusted text (an issue, a pasted log). Fewer tools, slower.', kind: 'check' },
+    // after Tag: the tag decides which Where is open
+    task ? { k: 'where', label: 'Where', kind: 'seg', opts: WHERE, hint: WHERE_HINT.worktree }
+      : { k: 'sandbox', label: 'Locked run: for untrusted text (an issue, a pasted log). Fewer tools, slower.', kind: 'check' },
     // board-terminal-parity 6.1: create and assign in one step (tbd's assign checks); the choice is remembered
     { k: 'start', label: 'Start Now', kind: 'check', hint: 'Planning starts at once. If it can’t, the flow stays in Backlog and says why.' },
-  ] : [
+  ].filter(Boolean) : [
     { k: 'title', label: 'Title', kind: 'text' },
     { k: 'status', label: 'Column', kind: 'select', opts: COLS.slice(0, 4) },
     { k: 'due', label: 'Due', kind: 'date' },
@@ -2696,18 +2755,33 @@ function openNew(mode = 'reminder', typed = '') { // typed: the title / goal tex
     { k: 'note', label: 'Note', kind: 'area' },
     { k: 'tag', label: 'Tag', kind: 'text', ph: 'shop/api' },
   ];
-  const f = sheetFields(specs, flow ? { kind: kinds()[0], start: safe(() => localStorage.getItem('tb-start-now')) !== '0', ...(typeof typed === 'string' ? { text: typed } : typed) } : { title: typed, status: 'inbox' }, () => {});
+  let whereFor = () => {}, mine = null; // mine: Irfan's own Where pick (a forced My Folder is not his pick)
+  const f = sheetFields(specs, flow ? { kind: kinds()[0], where: 'worktree', start: safe(() => localStorage.getItem('tb-start-now')) !== '0', ...(typeof typed === 'string' ? { text: typed } : typed) } : { title: typed, status: 'inbox' }, () => whereFor());
   // Add Tag replaces this sheet; it comes back with every field kept, on the new tag (or the old one after Cancel)
   const addTagFrom = () => {
-    const d = { ...f.vals(), text: f.ctl.text.value };
+    const d = { ...f.vals(), text: f.ctl.text.value, ...(task && { where: mine }) };
     addTag(async name => {
       if (name) { await loadTags(); if (!ui.tags.includes(name)) ui.tags = [...ui.tags, name].sort(); } // a failed read still shows the new tag
       else ui.tagsLoaded = false; // the copy form may have added it: read again
       openNew('flow', name ? { ...d, tag: name } : d);
     });
   };
+  if (task) {
+    // a plain-folder tag: Own Worktree off, My Folder pressed, the hint says why; another tag: Irfan's own pick (mine) back.
+    // No tag, or the tags not read yet: Own Worktree stays open (tbd refuses it on a plain folder: 400)
+    const w = f.ctl.where, own = [...w.children].find(b => b.getAttribute('value') === 'worktree');
+    mine = w.value;
+    whereFor = () => {
+      if (own.getAttribute('aria-disabled') !== 'true') mine = w.value;
+      const plain = plainTag(f.ctl.tag.value);
+      own.setAttribute('aria-disabled', String(plain));
+      w.pick(plain ? 'folder' : mine);
+      f.hint.where.replaceChildren(WHERE_HINT[plain ? 'plain' : w.value]);
+    };
+    whereFor();
+  }
   if (flow) {
-    loadTags();
+    loadTags().then(() => whereFor()); // the tag types arrive with the tags
     let tagWas = f.ctl.tag.value;
     f.ctl.tag.addEventListener('change', e => { // before the skills box hears it: the sentinel is no tag
       if (e.target.value !== ADD_TAG) return void (tagWas = e.target.value);
@@ -2717,13 +2791,8 @@ function openNew(mode = 'reminder', typed = '') { // typed: the title / goal tex
     });
     sk.wire(f.ctl.text, f.ctl.tag);
     f.ctl.start.addEventListener('change', e => safe(() => localStorage.setItem('tb-start-now', e.target.checked ? '1' : '0')));
-    // Phase 4 F: a Task never takes a locked run (tbd refuses it): the box hides and clears while Kind is Task
-    const lock = f.nodes[specs.findIndex(sp => sp.k === 'sandbox')];
-    const lockFor = () => { lock.hidden = f.ctl.kind.value === 'task'; if (lock.hidden) f.ctl.sandbox.checked = false; };
-    f.ctl.kind.addEventListener('change', lockFor);
-    lockFor();
   }
-  const typedIn = sp => sp.kind !== 'select' && sp.kind !== 'check' && f.ctl[sp.k].value.trim();
+  const typedIn = sp => !['select', 'check', 'seg'].includes(sp.kind) && f.ctl[sp.k].value.trim();
   const seg = el('div', { class: 'seg', role: 'group', 'aria-label': 'Item type' }, ...[['reminder', 'Reminder'], ['flow', 'Flow']].map(([m, l]) =>
     el('button', { type: 'button', value: m, 'aria-pressed': String(flow === (m === 'flow')), onclick: () => {
       if (flow === (m === 'flow') || asking) return;
@@ -2746,7 +2815,7 @@ function openNew(mode = 'reminder', typed = '') { // typed: the title / goal tex
     add.disabled = true;
     // empty optional fields are undefined: JSON leaves them out. An Inbox add goes on top (the old composer line's body);
     // another column keeps the server's default, as the old More… sheet posted
-    const sent = await addItem(flow, () => (flow ? api('POST', '/api/flows', { text: v.text, title: v.title || undefined, kind: v.kind, tag: v.tag && v.tag !== ADD_TAG ? v.tag : undefined, sandbox: v.sandbox || undefined, where: v.where || undefined, start: v.start || undefined })
+    const sent = await addItem(flow, () => (flow ? api('POST', '/api/flows', { text: v.text, title: v.title || undefined, kind: task ? 'task' : v.kind, tag: v.tag && v.tag !== ADD_TAG ? v.tag : undefined, sandbox: v.sandbox || undefined, where: v.where || undefined, start: v.start || undefined })
       : api('POST', '/api/reminders', { title: v.title, status: v.status, pos: v.status === 'inbox' ? 'top' : undefined, due: v.due || undefined, project: v.project || undefined, note: v.note || undefined, tag: v.tag || undefined })));
     if (sent && form.onsubmit === submit && sheetOpen()) closeSheet(true); // a Reminder ↔ Flow switch (or another sheet) since: not this one to close
     add.disabled = false;
@@ -2895,7 +2964,7 @@ const RUNS = {
     }
     const r = await api('GET', `/api/gc?limit=${v.limit || 20}${after ? `&after=${enc(after)}` : ''}`), items = Array.isArray(r.items) ? r.items.filter(isObj) : [];
     return { next: r.next ?? null, lines: [...(after ? [] : [`${r.total ?? items.length} can go`]),
-      ...items.map(i => [i.id, i.kind, sizeOf(i.bytes), i.age_days != null && `${i.age_days} days old`, i.reason].filter(Boolean).map(vis).join(' · '))] };
+      ...items.map(i => [i.id, i.kind, sizeOf(i.bytes), i.age_days != null && `${i.age_days} days old`, i.reason, i.hint].filter(Boolean).map(vis).join(' · '))] };
   },
 };
 

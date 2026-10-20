@@ -292,6 +292,7 @@ Capsules with Title Case labels, Label style (500).
 
 - Capsule `--fill` track, 2px padding, 2–5 equal segments, 32 tall (28 segments).
 - Segment: Label, `--fg-muted`. Selected: `--surface-raised`, `--fg`, `--shadow-control`.
+- Disabled segment: `--fg-disabled`, default cursor. Mark it `aria-disabled="true"` (not `disabled`) so it stays focusable and is read as dimmed; a hint under the control says why.
 - Use it to switch views of the same content: date ranges, table views (All · Active · At Risk · New, with counts in `--fg-subtle`).
 
 ### Filter chips

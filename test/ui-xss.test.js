@@ -1150,3 +1150,169 @@ test('XSS: Phase 3 parallel badges, reasons and buttons render as text; Allow Ba
   run(`drawerBody(${JSON.stringify(f)}, ${JSON.stringify(k(2))})`);
   assert.equal(role(drawer, 'subagents-warn'), undefined, '2 does not warn');
 });
+
+// ---------- Phase 4 design (revision 6) test 11 + sections 5, 6, 7: Own Worktree / My Folder on the board ----------
+const P4_TAGS = { 'acme/api': { type: 'git', path: '/x/api', base: 'main' }, notes: { type: 'folder', path: '/x/notes' } };
+const HINT = {
+  worktree: 'Its own copy of your repo, on a new branch from your current commit. Your open changes stay where they are. Best for code.',
+  folder: 'Works in your folder itself, like your terminal. Best for docs and scans.',
+  plain: 'A plain folder has no git: My Folder only.',
+};
+const pickTag = (sheet, name) => { const s = byName(sheet, 'tag'); s.value = name; for (const h of s.handlers.change) h({ target: s, stopImmediatePropagation() {} }); };
+
+test('Phase 4 test 11: New Flow with Task tickets on: Where (Own Worktree pressed), no Kind and no Locked box; a plain tag turns Own Worktree off and picks My Folder; Add posts {kind: task, where}', async () => {
+  const sheet = new Node('form');
+  const ctx = sandbox({ '#sheet .sheet': sheet, '#sheet': new Node('div') });
+  const run = (code) => vm.runInContext(code, ctx);
+  const n = trust(ctx);
+  run(`state = { reminders: [], flows: [], system: { kinds: ["code", "task"] }, calendar: {} }; ui.tags = ["acme/api", "notes"]; ui.tagDefs = ${JSON.stringify(P4_TAGS)}; ui.tagsLoaded = true;`);
+  run('openNew("flow")');
+  assert.deepEqual(find(sheet, (x) => x.tag === 'label').map(txt), ['Goal for the Agent', 'Short Title', 'Tag', 'Where', 'Start Now'], 'no Kind, no Locked run');
+  assert.deepEqual([byName(sheet, 'kind'), byName(sheet, 'sandbox')], [undefined, undefined]);
+  const group = byRole(sheet, 'where'), btn = (v) => byRole(sheet, `where-${v}`);
+  const label = find(sheet, (x) => x.tag === 'label' && txt(x) === 'Where')[0];
+  assert.deepEqual([group.attrs.role, group.attrs['aria-labelledby'], btn('worktree').tag, txt(btn('worktree')), txt(btn('folder'))], ['group', label.attrs.id, 'button', 'Own Worktree', 'My Folder']);
+  const pressed = () => ['worktree', 'folder'].map((v) => btn(v).attrs['aria-pressed']);
+  const hint = () => txt(find(sheet, (x) => x.attrs.id === `${group.attrs.id}-hint`)[0]);
+  const body = () => n.calls.filter((c) => c.method === 'POST').at(-1).body;
+  assert.deepEqual([pressed(), hint()], [['true', 'false'], HINT.worktree], 'Own Worktree is the default');
+  byName(sheet, 'text').value = 'Fix the list';
+  pickTag(sheet, 'acme/api');
+  await sheet.onsubmit({ preventDefault() {} });
+  assert.deepEqual(body(), { text: 'Fix the list', kind: 'task', tag: 'acme/api', where: 'worktree' });
+
+  pickTag(sheet, 'notes'); // a plain folder: My Folder only
+  assert.deepEqual([pressed(), btn('worktree').attrs['aria-disabled'], hint()], [['false', 'true'], 'true', HINT.plain]);
+  btn('worktree').handlers.click[0]({});
+  assert.deepEqual(pressed(), ['false', 'true'], 'a click on the turned-off Own Worktree changes nothing');
+  await sheet.onsubmit({ preventDefault() {} });
+  assert.deepEqual(body(), { text: 'Fix the list', kind: 'task', tag: 'notes', where: 'folder' });
+
+  pickTag(sheet, 'acme/api'); // back on git: Irfan's own pick again
+  assert.deepEqual([pressed(), btn('worktree').attrs['aria-disabled'], hint()], [['true', 'false'], 'false', HINT.worktree]);
+  btn('folder').handlers.click[0]({});
+  assert.deepEqual([pressed(), hint()], [['false', 'true'], HINT.folder]);
+  await sheet.onsubmit({ preventDefault() {} });
+  assert.deepEqual(body(), { text: 'Fix the list', kind: 'task', tag: 'acme/api', where: 'folder' });
+
+  // Add Tag from a plain tag, then Cancel: the draft keeps his own pick, not the forced My Folder; on a git tag it shows
+  btn('worktree').handlers.click[0]({}); // his pick: Own Worktree
+  pickTag(sheet, 'notes');
+  byRole(sheet, 'add-tag').handlers.click[0]({}); // the Add Tag… button (no tag change runs first)
+  byRole(sheet, 'sheet-cancel').handlers.click[0]({});
+  await tick();
+  pickTag(sheet, 'acme/api');
+  assert.deepEqual(['worktree', 'folder'].map((v) => byRole(sheet, `where-${v}`).attrs['aria-pressed']), ['true', 'false'], 'Own Worktree survives the Add Tag round trip');
+
+  // the seg field itself: a button with aria-disabled="true" changes neither the value nor the pressed state, and no onChange runs
+  let changed = 0;
+  const sf = run('sheetFields')([{ k: 'x', label: 'X', kind: 'seg', opts: [['a', 'A'], ['b', 'B']] }], { x: 'a' }, () => { changed++; });
+  const [, b] = sf.ctl.x.kids;
+  b.setAttribute('aria-disabled', 'true');
+  b.handlers.click[0]({});
+  assert.deepEqual([sf.vals().x, b.attrs['aria-pressed'], changed], ['a', 'false', 0]);
+
+  // the tags not read yet: the draft sits on a plain tag; once GET /api/tags answers, My Folder is pressed
+  const late = trust(ctx, { 'GET /api/tags': { status: 200, json: { tags: P4_TAGS } } });
+  run('ui.tags = ["acme/api", "notes"]; ui.tagDefs = {}; ui.tagsLoaded = false;');
+  run('openNew("flow", { text: "Fix the list", tag: "notes" })');
+  assert.deepEqual([byRole(sheet, 'where-worktree').attrs['aria-pressed'], byRole(sheet, 'where-worktree').attrs['aria-disabled']], ['true', 'false'], 'before the answer: open');
+  for (let i = 0; i < 5; i++) await tick();
+  assert.ok(late.calls.some((c) => c.url === '/api/tags'));
+  assert.deepEqual([byRole(sheet, 'where-folder').attrs['aria-pressed'], byRole(sheet, 'where-worktree').attrs['aria-disabled']], ['true', 'true'], 'after the answer: My Folder only');
+
+  // Task tickets off: today's form, no Where, no where key
+  run('state.system.kinds = ["code"]; openNew("flow")');
+  assert.deepEqual([byRole(sheet, 'where'), !!byName(sheet, 'kind'), !!byName(sheet, 'sandbox')], [undefined, true, true]);
+  byName(sheet, 'text').value = 'Fix the list';
+  await sheet.onsubmit({ preventDefault() {} });
+  assert.deepEqual(late.calls.filter((c) => c.method === 'POST').at(-1).body, { text: 'Fix the list', kind: 'code' });
+});
+
+test('Phase 4 section 7: Promote to Flow with Task tickets on sends {kind: task, tag, where}; a plain tag turns Own Worktree off and sends My Folder; Task tickets off sends no where', async () => {
+  const ctx = sandbox();
+  const run = (code) => vm.runInContext(code, ctx);
+  const n = trust(ctx);
+  run(`state = { reminders: [{ id: "t_r1", title: "Fix it", status: "inbox" }], flows: [], system: { kinds: ["code", "task"] }, calendar: {} }; ui.tags = ["acme/api", "notes"]; ui.tagDefs = ${JSON.stringify(P4_TAGS)}; ui.tagsLoaded = true;`);
+  const r1 = run('state.reminders[0]');
+  const form = run('promoteForm(state.reminders[0])');
+  const where = byRole(form, 'promote-where'), tag = byRole(form, 'promote-tag');
+  assert.deepEqual([byRole(form, 'promote-kind'), where.kids.map(txt)], [undefined, ['Own Worktree', 'My Folder']]);
+  const send = async (f) => { f.handlers.submit[0]({ preventDefault() {} }); await tick(); return n.calls.filter((c) => c.method === 'POST').at(-1); };
+  tag.value = 'acme/api'; tag.handlers.change[0]({ target: tag });
+  assert.deepEqual([where.value, where.kids[0].disabled], ['worktree', false]);
+  const why = byRole(form, 'promote-where-hint');
+  assert.deepEqual([where.attrs['aria-describedby'], why.attrs.id, txt(why)], ['promote-where-hint', 'promote-where-hint', ''], 'a git tag: no reason to show');
+  assert.deepEqual(await send(form), { url: '/api/tickets/t_r1/promote', method: 'POST', body: { kind: 'task', tag: 'acme/api', where: 'worktree' } });
+  tag.value = 'notes'; tag.handlers.change[0]({ target: tag });
+  assert.deepEqual([where.value, where.kids[0].disabled, txt(why)], ['folder', true, HINT.plain], 'a plain folder: My Folder only, and why');
+  assert.deepEqual((await send(form)).body, { kind: 'task', tag: 'notes', where: 'folder' });
+
+  run('state.system.kinds = ["code"]; ui.pick = { kind: "", tag: "" }');
+  const old = vm.runInContext('promoteForm', ctx)(r1);
+  assert.deepEqual([byRole(old, 'promote-where'), !!byRole(old, 'promote-kind')], [undefined, true]);
+  assert.deepEqual((await send(old)).body, { kind: 'code' }, 'Task tickets off: no where key');
+});
+
+test('Phase 4 section 5: tree_wait shows "waits its turn" in the row and its wait text in the drawer as text; folder_busy words follow the mode', () => {
+  const ctx = sandbox();
+  const run = (code) => vm.runInContext(code, ctx);
+  const drawer = new Node('dialog');
+  /** @type {any} */ (ctx.document).querySelector = (s) => (s === '#drawer' ? drawer : new Node('stub'));
+  const f = { id: 't_tw1', title: 't', kind: 'task', tag: 'acme/api', state: 'planning', waiting: { reason: 'tree_wait' } };
+  run(`state = { reminders: [], flows: [${JSON.stringify(f)}], system: {}, calendar: {} };`);
+  assert.ok(textOf(run(`flowRow(${JSON.stringify(f)})`)).includes('waiting: waits its turn'), 'the row');
+  const TREE = 'Tasks on this repo make their worktrees one at a time, while no other Task\'s agent works there. This Task goes on by itself when its turn comes.';
+  run(`drawerBody(${JSON.stringify(f)}, ${JSON.stringify({ ...f, task: { mode: 'worktree', repo: '/x/api' } })})`);
+  assert.ok(walk(drawer).text.includes(TREE), 'the wait text, a text child');
+  const busy = (mode) => { const w = { ...f, waiting: { reason: 'folder_busy' } }; run(`drawerBody(${JSON.stringify(w)}, ${JSON.stringify({ ...w, task: { mode } })})`); return walk(drawer).text; };
+  const TREE_BUSY = 'A My Folder Task or a Code ticket uses this repo. It starts by itself when that one ends.';
+  assert.ok(busy('worktree').includes(TREE_BUSY));
+  const folder = busy('folder');
+  assert.ok(folder.includes('Another Task works in this folder, a folder inside it, or a folder around it. It starts by itself when that one ends.'), 'My Folder: today\'s words');
+  assert.ok(!folder.includes(TREE_BUSY));
+});
+
+test('Phase 4 sections 6 + 7: the drawer worktree line (text only), removed / kept after Done, none for My Folder', () => {
+  const ctx = sandbox();
+  const run = (code) => vm.runInContext(code, ctx);
+  const k = { id: 't_wt1', kind: 'task', state: 'working', worktree: `/w/t_wt1${P}`, task: { mode: 'worktree', repo: '/x/api', from: `main${S}` },
+    lease: { phase: 'working', started_at: '2026-10-20T00:00:00.000Z', ended_at: '2026-10-20T00:05:00.000Z', exit: 'result' } };
+  const card = (over) => run(`nowCard("t_wt1", ${JSON.stringify({ ...k, ...over, task: { ...k.task, ...over?.task } })}, {})`);
+  const line = (c, r) => (byRole(c, r) ? txt(byRole(c, r)) : undefined);
+  const c = card();
+  assert.equal(line(c, 'tree'), `Own Worktree /w/t_wt1${P} · branch tb/t_wt1 from main${S}`);
+  noMarkup(walk(c));
+  assert.equal(line(card({ task: { from: null } }), 'tree'), `Own Worktree /w/t_wt1${P} · branch tb/t_wt1`, 'detached: no from');
+  const done = card({ state: 'done' });
+  assert.deepEqual([line(done, 'tree'), line(done, 'tree-done')], [undefined, 'Worktree removed, with its ignored files (build output, local logs). Branch tb/t_wt1 stays.']);
+  const kept = card({ state: 'done', task: { kept: 2 } });
+  assert.deepEqual([line(kept, 'tree'), line(kept, 'tree-done')], [`Own Worktree /w/t_wt1${P} · branch tb/t_wt1 from main${S}`,'Worktree kept: 2 files not committed. tb gc removes it.']);
+  assert.equal(line(card({ state: 'done', task: { tree_left: true } }), 'tree-done'), 'Worktree kept: tbd could not remove it. tb gc removes it.');
+  const mine = card({ worktree: '/x/notes', task: { mode: 'folder' } });
+  assert.deepEqual([line(mine, 'tree'), line(mine, 'tree-done')], [undefined, undefined], 'My Folder: no worktree line');
+});
+
+test('Phase 4 section 6: the Done toast says removed, kept N, or kept (tree_left) from tbd\'s answer; My Folder keeps its words', async () => {
+  const box = new Node('div');
+  const ctx = sandbox({ '#toasts': box });
+  const run = (code) => vm.runInContext(code, ctx);
+  const own = { id: 't_dn1', kind: 'task', state: 'done', task: { mode: 'worktree' } };
+  const toastOf = async (ticket) => {
+    trust(ctx, { 'POST /api/tickets/t_dn1/close': { status: 200, json: { ticket } } });
+    await run('post("t_dn1", "close", {}, "task-done")');
+    return txt(box.kids.at(-1));
+  };
+  assert.equal(await toastOf(own), 'Flow Done Worktree removed, with its ignored files (build output, local logs). Branch tb/t_dn1 stays.');
+  assert.equal(await toastOf({ ...own, task: { mode: 'worktree', kept: 1 } }), 'Flow Done Worktree kept: 1 file not committed. tb gc removes it.');
+  assert.equal(await toastOf({ ...own, task: { mode: 'worktree', tree_left: true } }), 'Flow Done Worktree kept: tbd could not remove it. tb gc removes it.');
+  assert.equal(await toastOf({ ...own, task: { mode: 'folder' } }), 'Flow Done Your folder is free for the next Task. After a Commit and Push it stays on the Task\'s branch (tb/<id>).', 'My Folder: today\'s words');
+});
+
+test('Phase 4 review: a Clean Up row shows the hint tbd sends, as text', async () => {
+  const ctx = sandbox();
+  const hint = `if it was an Own Worktree, run git worktree unlock /w/t_gc1 && git worktree prune in its repo ${P}`;
+  trust(ctx, { 'GET /api/gc?limit=20': { status: 200, json: { total: 2, items: [{ id: 'worktree/t_gc1', kind: 'worktree', bytes: 10, reason: 'ticket missing', hint }, { id: 'log/a', kind: 'log', bytes: 10, reason: 'old' }] } } });
+  const r = await vm.runInContext('RUNS.gc({ mode: "list", limit: "" })', ctx);
+  assert.deepEqual(Array.from(r.lines).slice(1).map((l) => l.split(' · ').at(-1)), [hint, 'old'], 'the hint ends its row; a row without one is as before');
+});

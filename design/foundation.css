@@ -293,6 +293,7 @@ kbd, .kbd {
 .seg button:hover { color: var(--fg); }
 .seg button:is([aria-pressed="true"], [aria-selected="true"], [aria-current="true"]) { background: var(--surface-raised); color: var(--fg); box-shadow: var(--shadow-control); }
 .seg button:focus-visible { box-shadow: var(--focus), var(--shadow-control); } /* the selected segment keeps its ring (§15) */
+.seg button[aria-disabled="true"] { color: var(--fg-disabled); cursor: default; } /* still focusable: read as dimmed */
 .seg .n { margin-left: 6px; color: var(--fg-subtle); font-weight: 400; font-variant-numeric: tabular-nums; }
 
 /* ---------- filter chip ---------- */
