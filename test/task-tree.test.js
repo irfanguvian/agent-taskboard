@@ -242,3 +242,102 @@ test('a Task mid-add (design section 4, the adding set): its new tb/<x> is no re
   git(dir3, 'update-ref', '-d', `refs/heads/tb/${x}`);
   await fsm.transition(store, x, 'cancelled', 'you');
 });
+
+// ---- build step 3 (design revision 6 tests 2, 10, 12, 15) ----
+const actions = require('../lib/task-actions');
+const { createGc } = require('../lib/gc');
+const gc = createGc({ store, tbHome: home });
+const yours = (id) => store.updateTicket(id, (k) => ({ ...k, state: 'working', waiting: { reason: 'you', since: new Date().toISOString() }, lease: { gen: 1, phase: 'working', round: k.round, pid: 1, exit: 'result' } }));
+const agentCommit = (wt, file) => {
+  fs.writeFileSync(path.join(wt, file), `${file}\n`);
+  git(wt, 'add', file);
+  git(wt, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', file);
+};
+
+test('unpushed line (design test 12): an Own Worktree whose agent committed during work → no push target, push_why names the count, origin and the Terminal hint; the same on a My Folder Task → "no changed files to commit"', async () => {
+  const id = await startedAt();
+  agentCommit(store.getTicket(id).worktree, `a-${id}.txt`);
+  assert.deepEqual(await task.pushTo(store.getTicket(id), store.listTags().pin),
+    { push_to: null, push_why: `tb/${id} has 1 commit not on origin: push from Terminal (\`git push origin tb/${id}\` in the worktree)` });
+
+  git(dir, 'config', 'user.name', 'Irfan');
+  git(dir, 'config', 'user.email', 'irfan@example.com');
+  git(dir, 'remote', 'add', 'origin', path.join(ROOT, 'nowhere.git'));
+  const mine = { id: 't_fold02', tag: 'acme', worktree: dir, task: { mode: 'folder', real: dir } };
+  const b = /** @type {any} */ (await task.baseline(mine));
+  assert.equal(b.reasons, undefined, JSON.stringify(b.reasons));
+  agentCommit(dir, 'b.txt');
+  assert.deepEqual(await task.pushTo({ ...mine, ...b.patch, task: { ...mine.task, base: b.base } }, store.listTags().acme), { push_to: null, push_why: 'no changed files to commit' });
+});
+
+test('Done keeps a dirty worktree (design test 2) and tb gc then lists and removes it (design test 10): task.kept = 1, folder there; the row says "1 file not committed", no clone count; delete removes the exact git folder, a stale entry stays (no prune), the branch stays; a live run → refused', async () => {
+  const id = await startedAt();
+  const k = store.getTicket(id);
+  fs.writeFileSync(path.join(k.worktree, 'left.txt'), 'x\n');
+  await yours(id);
+  const d = await actions.done(id, 'ui');
+  assert.deepEqual([d.state, d.task.kept], ['done', 1]);
+  assert.ok(fs.existsSync(path.join(k.worktree, 'left.txt')) && fs.existsSync(k.git_dir), 'the folder and its git folder stay');
+
+  const row = (await gc.list({ limit: 100 })).items.find((i) => i.id === `worktree/${id}`);
+  assert.equal(row.reason, 'ticket done · 1 file not committed');
+  assert.equal(row.clone_only, undefined, 'no clone-only count for a worktree');
+  await store.updateTicket(id, (x) => ({ ...x, lease: { ...x.lease, exit: undefined } })); // item 3: a run still live
+  assert.deepEqual((await gc.remove({ ids: [`worktree/${id}`] })).skipped, [{ id: `worktree/${id}`, reason: 'its run is still live: try again once it ended' }]);
+  assert.ok(fs.existsSync(k.git_dir));
+  await store.updateTicket(id, (x) => ({ ...x, lease: { ...x.lease, exit: 'result' } }));
+  const stale = path.join(dir3, '.git', 'worktrees', 'stale1');
+  fs.mkdirSync(stale);
+  fs.writeFileSync(path.join(stale, 'gitdir'), `${path.join(ROOT, 'gone', '.git')}\n`);
+  const r = await gc.remove({ ids: [`worktree/${id}`] });
+  assert.deepEqual([r.deleted.map((x) => x.id), r.skipped], [[`worktree/${id}`], []]);
+  assert.equal(fs.existsSync(k.worktree), false);
+  assert.equal(fs.existsSync(k.git_dir), false, 'its exact git folder is gone');
+  assert.ok(fs.existsSync(path.join(stale, 'gitdir')), 'a stale entry stays: no git worktree prune');
+  fs.rmSync(stale, { recursive: true });
+  assert.equal(git(dir3, 'rev-parse', `tb/${id}`), k.base_sha, 'the branch stays');
+});
+
+test('branch deletes (design test 15, D-0238): tb gc deleting a done Task\'s tb/<C> Blocks no open Task and writes one record line; Irfan deleting tb/<B> Blocks A; an unreadable record → no skip; a branch moved forward then deleted by gc → no Block; one reset to an older commit → Block', async () => {
+  const [b, c, dd, e] = [await startedAt(), await startedAt(), await startedAt(), await startedAt()];
+  const a = await startedAt(); // last: the others' tb/<x> are in A's start record
+  for (const id of [c, dd, e]) await store.updateTicket(id, (k) => ({ ...k, state: 'done' }));
+  const rec = path.join(home, 'gc-branches.jsonl');
+  fs.rmSync(rec, { force: true });
+  const reasons = async () => (await task.check(store.getTicket(a))).join('\n');
+  const gcDel = async (id) => {
+    const ids = [`worktree/${id}`, `branch/tb/${id}`];
+    const listed = (await gc.list({ limit: 100 })).items.filter((i) => ids.includes(i.id));
+    assert.equal(listed.length, 2, JSON.stringify(listed));
+    const r = await gc.remove({ ids });
+    assert.deepEqual(r.deleted.map((x) => x.id), ids, JSON.stringify(r.skipped));
+    assert.equal(git(dir3, 'branch', '--list', `tb/${id}`), '');
+  };
+
+  await gcDel(c);
+  assert.equal(await reasons(), '');
+  assert.deepEqual(await task.check(store.getTicket(b)), []);
+  const line = JSON.parse(fs.readFileSync(rec, 'utf8'));
+  assert.deepEqual(line, { common: `${dir3}/.git`, ref: `refs/heads/tb/${c}`, sha: store.getTicket(c).base_sha });
+
+  const bSha = git(dir3, 'rev-parse', `tb/${b}`);
+  git(dir3, 'update-ref', '-d', `refs/heads/tb/${b}`); // Irfan's terminal
+  assert.match(await reasons(), new RegExp(`deleted refs/heads/tb/${b}: undo`));
+  git(dir3, 'update-ref', `refs/heads/tb/${b}`, bSha);
+
+  fs.chmodSync(rec, 0o000);
+  try {
+    assert.match(await reasons(), new RegExp(`deleted refs/heads/tb/${c}: undo`), 'no readable record: no skip');
+  } finally {
+    fs.chmodSync(rec, 0o600);
+  }
+
+  agentCommit(store.getTicket(dd).worktree, `d-${dd}.txt`); // D's own Commit and Push moved it on after A started
+  await gcDel(dd);
+  assert.equal(await reasons(), '');
+
+  git(dir3, 'update-ref', `refs/heads/tb/${e}`, git(dir3, 'rev-parse', 'HEAD~1')); // not a descendant of A's start record
+  await gcDel(e);
+  assert.match(await reasons(), new RegExp(`deleted refs/heads/tb/${e}: undo`));
+  for (const id of [a, b]) await fsm.transition(store, id, 'cancelled', 'you');
+});

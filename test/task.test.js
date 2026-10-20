@@ -9,7 +9,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { execFileSync, spawn } = require('node:child_process');
 const { startTbd } = require('./helpers/tbd');
-const { FAKE, RUN_SPY, read, until, alive, reap, pidsOf, hasRun } = require('./helpers/runs');
+const { FAKE, RUN_SPY, read, lines, until, alive, reap, pidsOf, hasRun } = require('./helpers/runs');
 
 const ROOT = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'task-')));
 after(() => fs.rmSync(ROOT, { recursive: true, force: true }));
@@ -41,16 +41,16 @@ function repo() {
   git(dir, 'remote', 'add', 'origin', path.join(ROOT, 'nowhere.git'));
   return dir;
 }
-// scenarios: [result per invocation]; terminal: config.terminal override
-async function boot(t, scenarios, dir, terminal = TERMINAL) {
+// scenarios: [result per invocation]; terminal: config.terminal override; tag: more tag fields; env: more tbd env
+async function boot(t, scenarios, dir, terminal = TERMINAL, { tag = {}, env = {} } = {}) {
   const root = fs.mkdtempSync(path.join(ROOT, 'tbd-'));
   const scn = fs.mkdtempSync(path.join(ROOT, 'scn-'));
   scenarios.forEach((s, i) => fs.writeFileSync(path.join(scn, `${i + 1}.json`), JSON.stringify(s)));
   const dumps = fs.mkdtempSync(path.join(ROOT, 'dump-'));
   const tbd = await startTbd({
     root,
-    files: { 'config.json': { ...CONFIG, terminal }, 'tags.json': { acme: { type: 'git', path: dir, base: 'main' } } },
-    env: { NODE_OPTIONS: RUN_SPY, TEST_REAL_HANDLERS: '1', FAKE_CLAUDE_SCENARIO_DIR: scn, FAKE_CLAUDE_DUMP_DIR: dumps },
+    files: { 'config.json': { ...CONFIG, terminal }, 'tags.json': { acme: { type: 'git', path: dir, base: 'main', ...tag } } },
+    env: { NODE_OPTIONS: RUN_SPY, TEST_REAL_HANDLERS: '1', FAKE_CLAUDE_SCENARIO_DIR: scn, FAKE_CLAUDE_DUMP_DIR: dumps, ...env },
   });
   t.after(async () => { reap(pidsOf(tbd)); await tbd.stop(); });
   const dump = (n) => { const f = path.join(dumps, `${n}.json`); return fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, 'utf8')) : null; };
@@ -532,4 +532,85 @@ test('Own Worktree git link check every tick (design test 16, D-0239): Irfan\'s 
   assert.equal(read(tbd, a).waiting.why, `the worktree's git links changed: do not open a terminal in ${wt}: Cancel`);
   await new Promise((r) => setTimeout(r, 2000));
   assert.equal(fs.existsSync(marker), false, 'tbd ran no git in the swapped folder');
+});
+
+// ---- Phase 4 Own Worktree, build step 3 (design revision 6 test 1) ----
+// the run key registered (TBX_RUN) before tb-git asks (as test/tb-git.test.js): polled on tbd.sock every 100 ms, ≤ 20 s
+const KEYED = `const net=require('net');const once=()=>new Promise((r)=>{let b='';const c=net.connect(process.env.TBD_SOCK);c.setEncoding('utf8');c.on('data',(d)=>{b+=d;});c.on('close',()=>r(b));c.on('error',()=>r(''));c.on('connect',()=>c.write(JSON.stringify({op:'approve.ask',run:process.env.TBX_RUN})+'\\n'));});(async()=>{for(let i=0;i<200;i++){const b=await once();if(b&&!/unknown run key/.test(b))process.exit(0);await new Promise((r)=>setTimeout(r,100));}process.exit(1);})();`;
+
+test('Own Worktree whole path (design test 1): the add (locked, tb/<id> at HEAD, node_modules, env file, untracked husky hook), planning walls <common>, working writes it with the sibling walled; Commit and Push → the agent commits with Irfan\'s repo hook and pushes tb/<id> through tb-git with no card; Done removes the folder and its exact git folder, a stale entry and the branch stay', async (t) => {
+  const dir = repo();
+  const p = fs.realpathSync(dir);
+  const common = `${p}/.git`;
+  const remote = path.join(ROOT, `remote-${path.basename(dir)}.git`);
+  git(ROOT, 'init', '-q', '--bare', remote);
+  git(dir, 'remote', 'set-url', 'origin', remote);
+  git(dir, 'push', '-q', 'origin', 'main');
+  const marker = path.join(ROOT, `hook-ran-${path.basename(dir)}`);
+  fs.mkdirSync(path.join(dir, '.husky', '_'));
+  fs.writeFileSync(path.join(dir, '.husky', '_', 'pre-commit'), `#!/bin/sh\npwd > ${marker}\n`, { mode: 0o755 }); // husky v9: untracked
+  git(dir, 'config', 'core.hooksPath', '.husky/_');
+  fs.mkdirSync(path.join(dir, 'node_modules', 'left-pad'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'node_modules', 'left-pad', 'index.js'), 'module.exports = 1;\n');
+  fs.writeFileSync(path.join(dir, '.env'), 'A=1\n');
+  fs.writeFileSync(path.join(dir, 'notes.txt'), 'Irfan\'s open change\n');
+  const sib = path.join(ROOT, `sib-${path.basename(dir)}`);
+  git(dir, 'worktree', 'add', '-q', sib, '-b', `sib-${path.basename(dir)}`); // Irfan's own linked worktree
+  const stale = path.join(common, 'worktrees', 'stale1'); // an entry no tbd code may prune
+  fs.mkdirSync(stale);
+  fs.writeFileSync(path.join(stale, 'gitdir'), `${path.join(ROOT, 'gone', '.git')}\n`);
+  const deny = path.join(ROOT, `deny-${path.basename(dir)}.txt`);
+  fs.writeFileSync(deny, 'zebracorp\n');
+  const sh = (cmd) => ({ exec: ['/bin/sh', '-c', cmd] });
+  const work = { steps: [sh('printf "hello\\nworld\\n" > README.md'), { result: { structured_output: DONE } }] };
+  const commitRun = { steps: [{ exec: [process.execPath, '-e', KEYED] },
+    sh('git add -- README.md && git commit -q -m "docs: add a line" -- README.md && tb-git push origin "$(git symbolic-ref --short HEAD)"'), { result: { structured_output: DONE } }] };
+  const tbd = await boot(t, [result(PLAN), work, commitRun], dir, { ...TERMINAL, git_bridge: true },
+    { tag: { env_files: ['.env'] }, env: { TB_GIT_FILE_REMOTE: remote, TB_PUSH_FILE_OK: '1', TB_DENYLIST: deny } });
+  const id = await started(tbd);
+  await until(() => read(tbd, id).state === 'plan_approval', 30_000, 'plan_approval');
+  const k = read(tbd, id);
+  const wt = path.join(fs.realpathSync(tbd.tbHome), 'worktrees', id);
+  const head = git(dir, 'rev-parse', 'HEAD');
+  assert.deepEqual([k.worktree, k.git_dir, git(dir, 'rev-parse', `tb/${id}`)], [wt, `${common}/worktrees/${id}`, head]);
+  assert.ok(trees(dir).includes(`worktree ${wt}\nHEAD ${head}\nbranch refs/heads/tb/${id}\nlocked taskboard ${id}`), trees(dir).join('\n---\n'));
+  assert.equal(fs.existsSync(path.join(wt, 'notes.txt')), false, 'Irfan\'s open change stays in his repo');
+  assert.equal(fs.readFileSync(path.join(wt, 'node_modules', 'left-pad', 'index.js'), 'utf8'), 'module.exports = 1;\n');
+  assert.equal(fs.readFileSync(path.join(wt, '.env'), 'utf8'), 'A=1\n');
+  assert.equal(fs.readFileSync(path.join(wt, '.husky', '_', 'pre-commit'), 'utf8'), `#!/bin/sh\npwd > ${marker}\n`);
+  assert.ok(settings(tbd, id, 1).sandbox.filesystem.denyWrite.includes(common), 'planning: <common> write-denied whole');
+
+  await approve(tbd, id);
+  await waitsYou(tbd, id);
+  const w = settings(tbd, id, 2).sandbox.filesystem;
+  assert.ok(w.allowWrite.includes(common), 'working: <common> writable');
+  assert.ok(!w.denyWrite.includes(common), 'no whole <common> deny');
+  for (const row of [`${common}/config`, `${common}/HEAD`, `${common}/index`, `${common}/worktrees/${path.basename(sib)}`, `${wt}/.git`]) assert.ok(w.denyWrite.includes(row), row);
+  const r1 = read(tbd, id).task_result;
+  assert.deepEqual([r1.push_to?.branch, r1.push_to?.new_branch, r1.push_to?.files], [`tb/${id}`, false, ['README.md']], JSON.stringify(r1));
+
+  const cp = await tbd.api('POST', `/api/tickets/${id}/push`);
+  assert.equal(cp.status, 202, cp.text);
+  const g = read(tbd, id);
+  await until(() => { const x = read(tbd, id); return x.waiting?.reason === 'you' && x.lease?.exit === 'result' && x.lease.gen > g.lease.gen; }, 60_000, 'the commit run ended');
+  const log = path.join(tbd.tbHome, 'tickets', id, 'runs', '3.jsonl');
+  const execs = lines(log).filter((l) => l.subtype === 'fake_exec');
+  assert.deepEqual(execs.map((e) => e.status), [0, 0], JSON.stringify(execs.map((e) => e.stderr)));
+  const sha = git(dir, 'rev-parse', `tb/${id}`);
+  assert.notEqual(sha, head, 'the agent committed on tb/<id>');
+  assert.equal(git(dir, 'log', '-1', '--format=%an <%ae>|%cn <%ce>|%s', sha), 'Irfan <irfan@example.com>|Irfan <irfan@example.com>|docs: add a line');
+  assert.equal(git(dir, 'symbolic-ref', '--short', 'HEAD'), 'main', 'Irfan\'s main checkout did not move');
+  assert.equal(fs.readFileSync(marker, 'utf8').trim(), wt, 'his repo hook ran on the agent\'s commit, in the worktree (tbd\'s copy)');
+  assert.equal(git(remote, 'rev-parse', `refs/heads/tb/${id}`), sha, 'tb-git pushed tb/<id>');
+  assert.deepEqual((await tbd.api('GET', `/api/tickets/${id}`)).json.ticket.approvals ?? [], [], 'no card: the grant was used');
+  assert.equal(read(tbd, id).push_grant, undefined);
+
+  const c = await tbd.api('POST', `/api/tickets/${id}/close`, {});
+  assert.equal(c.status, 200, c.text);
+  assert.deepEqual([read(tbd, id).state, read(tbd, id).task.kept], ['done', undefined]);
+  assert.equal(fs.existsSync(wt), false, 'the worktree folder is gone');
+  assert.equal(fs.existsSync(`${common}/worktrees/${id}`), false, 'its exact git folder is gone');
+  assert.equal(fs.readFileSync(path.join(stale, 'gitdir'), 'utf8'), `${path.join(ROOT, 'gone', '.git')}\n`, 'a stale entry stays: no repo-wide prune');
+  assert.equal(git(dir, 'rev-parse', `tb/${id}`), sha, 'the branch stays');
+  assert.ok(fs.existsSync(path.join(sib, 'README.md')), 'Irfan\'s own worktree stays');
 });

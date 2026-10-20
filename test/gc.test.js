@@ -183,7 +183,9 @@ describe('list', () => {
     // change (R1 M13: gc deletes tb branches + refs/tb): + one ref list of that repo per gc list (list, and remove's fresh one)
     const ends = (c, s) => c.split('\n')[0].endsWith(s);
     const PRUNE = ' worktree prune';
-    const REFS = ' for-each-ref --format=%(refname) refs/heads/tb refs/tb';
+    // Phase 4 contract change (design revision 6 section 6; was --format=%(refname)): each branch's sha is listed too,
+    // for the delete record and the old-value delete
+    const REFS = ' for-each-ref --format=%(refname) %(objectname) refs/heads/tb refs/tb';
     assert.deepEqual([calls.filter((c) => ends(c, PRUNE)).length, calls.filter((c) => ends(c, REFS)).length, calls.length], [2, 2, 4], 'one worktree prune per worktree with a known repo, one ref list per gc list');
     for (const c of calls) {
       const [argv, ...env] = c.split('\n').filter(Boolean);
@@ -414,5 +416,69 @@ describe('e2e: GET/POST /api/gc and tb gc on a real tbd', () => {
     assert.equal((await tb('gc', '--limit', '0')).code, 2);
     const after = await tb('gc', '--after', 'zzz'); // a page cursor (a value), not eval chaos's --after switch
     assert.deepEqual([after.code, after.stdout], [0, 'gc[0]: none\n']);
+  });
+});
+
+// ---- Phase 4 build step 3 (design revision 6 test 10, section 6): an Own Worktree Task's tb/<id> branch rows ----
+describe('Own Worktree Task branches', () => {
+  // a done Own Worktree Task whose tb/<id> has one commit no other branch has (the store's fields gc reads)
+  function treeWorld(gitBin) {
+    const w = world();
+    const id = 't_tree01';
+    git(w.dev, 'branch', `tb/${id}`, 'main');
+    git(w.dev, 'branch', 'tb/t_tree02', 'main'); // another Task's, not listed
+    const idx = path.join(w.root, 'idx');
+    const env = { ...process.env, GIT_INDEX_FILE: idx, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
+    const g = (...a) => spawnSync('git', ['-C', w.dev, ...a], { encoding: 'utf8', env }).stdout.trim();
+    g('read-tree', 'main');
+    git(w.dev, 'update-ref', `refs/heads/tb/${id}`, g('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit-tree', g('write-tree'), '-p', 'main', '-m', 'work'));
+    const t = { id, kind: 'task', state: 'done', task: { mode: 'worktree', repo: w.dev }, common_dir: w.tickets[0].common_dir, updated_at: new Date().toISOString() };
+    w.tickets.push(t, { id: 't_tree02', kind: 'task', state: 'working', task: { mode: 'worktree', repo: w.dev }, common_dir: t.common_dir });
+    const gc = createGc({ store: { listTickets: () => w.tickets }, tbHome: w.tbHome, ...(gitBin && { git: gitBin }) });
+    return { ...w, id, gc, sha: () => git(w.dev, 'rev-parse', `refs/heads/tb/${id}`).trim(), rec: path.join(w.tbHome, 'gc-branches.jsonl') };
+  }
+
+  test('a done Task\'s tb/<id> is listed with its sha and unmerged count; delete writes {common, ref, sha} first, then removes exactly it; a missing ticket\'s row carries the unlock + prune hint', async () => {
+    const w = treeWorld();
+    const sha = w.sha();
+    const { items } = await w.gc.list({ limit: 100 });
+    const row = items.find((i) => i.kind === 'branch');
+    assert.deepEqual([row.id, row.sha, row.reason], [`branch/tb/${w.id}`, sha, 'ticket done · 1 unmerged commit']);
+    assert.equal(items.filter((i) => i.kind === 'branch').length, 1, 'the open Task\'s branch is not listed');
+    assert.equal(items.find((i) => i.id === 'worktree/t_orph01').hint, 'if it was an Own Worktree, run `git worktree unlock <path> && git worktree prune` in its repo');
+    assert.equal(items.find((i) => i.id === 'worktree/t_done01').hint, undefined);
+    const r = await w.gc.remove({ ids: [`branch/tb/${w.id}`] });
+    assert.deepEqual([r.deleted.map((d) => d.id), r.skipped], [[`branch/tb/${w.id}`], []]);
+    assert.equal(git(w.dev, 'branch', '--list', `tb/${w.id}`), '');
+    assert.deepEqual(fs.readFileSync(w.rec, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)), [{ common: w.tickets[0].common_dir, ref: `refs/heads/tb/${w.id}`, sha }]);
+  });
+
+  test('a branch moved after the listing is skipped and stays (the old-value delete), its record cancelled by a line with no sha; a record that cannot be written (a link there) → no delete', async () => {
+    const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'gc-mv-')));
+    roots.push(root);
+    const arm = path.join(root, 'arm');
+    const to = path.join(root, 'to');
+    const wrap = path.join(root, 'git'); // the real git; once armed, moves the branch right after gc's for-each-ref read it
+    fs.writeFileSync(wrap, `#!/bin/sh\n/usr/bin/git "$@"; s=$?\ncase "$*" in *for-each-ref*) if [ -f "${arm}" ]; then rm "${arm}"; /usr/bin/git --git-dir "$(cat "${to}.gd")" update-ref "$(cat "${to}")" HEAD; fi;; esac\nexit $s\n`, { mode: 0o755 });
+    const w = treeWorld(wrap);
+    const was = w.sha();
+    fs.writeFileSync(to, `refs/heads/tb/${w.id}`);
+    fs.writeFileSync(`${to}.gd`, w.tickets[0].common_dir);
+    fs.writeFileSync(arm, '');
+    const r = await w.gc.remove({ ids: [`branch/tb/${w.id}`] });
+    assert.deepEqual(r.deleted, []);
+    assert.equal(r.skipped.length, 1);
+    assert.equal(w.sha(), git(w.dev, 'rev-parse', 'main').trim(), 'the moved branch stays where it moved');
+    assert.notEqual(w.sha(), was);
+    assert.deepEqual(fs.readFileSync(w.rec, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l).sha), [was, null]);
+
+    const w2 = treeWorld();
+    const before = w2.sha();
+    fs.symlinkSync(path.join(w2.root, 'victim', 'keep'), w2.rec);
+    const r2 = await w2.gc.remove({ ids: [`branch/tb/${w2.id}`] });
+    assert.deepEqual(r2.deleted, []);
+    assert.match(r2.skipped[0].reason, /^the delete was not written down \(ELOOP\): not deleted$/);
+    assert.equal(w2.sha(), before, 'the branch stays');
+    assert.equal(fs.readFileSync(path.join(w2.root, 'victim', 'keep'), 'utf8'), 'do not touch', 'nothing written through the link');
   });
 });
