@@ -299,9 +299,9 @@ test('Done keeps a dirty worktree (design test 2) and tb gc then lists and remov
 });
 
 test('branch deletes (design test 15, D-0238): tb gc deleting a done Task\'s tb/<C> Blocks no open Task and writes one record line; Irfan deleting tb/<B> Blocks A; an unreadable record → no skip; a branch moved forward then deleted by gc → no Block; one reset to an older commit → Block', async () => {
-  const [b, c, dd, e] = [await startedAt(), await startedAt(), await startedAt(), await startedAt()];
+  const [b, c, dd, e, f] = [await startedAt(), await startedAt(), await startedAt(), await startedAt(), await startedAt()];
   const a = await startedAt(); // last: the others' tb/<x> are in A's start record
-  for (const id of [c, dd, e]) await store.updateTicket(id, (k) => ({ ...k, state: 'done' }));
+  for (const id of [c, dd, e, f]) await store.updateTicket(id, (k) => ({ ...k, state: 'done' }));
   const rec = path.join(home, 'gc-branches.jsonl');
   fs.rmSync(rec, { force: true });
   const reasons = async () => (await task.check(store.getTicket(a))).join('\n');
@@ -336,8 +336,54 @@ test('branch deletes (design test 15, D-0238): tb gc deleting a done Task\'s tb/
   await gcDel(dd);
   assert.equal(await reasons(), '');
 
+  // round 1 review: gc's delete of tb/<F> refused (it had moved) → a later line with no sha cancels the first; a delete
+  // by hand afterwards Blocks
+  const fRef = `refs/heads/tb/${f}`;
+  fs.appendFileSync(rec, `${JSON.stringify({ common: `${dir3}/.git`, ref: fRef, sha: store.getTicket(f).base_sha })}\n${JSON.stringify({ common: `${dir3}/.git`, ref: fRef, sha: null })}\n`);
+  git(dir3, 'update-ref', '-d', fRef);
+  assert.match(await reasons(), new RegExp(`deleted refs/heads/tb/${f}: undo`));
+  git(dir3, 'update-ref', fRef, store.getTicket(f).base_sha);
+  assert.equal(await reasons(), '');
+
   git(dir3, 'update-ref', `refs/heads/tb/${e}`, git(dir3, 'rev-parse', 'HEAD~1')); // not a descendant of A's start record
   await gcDel(e);
   assert.match(await reasons(), new RegExp(`deleted refs/heads/tb/${e}: undo`));
   for (const id of [a, b]) await fsm.transition(store, id, 'cancelled', 'you');
+});
+
+test('Done after review round 1: a remove that fails (a folder it cannot empty) → task.tree_left, the folder stays; a held lease ends as cancelled (no Continue in Terminal into it); a file new since the check → kept, not removed; his terminal still on the session → tree_left', async () => {
+  const id = await added();
+  const wt = store.getTicket(id).worktree;
+  fs.mkdirSync(path.join(wt, 'locked'));
+  fs.writeFileSync(path.join(wt, 'locked', 'f'), 'x\n');
+  await tick(id); // the start point: locked/ is dirty there already, so it is no file the Task left
+  assert.ok(store.getTicket(id).task.base, store.getTicket(id).waiting?.why);
+  fs.chmodSync(path.join(wt, 'locked'), 0o555);
+  try {
+    await yours(id);
+    const d = await actions.done(id, 'ui');
+    assert.deepEqual([d.state, d.task.tree_left, d.task.kept], ['done', true, undefined]);
+    assert.ok(fs.existsSync(path.join(wt, 'locked', 'f')), 'the folder stays');
+  } finally {
+    fs.chmodSync(path.join(wt, 'locked'), 0o755);
+  }
+
+  const session = '11111111-2222-4333-8444-555555555555';
+  const held = async () => {
+    const x = await startedAt();
+    await store.updateTicket(x, (k) => ({ ...k, state: 'working', waiting: { reason: 'you', since: new Date().toISOString() }, lease: { gen: 1, phase: 'working', round: k.round, pid: 1, exit: 'held', session } }));
+    return x;
+  };
+  const late = await held();
+  const asked = [];
+  const d2 = await actions.done(late, 'ui', { free: async (i, l) => { asked.push([i, l.exit, l.session]); fs.writeFileSync(path.join(store.getTicket(late).worktree, 'late.txt'), 'x\n'); } });
+  assert.deepEqual(asked, [[late, 'held', session]], 'his terminal asked again with the held lease');
+  assert.deepEqual([d2.state, d2.lease.exit, d2.task.kept, d2.task.tree_left], ['done', 'cancelled', 1, undefined]);
+  assert.ok(fs.existsSync(path.join(d2.worktree, 'late.txt')), 'kept: a file new since the check');
+  await assert.rejects(pageTools.openTerminal(late, {}), (/** @type {any} */ e) => e.status === 409 && /not held/.test(e.message));
+
+  const busy = await held();
+  const d3 = await actions.done(busy, 'ui', { free: async () => { throw new Error('claude --resume still runs'); } });
+  assert.deepEqual([d3.state, d3.task.tree_left], ['done', true]);
+  assert.ok(fs.existsSync(d3.worktree) && fs.existsSync(d3.git_dir), 'the folder and its git folder stay');
 });

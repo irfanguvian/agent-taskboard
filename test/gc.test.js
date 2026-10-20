@@ -445,7 +445,8 @@ describe('Own Worktree Task branches', () => {
     const row = items.find((i) => i.kind === 'branch');
     assert.deepEqual([row.id, row.sha, row.reason], [`branch/tb/${w.id}`, sha, 'ticket done · 1 unmerged commit']);
     assert.equal(items.filter((i) => i.kind === 'branch').length, 1, 'the open Task\'s branch is not listed');
-    assert.equal(items.find((i) => i.id === 'worktree/t_orph01').hint, 'if it was an Own Worktree, run `git worktree unlock <path> && git worktree prune` in its repo');
+    // round 1 review: the row's own path, shell-quoted (was <path>)
+    assert.equal(items.find((i) => i.id === 'worktree/t_orph01').hint, `if it was an Own Worktree, run \`git worktree unlock '${path.join(fs.realpathSync(w.tbHome), 'worktrees', 't_orph01')}' && git worktree prune\` in its repo`);
     assert.equal(items.find((i) => i.id === 'worktree/t_done01').hint, undefined);
     const r = await w.gc.remove({ ids: [`branch/tb/${w.id}`] });
     assert.deepEqual([r.deleted.map((d) => d.id), r.skipped], [[`branch/tb/${w.id}`], []]);
@@ -480,5 +481,34 @@ describe('Own Worktree Task branches', () => {
     assert.match(r2.skipped[0].reason, /^the delete was not written down \(ELOOP\): not deleted$/);
     assert.equal(w2.sha(), before, 'the branch stays');
     assert.equal(fs.readFileSync(path.join(w2.root, 'victim', 'keep'), 'utf8'), 'do not touch', 'nothing written through the link');
+  });
+
+  test('round 1 review: a My Folder Task\'s done tb/<id> is listed too; a branch a rebase stopped on (detached in git worktree list) is refused and stays; two deletes of one branch at once → one delete, one record line, no sha-null line', async () => {
+    const w = treeWorld();
+    git(w.dev, 'branch', 'tb/t_fold03', 'main');
+    w.tickets.push({ id: 't_fold03', kind: 'task', state: 'done', task: { mode: 'folder', real: w.dev }, common_dir: w.tickets[0].common_dir, updated_at: new Date().toISOString() });
+    assert.equal((await w.gc.list({ limit: 100 })).items.find((i) => i.id === 'branch/tb/t_fold03')?.reason, 'ticket done · 0 unmerged commits');
+
+    const id = ['branch/tb/t_fold03'];
+    const sha = git(w.dev, 'rev-parse', 'refs/heads/tb/t_fold03').trim();
+    const both = await Promise.all([w.gc.remove({ ids: id }), w.gc.remove({ ids: id })]);
+    assert.deepEqual(both.flatMap((r) => r.deleted.map((d) => d.id)), id, JSON.stringify(both));
+    assert.ok(['already being deleted', 'not in the current gc list'].includes(both.flatMap((r) => r.skipped)[0]?.reason), JSON.stringify(both));
+    assert.deepEqual(fs.readFileSync(w.rec, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)), [{ common: w.tickets[0].common_dir, ref: 'refs/heads/tb/t_fold03', sha }]);
+
+    const as = ['-c', 'user.email=t@example.invalid', '-c', 'user.name=t', '-c', 'commit.gpgsign=false'];
+    put(path.join(w.dev, 'README'), 'main side\n');
+    git(w.dev, ...as, 'commit', '-qam', 'main side');
+    git(w.live, 'switch', '-q', `tb/${w.id}`);
+    put(path.join(w.live, 'README'), 'branch side\n');
+    git(w.live, ...as, 'commit', '-qam', 'branch side');
+    const stopped = spawnSync('git', ['-C', w.live, ...as, 'rebase', 'main'], { encoding: 'utf8', env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } });
+    assert.notEqual(stopped.status, 0, 'the rebase stopped on its conflict');
+    assert.match(git(w.dev, 'worktree', 'list', '--porcelain'), new RegExp(`worktree ${w.live}\\nHEAD [0-9a-f]+\\ndetached`), 'git worktree list shows it detached');
+    const was = w.sha();
+    const r = await w.gc.remove({ ids: [`branch/tb/${w.id}`] });
+    assert.deepEqual(r.deleted, []);
+    assert.equal(r.skipped[0]?.reason, `tb/${w.id} is checked out in a worktree (or a rebase or bisect is on it): remove that first`);
+    assert.equal(w.sha(), was, 'the branch stays');
   });
 });

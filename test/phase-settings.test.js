@@ -85,7 +85,7 @@ test('phase-settings: one template per §5/§6 phase, allow == table, prompt.md 
 test('phase-settings: §3b deny paths + D35c reads + S1 Claude config on every phase; own worktree and out/ never denied', () => {
   const must = [
     ...['config.json', 'tags.json', 'tasks.json', 'token', 'session', 'metrics.jsonl', 'leak-denylist.txt', 'slots.json', 'doctor.json',
-      'events.jsonl', 'tbd.log', 'tbd.pid', 'deploy.log', 'backup/**', 'rec-key*'].flatMap((f) => [`Read(/${H}/${f})`, `Edit(/${H}/${f})`]), // rec-key: M5 C6
+      'events.jsonl', 'tbd.log', 'tbd.pid', 'deploy.log', 'backup/**', 'rec-key*', 'gc-branches.jsonl'].flatMap((f) => [`Read(/${H}/${f})`, `Edit(/${H}/${f})`]), // rec-key: M5 C6
     // H2.7 SPIKE S2 FIX (contract change; was Edit(/<worktree>/.git)): the tag's git dir, the clone's git files one by one (H2.7 test below)
     `Edit(/${H}/tbd.sock)`, `Edit(/${H}/bin/**)`, W(CTX.SKILLS_DIR), 'Edit(~/taskboard-live/**)', W(CTX.TAG_GIT),
     `Edit(/${CTX.TICKET_DIR}/*.json)`, `Edit(/${CTX.TICKET_DIR}/rounds/**)`, 'Bash(git push *)',
