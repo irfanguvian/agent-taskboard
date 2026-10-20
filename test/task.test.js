@@ -9,7 +9,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { execFileSync, spawn } = require('node:child_process');
 const { startTbd } = require('./helpers/tbd');
-const { FAKE, RUN_SPY, read, until, alive, reap, pidsOf } = require('./helpers/runs');
+const { FAKE, RUN_SPY, read, until, alive, reap, pidsOf, hasRun } = require('./helpers/runs');
 
 const ROOT = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'task-')));
 after(() => fs.rmSync(ROOT, { recursive: true, force: true }));
@@ -57,7 +57,8 @@ async function boot(t, scenarios, dir, terminal = TERMINAL) {
   return Object.assign(tbd, { dump });
 }
 const create = async (tbd) => {
-  const r = await tbd.api('POST', '/api/flows', { text: 'Add a line to the README', kind: 'task', tag: 'acme', start: true });
+  // Phase 4 D-0233: a Task made without `where` on a git tag is Own Worktree now; these tests are My Folder's
+  const r = await tbd.api('POST', '/api/flows', { text: 'Add a line to the README', kind: 'task', tag: 'acme', where: 'folder', start: true });
   assert.equal(r.status, 201, r.text);
   return r.json.ticket.id;
 };
@@ -328,8 +329,207 @@ test('Task lock by area (design test 4): two Own Worktree Tasks on one repo both
   assert.equal(b.json.started, true, b.text);
   await until(() => read(tbd, b.json.ticket.id).waiting?.reason === 'folder_busy', 30_000, 'My Folder Task folder_busy');
   assert.equal(read(tbd, b.json.ticket.id).state, 'planning');
-  assert.equal(tbd.dump(1), null, 'no run');
+  // build step 2: the two worktree Tasks now take their start point and run (step 1 had them Blocked there), so "no
+  // run" is the My Folder Task's own
+  assert.equal(hasRun(tbd, b.json.ticket.id, 1), false, 'no run for the My Folder Task');
   const code = await tbd.api('POST', '/api/flows', { text: 'x', kind: 'code', tag: 'acme', start: true });
   assert.deepEqual([code.status, code.json.started], [201, false], code.text);
   assert.ok(ids.some((id) => code.json.why.endsWith(`a Task works in ${p} (${id}): assign this once it ends`)), code.json.why);
+});
+
+// ---- Phase 4 Own Worktree, build step 2 part B (design revision 6 tests 3, 13, 14, 16) ----
+const started = async (tbd, extra = {}) => {
+  const r = await flowAt(tbd, 'worktree', { start: true, ...extra });
+  assert.equal(r.json.started, true, r.text);
+  return r.json.ticket.id;
+};
+const waitsYou = (tbd, id, round = 0) => until(() => { const k = read(tbd, id); return k.waiting?.reason === 'you' && k.lease?.exit === 'result' && k.round > round; }, 30_000, `${id} waits for you`);
+const CFG_WORDS = 'your git config changed since the Task started (git remote add, git maintenance): look at it, then Resume';
+// store.save writes ticket.json before tbd's in-memory copy (store.js save): a state read from the file can be one beat
+// ahead of what approve sees, so ask again while tbd still says planning
+const approve = async (tbd, id) => {
+  let r;
+  await until(async () => { r = await tbd.api('POST', `/api/tickets/${id}/approve`, {}); return !String(r.json?.error ?? '').endsWith('can be approved, not planning'); }, 10_000, `${id} approve`);
+  assert.equal(r.status, 202, r.text);
+};
+
+test('Own Worktree parallel (design test 3): two Tasks run with no folder_busy; a plain commit on main and a new Task branch made from `other` Block neither; a Claude config commit on tb/<B> Blocks A naming it; one on main Blocks both naming main', async (t) => {
+  const dir = repo();
+  git(dir, 'switch', '-q', 'other'); // `other` differs from main in .claude/settings.json (before any Task starts)
+  fs.mkdirSync(path.join(dir, '.claude'));
+  fs.writeFileSync(path.join(dir, '.claude', 'settings.json'), '{"x": 1}\n');
+  git(dir, 'add', '.claude');
+  commit(dir, 'other config');
+  git(dir, 'switch', '-q', 'main');
+  const tbd = await boot(t, [result(PLAN), result(PLAN), result(DONE), result(DONE), result(DONE), result(DONE)], dir);
+  const a = await started(tbd);
+  await until(() => read(tbd, a).state === 'plan_approval', 30_000, 'A plan_approval');
+  git(dir, 'switch', '-q', 'other'); // Irfan's main checkout moves; B's worktree starts from there
+  const b = await started(tbd);
+  await until(() => read(tbd, b).state === 'plan_approval', 30_000, 'B plan_approval');
+  assert.equal(read(tbd, b).base_sha, git(dir, 'rev-parse', 'other'));
+  assert.deepEqual([tbd.dump(1).cwd, tbd.dump(2).cwd], [read(tbd, a).worktree, read(tbd, b).worktree], 'both planning runs ran, each in its own worktree');
+  git(dir, 'switch', '-q', 'main');
+  fs.writeFileSync(path.join(dir, 'notes.md'), 'x\n');
+  git(dir, 'add', 'notes.md');
+  commit(dir, 'plain'); // Irfan's terminal: a plain file on main
+  for (const id of [a, b]) {
+    await approve(tbd, id);
+    await waitsYou(tbd, id); // its working run passed the safety check (no Block on tb/<B>, nor on main's plain commit)
+  }
+  assert.deepEqual([read(tbd, a).state, read(tbd, b).state], ['working', 'working']);
+
+  // B's agent commits a Claude config change on tb/<B> → A's next check Blocks, naming tb/<B>, not main
+  const wb = read(tbd, b).worktree;
+  fs.writeFileSync(path.join(wb, '.claude', 'settings.json'), '{"x": 2}\n');
+  git(wb, 'add', '.claude/settings.json');
+  commit(wb, 'agent config');
+  const ra = read(tbd, a).round;
+  assert.equal((await tbd.api('POST', `/api/tickets/${a}/note`, { text: 'go on' })).status, 202);
+  await until(() => read(tbd, a).state === 'blocked', 30_000, 'A blocked');
+  assert.match(read(tbd, a).lease.error, new RegExp(`refs/heads/tb/${b} has new commits that touch \\.claude/settings\\.json`));
+  assert.doesNotMatch(read(tbd, a).lease.error, /refs\/heads\/main/);
+  assert.ok(read(tbd, a).round > ra);
+
+  // Irfan's terminal commits Claude config on main → both Block at their next check, naming main (D-0237)
+  fs.writeFileSync(path.join(dir, 'CLAUDE.md'), '# rules\n');
+  git(dir, 'add', 'CLAUDE.md');
+  commit(dir, 'claude md');
+  const c = await tbd.api('POST', `/api/tickets/${b}/close`, {});
+  assert.equal(c.status, 409, c.text);
+  assert.equal(read(tbd, b).state, 'blocked');
+  assert.match(read(tbd, b).waiting.why, /refs\/heads\/main has new commits that touch CLAUDE\.md/);
+  assert.equal((await tbd.api('POST', `/api/tickets/${a}/resume`, {})).status, 202);
+  await until(() => /refs\/heads\/main has new commits that touch CLAUDE\.md/.test(read(tbd, a).lease.error ?? ''), 30_000, 'A blocked again, naming main');
+  assert.equal(read(tbd, a).state, 'blocked');
+});
+
+test('Own Worktree config-pin Resume (design test 13, D-0235): git remote add → Blocked with the config words → Resume re-pins and the run starts; a hooksPath change, a token URL and a plain extraheader → 409, still Blocked, no run, pin kept, no token in the body', async (t) => {
+  const dir = repo();
+  const tbd = await boot(t, [result(PLAN), result(DONE), result(DONE)], dir);
+  const id = await started(tbd);
+  await until(() => read(tbd, id).state === 'plan_approval', 30_000, 'plan_approval');
+  const old = read(tbd, id).clone.config;
+  git(dir, 'remote', 'add', 'x', path.join(ROOT, 'x.git'));
+  await approve(tbd, id);
+  await until(() => read(tbd, id).state === 'blocked', 30_000, 'blocked');
+  assert.ok(read(tbd, id).lease.error.includes(CFG_WORDS), read(tbd, id).lease.error);
+  assert.equal(tbd.dump(2), null, 'no working run');
+  const ok = await tbd.api('POST', `/api/tickets/${id}/resume`, {});
+  assert.equal(ok.status, 202, ok.text);
+  await until(() => tbd.dump(2), 30_000, 'the working run started');
+  assert.equal(tbd.dump(2).cwd, read(tbd, id).worktree);
+  const pin = read(tbd, id).clone.config;
+  assert.notEqual(pin, old, 'the config pin was taken again');
+  await waitsYou(tbd, id);
+
+  // each change below: Blocked at the next check, then Resume → 409, the ticket stays Blocked with its pin, no run
+  const blockNow = async () => {
+    assert.equal((await tbd.api('POST', `/api/tickets/${id}/note`, { text: 'go on' })).status, 202);
+    await until(() => read(tbd, id).state === 'blocked', 30_000, 'blocked again');
+  };
+  const refused = async (re) => {
+    const r = await tbd.api('POST', `/api/tickets/${id}/resume`, {});
+    assert.equal(r.status, 409, r.text);
+    assert.match(r.json.error, re);
+    assert.ok(!r.text.includes('SECRET'), 'no token in the body');
+    await new Promise((res) => setTimeout(res, 1500)); // a tick or so: nothing starts
+    const k = read(tbd, id);
+    assert.deepEqual([k.state, k.clone.config], ['blocked', pin]);
+    assert.equal(tbd.dump(3), null, 'no run');
+  };
+  git(dir, 'config', 'core.hooksPath', '.githooks');
+  await blockNow();
+  await refused(/this git config change \(core\.hookspath\) changes what the agent can reach: undo it, or Cancel and start a new Task$/);
+  git(dir, 'config', 'core.hooksPath', '.husky');
+  git(dir, 'remote', 'add', 'y', 'https://u:SECRET@h.example/r.git');
+  await refused(/a token in the git config would be readable by the agent: move it to your credential helper$/);
+  git(dir, 'remote', 'remove', 'y');
+  git(dir, 'config', 'http.extraheader', 'Authorization: Bearer SECRET');
+  await refused(/a token in the git config would be readable by the agent: move it to your credential helper$/);
+  const rs = await tbd.api('POST', `/api/tickets/${id}/restart`, {}); // no second re-pin path (design section 4)
+  assert.deepEqual([rs.status, rs.json.error], [409, `${id}: use Resume: it checks the config change first`]);
+  assert.equal(read(tbd, id).state, 'blocked');
+});
+
+test('Own Worktree tree wait (design test 14): B waits tree_wait while A\'s working run is live and makes nothing; C\'s Send waits too; A\'s run ends → B gets its worktree and start point, then C runs; A\'s next run denies B\'s git folder', async (t) => {
+  const dir = repo();
+  const p = fs.realpathSync(dir);
+  const slow = { steps: [{ sleep_ms: 8000 }, { result: { structured_output: DONE } }] };
+  const tbd = await boot(t, [result(PLAN), result(DONE), result(PLAN), slow, result(DONE), result(PLAN), result(DONE)], dir);
+  const c = await started(tbd);
+  await until(() => read(tbd, c).state === 'plan_approval', 30_000, 'C plan_approval');
+  await approve(tbd, c);
+  await waitsYou(tbd, c);
+  const a = await started(tbd);
+  await until(() => read(tbd, a).state === 'plan_approval', 30_000, 'A plan_approval');
+  await approve(tbd, a);
+  await until(() => tbd.dump(4) && read(tbd, a).lease?.phase === 'working' && !read(tbd, a).lease.exit, 30_000, 'A\'s working run live');
+  const b = await started(tbd);
+  await until(() => read(tbd, b).waiting?.reason === 'tree_wait', 30_000, 'B tree_wait');
+  assert.equal(fs.existsSync(path.join(p, '.git', 'worktrees', b)), false, 'no git folder for B');
+  assert.equal(branch(dir, b), '', 'no tb/<B>');
+  assert.equal(read(tbd, b).worktree, undefined);
+  assert.equal((await tbd.api('POST', `/api/tickets/${c}/note`, { text: 'go on' })).status, 202);
+  await until(() => read(tbd, c).waiting?.reason === 'tree_wait', 30_000, 'C tree_wait');
+  assert.equal(tbd.dump(5), null, 'C\'s run did not start');
+  assert.ok(!read(tbd, a).lease.exit, 'A still runs');
+
+  await waitsYou(tbd, a); // A's run ends
+  await until(() => read(tbd, b).task?.base && tbd.dump(6), 30_000, 'B got its worktree, start point and planning run');
+  assert.equal(read(tbd, b).git_dir, `${p}/.git/worktrees/${b}`);
+  assert.equal(tbd.dump(5).cwd, read(tbd, c).worktree, 'then C\'s run started');
+  assert.match(tbd.dump(5).prompt, /^Irfan says:\ngo on/);
+  const ra = read(tbd, a).round;
+  assert.equal((await tbd.api('POST', `/api/tickets/${a}/note`, { text: 'more' })).status, 202);
+  await waitsYou(tbd, a, ra);
+  const s = settings(tbd, a, read(tbd, a).lease.log.match(/runs\/(\d+)\./)[1]);
+  assert.ok(s.sandbox.filesystem.denyWrite.includes(`${p}/.git/worktrees/${b}`), 'A\'s next run walls B\'s git folder (sibling row)');
+});
+
+test('Own Worktree tree wait counts live working runs only (design test 14, step 0b planning case): B gets its worktree while A\'s planning run is live', async (t) => {
+  const dir = repo();
+  const tbd = await boot(t, [{ steps: [{ sleep_ms: 6000 }, { result: { structured_output: PLAN } }] }, result(PLAN)], dir);
+  const a = await started(tbd);
+  await until(() => tbd.dump(1) && read(tbd, a).lease?.phase === 'planning' && !read(tbd, a).lease.exit, 30_000, 'A\'s planning run live');
+  const b = await started(tbd);
+  await until(() => read(tbd, b).git_dir || read(tbd, b).waiting?.reason === 'tree_wait', 30_000, 'B decided');
+  assert.equal(read(tbd, b).waiting?.reason ?? null, null, 'B did not wait');
+  assert.ok(read(tbd, b).git_dir, 'B has its worktree');
+  assert.ok(!read(tbd, a).lease.exit, 'while A\'s planning run is still live');
+});
+
+test('Own Worktree git link check every tick (design test 16, D-0239): Irfan\'s normal git in the worktree never Blocks across ticks; a swapped worktree git folder Blocks at the next tick with plain words, and its planted fsmonitor never runs', async (t) => {
+  const dir = repo();
+  const p = fs.realpathSync(dir);
+  const tbd = await boot(t, [result(PLAN), result(DONE)], dir);
+  const a = await started(tbd);
+  await until(() => read(tbd, a).state === 'plan_approval', 30_000, 'plan_approval');
+  await approve(tbd, a);
+  await waitsYou(tbd, a);
+  const wt = read(tbd, a).worktree;
+  fs.writeFileSync(path.join(wt, 'mine.txt'), 'x\n'); // Irfan's terminal in the worktree
+  git(wt, 'add', 'mine.txt');
+  commit(wt, 'mine');
+  git(wt, 'switch', '-q', '-c', 'x');
+  git(wt, 'switch', '-q', `tb/${a}`);
+  fs.writeFileSync(path.join(wt, 'README.md'), 'hello\nwip\n');
+  git(wt, 'stash', '-q');
+  git(wt, 'stash', 'pop', '-q');
+  git(dir, 'worktree', 'add', '-q', path.join(ROOT, `sib-${a}`), '-b', `sib-${a}`);
+  git(dir, 'worktree', 'lock', path.join(ROOT, `sib-${a}`));
+  await new Promise((r) => setTimeout(r, 3500)); // three ticks
+  assert.deepEqual([read(tbd, a).state, read(tbd, a).waiting?.reason], ['working', 'you'], 'no Block on his normal git');
+
+  const g = path.join(p, '.git', 'worktrees', a);
+  const marker = path.join(ROOT, `fsmonitor-${a}`);
+  fs.renameSync(g, `${g}.aside`);
+  fs.mkdirSync(g);
+  fs.writeFileSync(path.join(g, 'gitdir'), `${wt}/.git\n`);
+  fs.writeFileSync(path.join(g, 'HEAD'), `ref: refs/heads/tb/${a}\n`);
+  fs.writeFileSync(path.join(g, 'config'), `[core]\n\trepositoryformatversion = 0\n\tfsmonitor = touch ${marker}\n`);
+  await until(() => read(tbd, a).state === 'blocked', 10_000, 'blocked at the next tick');
+  assert.equal(read(tbd, a).waiting.why, `the worktree's git links changed: do not open a terminal in ${wt}: Cancel`);
+  await new Promise((r) => setTimeout(r, 2000));
+  assert.equal(fs.existsSync(marker), false, 'tbd ran no git in the swapped folder');
 });

@@ -36,7 +36,20 @@ fs.unlinkSync(path.join(dir2, 'a'));
 fs.mkdirSync(path.join(dir2, 'a', 'hooks'), { recursive: true });
 fs.writeFileSync(path.join(dir2, 'a', 'hooks', 'pre-commit'), 'echo\n');
 git(dir2, 'config', 'core.hooksPath', 'a/hooks');
-fs.writeFileSync(path.join(home, 'tags.json'), JSON.stringify({ acme: { type: 'git', path: dir, base: 'main' }, hooks: { type: 'git', path: dir2, base: 'main' } }));
+// build step 2 part B (tests 4, 5, 16): a repo with Irfan's identity, an origin and a tracked config file of the main checkout
+const dir3 = path.join(ROOT, 'repo3');
+fs.mkdirSync(dir3);
+git(dir3, 'init', '-q', '-b', 'main');
+fs.writeFileSync(path.join(dir3, 'README.md'), 'hello\n');
+git(dir3, 'add', '.');
+git(dir3, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'init');
+fs.writeFileSync(path.join(dir3, 'extra.cfg'), '[x]\n\ty = 1\n');
+git(dir3, 'add', '.');
+git(dir3, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'extra');
+git(dir3, 'config', 'user.name', 'Irfan');
+git(dir3, 'config', 'user.email', 'irfan@example.com');
+git(dir3, 'remote', 'add', 'origin', path.join(ROOT, 'nowhere.git'));
+fs.writeFileSync(path.join(home, 'tags.json'), JSON.stringify({ acme: { type: 'git', path: dir, base: 'main' }, hooks: { type: 'git', path: dir2, base: 'main' }, pin: { type: 'git', path: dir3, base: 'main' } }));
 process.env.TB_HOME = home;
 const store = require('../lib/store');
 store.init();
@@ -109,4 +122,92 @@ test('untree refuses what is not exactly this Task\'s (a link at <common>/worktr
   assert.deepEqual(fs.readdirSync(out), [], 'nothing written through the link');
   assert.equal(fs.existsSync(path.join(home, 'worktrees', h)), false, 'the add undone');
   assert.equal(git(dir2, 'branch', '--list', `tb/${h}`), '');
+});
+
+// ---- build step 2 part B (design revision 6 tests 4, 5, 16) ----
+const pageTools = require('../lib/page-tools');
+const CFG_WORDS = 'your git config changed since the Task started (git remote add, git maintenance): look at it, then Resume';
+const added = async () => { // an Own Worktree Task on repo3 with its worktree (the add), no start point yet
+  const id = await assigned('pin');
+  await tick(id);
+  assert.ok(store.getTicket(id).git_dir, store.getTicket(id).waiting?.why);
+  return id;
+};
+const startedAt = async () => { // ... and its start point
+  const id = await added();
+  await tick(id);
+  const k = store.getTicket(id);
+  assert.ok(k.task.base, k.waiting?.why);
+  return id;
+};
+
+test('queued-Task belt (design test 4): the start point after the add takes the pin from the repo (clean); tb/<id> moved before it → "tb/<id> moved before the Task started"', async () => {
+  const id = await added();
+  const ok = /** @type {any} */ (await task.baseline(store.getTicket(id)));
+  assert.equal(ok.reasons, undefined, JSON.stringify(ok.reasons));
+  assert.deepEqual([ok.patch.clone.tree, typeof ok.patch.clone.config, ok.base.head_ref], [true, 'string', `refs/heads/tb/${id}`]);
+  git(dir3, 'update-ref', `refs/heads/tb/${id}`, git(dir3, 'rev-parse', 'HEAD~1'));
+  const r = await task.baseline(store.getTicket(id));
+  assert.deepEqual(r.reasons, [`tb/${id} moved before the Task started: Cancel and start a new Task`]);
+});
+
+test('worktree pin negatives (design test 5): config, commondir, gitfile and HEAD changes each give a check() reason; an include or hooks folder the agent can write is refused at the start point; core.hooksPath=.git/hooks is fine with no hooks rule', async () => {
+  const cfgCase = await startedAt();
+  assert.deepEqual(await task.check(store.getTicket(cfgCase)), [], 'clean right after the start point');
+  git(dir3, 'config', 'foo.bar', 'baz');
+  assert.deepEqual(await task.check(store.getTicket(cfgCase)), [CFG_WORDS]);
+  git(dir3, 'config', '--unset', 'foo.bar');
+
+  const cd = await startedAt();
+  const k = store.getTicket(cd);
+  const f = path.join(k.git_dir, 'commondir');
+  const was = fs.readFileSync(f, 'utf8');
+  fs.writeFileSync(f, `${path.join(dir, '.git')}\n`);
+  assert.match((await task.check(k)).join('\n'), /commondir does not lead to/);
+  fs.writeFileSync(f, was);
+
+  const gf = await startedAt();
+  const kg = store.getTicket(gf);
+  const gitfile = path.join(kg.worktree, '.git');
+  const wasG = fs.readFileSync(gitfile, 'utf8');
+  fs.writeFileSync(gitfile, `gitdir: ${path.join(dir, '.git')}\n`);
+  assert.match((await task.check(kg)).join('\n'), new RegExp(`${gitfile} does not lead to`));
+  fs.writeFileSync(gitfile, wasG);
+
+  const hd = await startedAt();
+  git(store.getTicket(hd).worktree, 'switch', '-q', '-c', `y-${hd}`);
+  assert.match((await task.check(store.getTicket(hd))).join('\n'), new RegExp(`HEAD moved to y-${hd}: undo: git switch tb/${hd}`));
+
+  const refusedAt = async (key, value, re) => { // a fresh Task's start point Blocks with the words
+    git(dir3, 'config', key, value);
+    const id = await added();
+    await tick(id);
+    const t = store.getTicket(id);
+    git(dir3, 'config', '--unset', key);
+    assert.equal(t.state, 'blocked');
+    assert.match(t.waiting.why, re);
+  };
+  await refusedAt('include.path', path.join(dir3, 'extra.cfg'), new RegExp(`your git config includes ${path.join(dir3, 'extra.cfg')}, a file the agent can write: move it out of the folder`));
+  await refusedAt('core.hooksPath', path.join(dir3, 'githooks'), /your hooks folder .*\/githooks is one the agent can write: set a relative core.hooksPath/);
+  await refusedAt('core.hooksPath', '.git/myhooks', /your hooks folder .*\/\.git\/myhooks is inside \.git, where the agent can write: use \.git\/hooks or a folder in the repo/);
+  git(dir3, 'config', 'core.hooksPath', '.git/hooks');
+  const ok = await startedAt();
+  git(dir3, 'config', '--unset', 'core.hooksPath');
+  assert.equal(store.getTicket(ok).task.base.hooks, null, 'no hooks rule: the <common>/hooks row covers it');
+  assert.equal(fs.lstatSync(path.join(store.getTicket(ok).worktree, '.git')).isFile(), true, 'nothing copied into the gitfile');
+});
+
+test('git link belts (design test 16): a swapped worktree git folder → Continue in Terminal 409 and push_why with the plain words, no push target', async () => {
+  const id = await startedAt();
+  const tag = store.listTags().pin;
+  const before = await task.pushTo(store.getTicket(id), tag);
+  assert.equal(before.push_why, 'no changed files to commit', 'clean links: today\'s line');
+  await store.updateTicket(id, (k) => ({ ...k, state: 'working', lease: { gen: 1, phase: 'working', round: k.round, pid: 1, exit: 'held', session: '11111111-2222-4333-8444-555555555555' } }));
+  const k = store.getTicket(id);
+  fs.renameSync(k.git_dir, `${k.git_dir}.aside`);
+  fs.mkdirSync(k.git_dir);
+  fs.writeFileSync(path.join(k.git_dir, 'gitdir'), `${k.worktree}/.git\n`);
+  const words = `the worktree's git links changed: do not open a terminal in ${k.worktree}: Cancel`;
+  await assert.rejects(pageTools.openTerminal(id, {}), (/** @type {any} */ e) => e.status === 409 && e.message === `${id}: ${words}`);
+  assert.deepEqual(await task.pushTo(k, tag), { push_to: null, push_why: words });
 });
