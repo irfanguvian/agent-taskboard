@@ -156,6 +156,25 @@ test('Task S1: Claude config committed while it waits in plan_approval → appro
   assert.ok(!fs.existsSync(path.join(tbd.tbHome, 'run-secrets', `${id}-2`)));
 });
 
+// 2026-10-20 live t_1njc0c: claude makes <cwd>/.claude/.cc-writes in any subfolder it runs Bash in; in a git folder that
+// Blocked the Task. A real config file in that nested .claude still Blocks.
+test('git-folder Task S1: a nested apps/x/.claude holding only .cc-writes is not a change; apps/x/.claude/settings.json is', async (t) => {
+  const dir = repo();
+  const tbd = await boot(t, [result(PLAN), result(DONE)], dir);
+  const id = await create(tbd);
+  await until(() => read(tbd, id).state === 'plan_approval', 30_000, 'plan_approval');
+  fs.mkdirSync(path.join(dir, 'apps', 'x', '.claude', '.cc-writes'), { recursive: true });
+  assert.equal((await tbd.api('POST', `/api/tickets/${id}/approve`, {})).status, 202);
+  await until(() => read(tbd, id).waiting?.reason === 'you' && read(tbd, id).lease?.exit === 'result', 30_000, 'waiting you, run ended');
+  assert.notEqual(read(tbd, id).state, 'blocked');
+  fs.writeFileSync(path.join(dir, 'apps', 'x', '.claude', 'settings.json'), '{"hooks":{}}');
+  const c = await tbd.api('POST', `/api/tickets/${id}/close`, {});
+  assert.equal(c.status, 409, c.text);
+  const k = read(tbd, id);
+  assert.equal(k.waiting?.reason, 'task_changed');
+  assert.match(k.waiting.why, /apps\/x\/\.claude/);
+});
+
 test('Task S1 on Done: another branch moved to a commit adding .claude/settings.json while it waits for you → close 409, Blocked, why names the ref and its undo', async (t) => {
   const dir = repo();
   const tbd = await boot(t, [result(PLAN), result(DONE)], dir);
