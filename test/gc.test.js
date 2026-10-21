@@ -186,7 +186,9 @@ describe('list', () => {
     // Phase 4 contract change (design revision 6 section 6; was --format=%(refname)): each branch's sha is listed too,
     // for the delete record and the old-value delete
     const REFS = ' for-each-ref --format=%(refname) %(objectname) refs/heads/tb refs/tb';
-    assert.deepEqual([calls.filter((c) => ends(c, PRUNE)).length, calls.filter((c) => ends(c, REFS)).length, calls.length], [2, 2, 4], 'one worktree prune per worktree with a known repo, one ref list per gc list');
+    // security review round 1 HIGH contract change (was [2, 2, 4]: one prune per worktree with a known repo): no worktree
+    // prune at all (task.untree removes exactly that entry, no git), one ref list per gc list
+    assert.deepEqual([calls.filter((c) => ends(c, PRUNE)).length, calls.filter((c) => ends(c, REFS)).length, calls.length], [0, 2, 2], 'no worktree prune, one ref list per gc list');
     for (const c of calls) {
       const [argv, ...env] = c.split('\n').filter(Boolean);
       assert.ok(argv.startsWith(`${GIT_SAFE.join(' ')} `), argv);
@@ -196,7 +198,7 @@ describe('list', () => {
       assert.ok(env.includes('ENV GIT_CONFIG_GLOBAL=/dev/null') && env.includes('ENV GIT_CONFIG_NOSYSTEM=1'));
     }
     assert.equal(fs.existsSync(marker), false, 'no script named by the repo config ran');
-    assert.ok(!w.listed().includes('t_done01'), 'and the dev repo still forgot the worktree (prune)');
+    assert.ok(!w.listed().includes('t_done01'), 'and the dev repo still forgot the worktree (its exact entry removed)');
   });
 
   test('H2 sizes are measured in parallel, at most 4 du at once, in list and in delete; results keep their order', async () => {
@@ -438,7 +440,7 @@ describe('Own Worktree Task branches', () => {
     return { ...w, id, gc, sha: () => git(w.dev, 'rev-parse', `refs/heads/tb/${id}`).trim(), rec: path.join(w.tbHome, 'gc-branches.jsonl') };
   }
 
-  test('a done Task\'s tb/<id> is listed with its sha and unmerged count; delete writes {common, ref, sha} first, then removes exactly it; a missing ticket\'s row carries the unlock + prune hint', async () => {
+  test('a done Task\'s tb/<id> is listed with its sha and unmerged count; delete writes {common, ref, sha} first, then removes exactly it; a missing ticket\'s row carries the unlock + remove hint (never prune)', async () => {
     const w = treeWorld();
     const sha = w.sha();
     const { items } = await w.gc.list({ limit: 100 });
@@ -446,7 +448,9 @@ describe('Own Worktree Task branches', () => {
     assert.deepEqual([row.id, row.sha, row.reason], [`branch/tb/${w.id}`, sha, 'ticket done · 1 unmerged commit']);
     assert.equal(items.filter((i) => i.kind === 'branch').length, 1, 'the open Task\'s branch is not listed');
     // round 1 review: the row's own path, shell-quoted (was <path>)
-    assert.equal(items.find((i) => i.id === 'worktree/t_orph01').hint, `if it was an Own Worktree, run \`git worktree unlock '${path.join(fs.realpathSync(w.tbHome), 'worktrees', 't_orph01')}' && git worktree prune\` in its repo`);
+    // security review HIGH 2 (contract change; was "... && git worktree prune"): prune empties where a planted link leads
+    const orph = `'${path.join(fs.realpathSync(w.tbHome), 'worktrees', 't_orph01')}'`;
+    assert.equal(items.find((i) => i.id === 'worktree/t_orph01').hint, `if it was an Own Worktree, run \`git worktree unlock ${orph} && git worktree remove --force ${orph}\` in its repo`);
     assert.equal(items.find((i) => i.id === 'worktree/t_done01').hint, undefined);
     const r = await w.gc.remove({ ids: [`branch/tb/${w.id}`] });
     assert.deepEqual([r.deleted.map((d) => d.id), r.skipped], [[`branch/tb/${w.id}`], []]);

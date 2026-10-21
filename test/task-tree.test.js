@@ -214,6 +214,88 @@ test('git link belts (design test 16): a swapped worktree git folder → Continu
   assert.deepEqual(await task.pushTo(k, tag), { push_to: null, push_why: words });
 });
 
+// security review HIGH 2 + MEDIUM 4: the link check removes links planted in <common>/worktrees and Blocks, ending a held
+// lease in the same write (no Copy Command left); a clean Task with a real sibling is left alone
+test('security review HIGH 2: linkCheck unlinks a link planted in <common>/worktrees (and a gitdir link), its target stays, the Task is Blocked with plain words and its held lease ends; a clean Task with a sibling → no Block, still held', async () => {
+  const session = '11111111-2222-4333-8444-555555555555';
+  const heldTask = async () => {
+    const x = await startedAt();
+    await store.updateTicket(x, (k) => ({ ...k, state: 'working', waiting: { reason: 'you', since: new Date().toISOString() }, lease: { gen: 1, phase: 'working', round: k.round, pid: 1, exit: 'held', session } }));
+    return x;
+  };
+  const target = path.join(ROOT, 'precious');
+  fs.mkdirSync(target, { recursive: true });
+  fs.writeFileSync(path.join(target, 'keep'), 'x\n');
+  const wts = path.join(dir3, '.git', 'worktrees');
+
+  const clean = await heldTask();
+  await heldTask(); // a real sibling worktree on the same repo
+  assert.equal(await task.linkCheck(store.getTicket(clean)), false);
+  assert.deepEqual([store.getTicket(clean).state, store.getTicket(clean).lease.exit], ['working', 'held'], 'clean: not Blocked, still held');
+  assert.equal(fs.lstatSync(path.join(wts, clean)).isDirectory(), true, 'its own entry stays');
+
+  /** @type {[string, () => void][]} */
+  const plants = [['worktrees/evil', () => fs.symlinkSync(target, path.join(wts, 'evil'))],
+    ['worktrees/fake/gitdir', () => { fs.mkdirSync(path.join(wts, 'fake')); fs.symlinkSync(path.join(target, 'keep'), path.join(wts, 'fake', 'gitdir')); }]];
+  for (const [name, plant] of plants) {
+    const id = await heldTask();
+    plant();
+    assert.equal(await task.linkCheck(store.getTicket(id)), true, name);
+    const k = store.getTicket(id);
+    assert.equal(k.state, 'blocked', name);
+    assert.equal(k.waiting.why, `links were planted in ${path.join(dir3, '.git')}/worktrees (${JSON.stringify(name)}): tbd removed them, so git worktree prune or git gc cannot empty the folders they led to: Cancel`);
+    assert.equal(k.lease.exit, 'cancelled', `${name}: the held lease ends (MEDIUM 4)`);
+    assert.equal(fs.existsSync(path.join(wts, name.replace('worktrees/', ''))), false, `${name}: the link is gone`);
+    assert.equal(fs.readFileSync(path.join(target, 'keep'), 'utf8'), 'x\n', `${name}: its target stays`);
+    await assert.rejects(pageTools.openTerminal(id, {}), (/** @type {any} */ e) => e.status === 409, `${name}: no Continue in Terminal`);
+  }
+
+  // review round 1 MEDIUM: a closed Task's links go too (Cancel and Done call linkCheck), and it is never Blocked
+  const cancelled = await startedAt();
+  await store.updateTicket(cancelled, (k) => ({ ...k, state: 'cancelled', waiting: null }));
+  fs.symlinkSync(target, path.join(wts, 'evil2'));
+  assert.equal(await task.linkCheck(store.getTicket(cancelled)), false);
+  assert.deepEqual([fs.existsSync(path.join(wts, 'evil2')), store.getTicket(cancelled).state], [false, 'cancelled'], 'cancelled: link gone, still cancelled');
+  const finished = await startedAt();
+  await store.updateTicket(finished, (k) => ({ ...k, state: 'working', waiting: { reason: 'you', since: new Date().toISOString() } }));
+  fs.symlinkSync(target, path.join(wts, 'evil3'));
+  const d = await require('../lib/task-actions').done(finished, 'ui');
+  assert.deepEqual([fs.existsSync(path.join(wts, 'evil3')), d.state], [false, 'done'], 'Done: link gone, done (not Blocked)');
+  assert.equal(fs.readFileSync(path.join(target, 'keep'), 'utf8'), 'x\n', 'the target stays');
+});
+
+// review round 2 (A09 + perf): the tick shares one scan per repo; a closed Task checked first must not hide the links
+// from the open Task on the same repo (who planted is unknown: every open Own Worktree Task there is Blocked)
+test('review round 2: a closed Task checked first (shared scan map, as the tick) removes a planted link and the open Task on the same repo is still Blocked with the planted-links words; the closed one stays cancelled; nothing planted → neither Blocked', async () => {
+  const wts = path.join(dir3, '.git', 'worktrees');
+  const target = path.join(ROOT, 'precious2');
+  fs.mkdirSync(target, { recursive: true });
+  const pair = async () => {
+    const closed = await startedAt(); // created first: the tick walks oldest first
+    await store.updateTicket(closed, (k) => ({ ...k, state: 'cancelled', waiting: null }));
+    const open = await startedAt();
+    await store.updateTicket(open, (k) => ({ ...k, state: 'working', waiting: { reason: 'you', since: new Date().toISOString() } }));
+    return [closed, open];
+  };
+
+  const [c0, o0] = await pair(); // negative: nothing planted
+  const m0 = new Map();
+  assert.deepEqual([await task.linkCheck(store.getTicket(c0), m0), await task.linkCheck(store.getTicket(o0), m0)], [false, false]);
+  assert.deepEqual([store.getTicket(c0).state, store.getTicket(o0).state], ['cancelled', 'working'], 'nothing planted: neither Blocked');
+
+  const [c1, o1] = await pair();
+  fs.symlinkSync(target, path.join(wts, 'evil4'));
+  const m1 = new Map();
+  const openSnap = store.getTicket(o1); // the tick's snapshot, read before the closed Task's call
+  assert.equal(await task.linkCheck(store.getTicket(c1), m1), false, 'closed: never reports a Block of itself');
+  assert.equal(await task.linkCheck(openSnap, m1), true, 'open: skips consider this tick');
+  assert.equal(fs.existsSync(path.join(wts, 'evil4')), false, 'the link is gone');
+  assert.equal(store.getTicket(c1).state, 'cancelled', 'the closed Task stays cancelled');
+  const k = store.getTicket(o1);
+  assert.equal(k.state, 'blocked');
+  assert.equal(k.waiting.why, `links were planted in ${path.join(dir3, '.git')}/worktrees ("worktrees/evil4"): tbd removed them, so git worktree prune or git gc cannot empty the folders they led to: Cancel`);
+});
+
 test('My Folder start point refuses a relative include the agent can write (review HIGH: include.path=../.gitconfig resolved from tbd\'s cwd before)', async () => {
   git(dir3, 'config', 'include.path', '../.gitconfig');
   try {

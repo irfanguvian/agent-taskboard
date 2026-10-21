@@ -51,6 +51,21 @@ test('H2.4 C1 fetchHead: an agent commit (only in its clone) is not seen by a tr
   assert.equal(git(repo, ['rev-parse', `refs/tb/${t.id}/head`]), next, 're-gate: the ref is forced to the new head');
 });
 
+// security review round 1 HIGH (CRITICAL 1 belt): fetchHead fetches into the tag repo's common dir; a planted
+// <common>/.git (a gitfile to a repo whose config maps the source to ssh and names a core.sshCommand) is never its repo
+test('security review round 1: fetchHead with a planted <common>/.git never runs the planted config (no sshCommand, no insteadOf) and still fetches into the real repo', async () => {
+  const { repo, t } = await ticket('t_util9');
+  const sha = commit(t.worktree, 'b.txt', 'agent\n');
+  const root = path.dirname(repo), evil = path.join(root, 'evil'), marker = path.join(root, 'PWNED');
+  git(root, ['init', '-q', evil]);
+  git(evil, ['config', 'core.sshCommand', `touch ${marker}; false`]);
+  git(evil, ['config', `url.ssh://evil.invalid${t.git_dir}.insteadOf`, t.git_dir]);
+  fs.writeFileSync(path.join(t.common_dir, '.git'), `gitdir: ${path.join(evil, '.git')}\n`);
+  await util.fetchHead(t, sha);
+  assert.equal(fs.existsSync(marker), false, 'the planted sshCommand never ran');
+  assert.equal(git(repo, ['rev-parse', `refs/tb/${t.id}/head`]), sha, 'fetched into the real tag repo');
+});
+
 test('H2.4 fetchHead refuses: a blob whose loose file holds other content (index-pack), a tree entry .GIT (fsck), a source clone whose config changed (PLANTED); nothing lands in the tag repo', async () => {
   const { repo, t } = await ticket('t_util2');
   const ref = `refs/tb/${t.id}/head`;
@@ -178,4 +193,47 @@ test('Phase 4 treeLinks + cloneRefused tree branch: a fresh worktree is clean an
   const inert = await tree('t_tree03');
   fs.writeFileSync(path.join(inert.git_dir, 'config.worktree'), '[core]\n\tfsmonitor = /tmp/x\n');
   assert.equal(await util.cloneRefused(inert.t), null);
+});
+
+// Phase 4 security review CRITICAL 1: a planted <common>/.git (the repo of any git run in <common> without GIT_DIR)
+test('security review CRITICAL 1: cloneRefused refuses an Own Worktree Task when <common>/.git exists (file, folder or link), not when absent; git with bare pins GIT_DIR = cwd, so a planted .git/.git is never read', async () => {
+  const clean = await tree('t_nest01');
+  assert.equal(await util.cloneRefused(clean.t), null, 'absent: not refused');
+  /** @type {[string, (p: string, x: any) => void][]} */
+  const plants = [['a gitfile', (p, x) => fs.writeFileSync(p, `gitdir: ${x.root}\n`)], ['a folder', (p) => fs.mkdirSync(p)], ['a link', (p, x) => fs.symlinkSync(x.root, p)]];
+  for (const [name, plant] of plants) {
+    const x = await tree('t_nest02');
+    plant(path.join(x.common_dir, '.git'), x);
+    assert.equal(await util.cloneRefused(x.t), `${x.common_dir}/.git exists`, name);
+  }
+  // the review's proof: git -C <repo>/.git reads a planted .git/.git's config; the bare pin reads the real one
+  const x = await tree('t_nest03');
+  git(x.repo, ['config', 'probe.where', 'main']);
+  const evil = path.join(x.root, 'evil');
+  git(x.root, ['init', '-q', evil]);
+  git(evil, ['config', 'probe.where', 'PLANTED']);
+  fs.writeFileSync(path.join(x.common_dir, '.git'), `gitdir: ${path.join(evil, '.git')}\n`);
+  const get = (o) => util.git(x.common_dir, ['config', '--get', 'probe.where'], o).then((r) => r.stdout.trim());
+  assert.equal(await get({}), 'PLANTED', 'unpinned: the planted repo (the attack)');
+  assert.equal(await get({ bare: true }), 'main', 'bare: the real repo');
+});
+
+// Phase 4 security review HIGH 2: links in <common>/worktrees, which git worktree prune follows and empties
+test('security review HIGH 2: plantedLinks unlinks a link entry and a gitdir link in <common>/worktrees (their targets untouched) and returns their names; real worktree entries stay; no worktrees folder → []', async () => {
+  const x = await tree('t_plnk01');
+  const target = path.join(x.root, 'precious');
+  fs.mkdirSync(target);
+  fs.writeFileSync(path.join(target, 'keep'), 'x\n');
+  const wts = path.join(x.common_dir, 'worktrees');
+  fs.symlinkSync(target, path.join(wts, 'evil'));
+  fs.mkdirSync(path.join(wts, 'fake'));
+  fs.symlinkSync(path.join(target, 'keep'), path.join(wts, 'fake', 'gitdir'));
+  assert.deepEqual((await util.plantedLinks(x.common_dir)).sort(), ['worktrees/evil', 'worktrees/fake/gitdir']);
+  assert.deepEqual([fs.existsSync(path.join(wts, 'evil')), fs.existsSync(path.join(wts, 'fake', 'gitdir'))], [false, false], 'the links are gone');
+  assert.equal(fs.readFileSync(path.join(target, 'keep'), 'utf8'), 'x\n', 'their target stays');
+  // negative: the Task's own entry is a real folder with a real gitdir file
+  const y = await tree('t_plnk02');
+  assert.deepEqual(await util.plantedLinks(y.common_dir), []);
+  assert.equal(await util.treeLinks(y.t), null, 'its own entry untouched');
+  assert.deepEqual(await util.plantedLinks(path.join(x.root, 'nowhere')), []);
 });

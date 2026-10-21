@@ -403,7 +403,10 @@ test('phase-settings Phase 4 tree walls: working → allowWrite <common>, exactl
   const fa = (phase) => ({ phase, learning: L, wall: true, worktree: wt });
   const w = fullAccess(render('task', 'working', ctx), fa('working'));
   const rows = ['config', 'hooks', 'info', 'modules', 'worktrees/*/config.worktree', 'worktrees/*/commondir', 'worktrees/*/gitdir', 'refs/replace',
-    'commondir', 'config.worktree', 'HEAD', 'index', 'ORIG_HEAD', 'logs/HEAD', 'rebase-merge', 'rebase-apply', 'sequencer', 'objects/info', 'shallow', 'worktrees/*/modules', 'worktrees/sib1'].map((x) => `${C}/${x}`);
+    'commondir', 'config.worktree', 'HEAD', 'index', 'ORIG_HEAD', 'logs/HEAD', 'rebase-merge', 'rebase-apply', 'sequencer', 'objects/info', 'shallow', 'worktrees/*/modules', 'worktrees/sib1',
+    // Phase 4 security review: CRITICAL 1 (<common>/.git), MEDIUM 5 (the main checkout's merge, pick, bisect state)
+    '.git', 'MERGE_HEAD', 'MERGE_MSG', 'MERGE_MODE', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'AUTO_MERGE', 'SQUASH_MSG', 'rr-cache',
+    'BISECT_LOG', 'BISECT_START', 'BISECT_TERMS', 'BISECT_NAMES', 'BISECT_EXPECTED_REV', 'BISECT_ANCESTORS_OK', 'BISECT_RUN', 'BISECT_HEAD', 'BISECT_FIRST_PARENT'].map((x) => `${C}/${x}`);
   const f = w.sandbox.filesystem, sorted = (a) => [...new Set(a)].sort();
   assert.ok(f.allowWrite.includes(C), 'allowWrite <common>');
   assert.deepEqual(sorted(w.permissions.deny.filter((r) => r.startsWith(`Edit(/${C}`))), sorted(rows.flatMap((p) => [`Edit(/${p})`, `Edit(/${p}/**)`])), 'Edit rows on <common>: exactly 3c');
@@ -412,7 +415,13 @@ test('phase-settings Phase 4 tree walls: working → allowWrite <common>, exactl
   const covers = (r, p) => new RegExp(`^${r.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*\*/g, '\0').replace(/\*/g, '[^/]*').replace(/\0/g, '.*')}(/.*)?$`).test(p);
   const denied = (s, p) => s.sandbox.filesystem.denyWrite.some((r) => covers(r, p)) || s.permissions.deny.some((r) => { const m = /^Edit\(\/(\/.*)\)$/.exec(r); return !!m && covers(m[1], p); });
   for (const p of ['worktrees/t_tree08/index', 'worktrees/t_tree08/HEAD', 'worktrees/t_tree08/ORIG_HEAD', 'worktrees/t_tree08/logs/HEAD', 'objects/ab/cdef', 'objects/pack/p.pack',
-    'refs/heads/tb/t_tree08', 'refs/remotes/origin/tb/t_tree08', 'logs/refs/heads/tb/t_tree08', 'packed-refs'].map((x) => `${C}/${x}`)) assert.equal(denied(w, p), false, `working: ${p} writable (the agent commits)`);
+    'refs/heads/tb/t_tree08', 'refs/remotes/origin/tb/t_tree08', 'logs/refs/heads/tb/t_tree08', 'packed-refs',
+    'worktrees/t_tree08/MERGE_HEAD', 'worktrees/t_tree08/BISECT_LOG', 'worktrees/t_tree08/CHERRY_PICK_HEAD'].map((x) => `${C}/${x}`)) assert.equal(denied(w, p), false, `working: ${p} writable (the agent commits)`);
+  // security review CRITICAL 1: a planted <common>/.git (file, folder, anything under it) is walled in both layers
+  for (const p of [`${C}/.git`, `${C}/.git/config`]) {
+    assert.equal(w.sandbox.filesystem.denyWrite.some((r) => covers(r, p)), true, `denyWrite ${p}`);
+    assert.equal(w.permissions.deny.some((r) => { const m = /^Edit\(\/(\/.*)\)$/.exec(r); return !!m && covers(m[1], p); }), true, `Edit deny ${p}`);
+  }
   for (const p of [...rows.map((r) => r.replace('*', 't_tree08')), `${C}/worktrees/sib1/HEAD`, `${wt}/.git`]) assert.equal(denied(w, p), true, `working: ${p} denied`);
   const p = fullAccess(render('task', 'planning', ctx), fa('planning'));
   assert.deepEqual([p.sandbox.filesystem.denyWrite.includes(C), p.permissions.deny.includes(`Edit(/${C}/**)`), (p.sandbox.filesystem.allowWrite ?? []).includes(C)], [true, true, false], 'planning: <common> whole');
@@ -428,7 +437,7 @@ test('phase-settings Phase 4 tree walls: working → allowWrite <common>, exactl
   // My Folder (TAG_GIT = <cwd>/.git, CLONE true): no tree rows, its .git stays writable for its commits; TREE there is refused
   const F = '/u/code/folder', mine = { ...CTX, WORKTREE: F, TAG_PATH: F, TAG_GIT: `${F}/.git`, CLONE: true };
   const m = render('task', 'working', mine);
-  assert.deepEqual([(m.sandbox.filesystem.allowWrite ?? []).includes(`${F}/.git`), denied(m, `${F}/.git/HEAD`), denied(m, `${F}/.git/index`), denied(m, `${F}/.git/ORIG_HEAD`)], [false, false, false, false]);
+  assert.deepEqual([(m.sandbox.filesystem.allowWrite ?? []).includes(`${F}/.git`), denied(m, `${F}/.git/HEAD`), denied(m, `${F}/.git/index`), denied(m, `${F}/.git/ORIG_HEAD`), denied(m, `${F}/.git/MERGE_HEAD`)], [false, false, false, false, false]);
   assert.throws(() => render('task', 'working', { ...mine, CLONE: false, TREE: true, TREE_OTHERS: [] }), /TREE needs TAG_GIT = the repo's git dir/);
 });
 
