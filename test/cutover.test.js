@@ -14,6 +14,7 @@ const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
 const { request, REPO } = require('./helpers/tbd');
+const { until } = require('./helpers/runs');
 
 const SCRIPTS = path.join(REPO, 'scripts');
 const worlds = [];
@@ -382,7 +383,10 @@ test('N9 verify sends the token only after /api/whoami proves the port is tbd: a
   assert.equal(r.status, 1, out(r));
   assert.match(r.stderr, new RegExp(`port ${w.port} answers, but not as this tbd \\(identity check failed\\); the token was not sent`));
   assert.match(r.stderr, /FAILED at step: j: verify/);
-  assert.match(fs.readFileSync(path.join(w.lc, 'tbd.out'), 'utf8'), /EADDRINUSE/, 'D39 tbd binds first: a taken port stops it before store.init');
+  // cutover stops at the squatter's first reply, which can come before the background tbd has written its error
+  const tbdOut = () => (fs.existsSync(path.join(w.lc, 'tbd.out')) ? fs.readFileSync(path.join(w.lc, 'tbd.out'), 'utf8') : '');
+  await until(() => /EADDRINUSE/.test(tbdOut()), 15_000, 'tbd.out EADDRINUSE');
+  assert.match(tbdOut(), /EADDRINUSE/, 'D39 tbd binds first: a taken port stops it before store.init');
   const seen = fs.readFileSync(log, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
   assert.ok(seen.length >= 1 && seen.every((q) => q.url.startsWith('/api/whoami?n=')), JSON.stringify(seen.map((q) => q.url)));
   assert.ok(seen.every((q) => !('x-tb-token' in q.headers)), 'the token never reached the squatter');

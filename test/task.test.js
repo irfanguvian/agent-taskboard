@@ -74,8 +74,8 @@ test('Task whole path: plan → approve resumes run 1 session → waits for you 
   assert.equal(s1.cwd, p);
   const session = s1.opts['--session-id'];
   fs.writeFileSync(path.join(dir, 'README.md'), 'hello\nworld\n'); // the agent's edit (fake claude edits nothing)
-  assert.equal((await tbd.api('POST', `/api/tickets/${id}/approve`, {})).status, 202);
-  await until(() => read(tbd, id).waiting?.reason === 'you' && read(tbd, id).lease?.exit === 'result', 30_000, 'waiting you, run ended');
+  await approve(tbd, id);
+  await tbdSees(tbd, id, (q) => q.waiting?.reason === 'you' && q.lease?.exit === 'result', 'waiting you, run ended');
   const s2 = tbd.dump(2);
   assert.equal(s2.opts['--resume'], session);
   assert.match(s2.prompt, /Irfan approved your plan/);
@@ -103,7 +103,7 @@ test('Task whole path: plan → approve resumes run 1 session → waits for you 
   const s3 = tbd.dump(3);
   assert.equal(s3.opts['--resume'], session);
   assert.match(s3.prompt, /^Irfan says:\nalso say hi/);
-  await until(() => read(tbd, id).waiting?.reason === 'you' && read(tbd, id).lease?.exit === 'result' && read(tbd, id).round > k.round, 30_000, 'waiting you again');
+  await waitsYou(tbd, id, k.round);
   // Commit and Push (code review MED): the Task's own branch made, the same session told to commit exactly its files, the
   // grant bound to that run's gen at its start
   const cp = await tbd.api('POST', `/api/tickets/${id}/push`);
@@ -116,7 +116,7 @@ test('Task whole path: plan → approve resumes run 1 session → waits for you 
   assert.equal(g.push_grant?.gen, g.lease.gen, 'the grant is bound to the run that commits');
   assert.equal(g.push_grant.branch, `tb/${id}`);
   assert.equal(git(dir, 'symbolic-ref', '--short', 'HEAD'), `tb/${id}`, 'the folder is on the Task\'s branch, README.md still uncommitted');
-  await until(() => read(tbd, id).waiting?.reason === 'you' && read(tbd, id).round > g.round - 1 && read(tbd, id).lease?.exit === 'result' && read(tbd, id).lease.gen === g.lease.gen, 30_000, 'waiting you after the commit run');
+  await tbdSees(tbd, id, (q) => ranToYou(q, g.round - 1) && q.lease.gen === g.lease.gen, 'waiting you after the commit run');
   const c = await tbd.api('POST', `/api/tickets/${id}/close`, {});
   assert.equal(c.status, 200, c.text);
   assert.equal(read(tbd, id).state, 'done');
@@ -168,7 +168,7 @@ test('git-folder Task S1: a nested apps/x/.claude holding only .cc-writes is not
   await until(() => read(tbd, id).state === 'plan_approval', 30_000, 'plan_approval');
   fs.mkdirSync(path.join(dir, 'apps', 'x', '.claude', '.cc-writes'), { recursive: true });
   assert.equal((await tbd.api('POST', `/api/tickets/${id}/approve`, {})).status, 202);
-  await until(() => read(tbd, id).waiting?.reason === 'you' && read(tbd, id).lease?.exit === 'result', 30_000, 'waiting you, run ended');
+  await tbdSees(tbd, id, (q) => q.waiting?.reason === 'you' && q.lease?.exit === 'result', 'waiting you, run ended');
   assert.notEqual(read(tbd, id).state, 'blocked');
   fs.writeFileSync(path.join(dir, 'apps', 'x', '.claude', 'settings.json'), '{"hooks":{}}');
   const c = await tbd.api('POST', `/api/tickets/${id}/close`, {});
@@ -184,7 +184,7 @@ test('Task S1 on Done: another branch moved to a commit adding .claude/settings.
   const id = await create(tbd);
   await until(() => read(tbd, id).state === 'plan_approval', 30_000, 'plan_approval');
   assert.equal((await tbd.api('POST', `/api/tickets/${id}/approve`, {})).status, 202);
-  await until(() => read(tbd, id).waiting?.reason === 'you' && read(tbd, id).lease?.exit === 'result', 30_000, 'waiting you, run ended');
+  await tbdSees(tbd, id, (q) => q.waiting?.reason === 'you' && q.lease?.exit === 'result', 'waiting you, run ended');
   const old = git(dir, 'rev-parse', 'other');
   // a commit on `other` without touching the work tree (a temp index)
   const idx = path.join(ROOT, `idx-${id}`);
@@ -243,7 +243,7 @@ test('Continue in Terminal on a Task waiting for you: held, Done → 409 while c
   const id = await create(tbd);
   await until(() => read(tbd, id).state === 'plan_approval', 30_000, 'plan_approval');
   assert.equal((await tbd.api('POST', `/api/tickets/${id}/approve`, {})).status, 202);
-  await until(() => read(tbd, id).waiting?.reason === 'you' && read(tbd, id).lease?.exit === 'result', 30_000, 'waiting you, run ended');
+  await tbdSees(tbd, id, (q) => q.waiting?.reason === 'you' && q.lease?.exit === 'result', 'waiting you, run ended');
   assert.equal((await tbd.api('POST', `/api/tickets/${id}/hold`)).status, 202);
   await until(() => read(tbd, id).lease.exit === 'held' && !read(tbd, id).lease.pending, 30_000, 'held');
   const { session } = read(tbd, id).lease;
@@ -345,10 +345,14 @@ const started = async (tbd, extra = {}) => {
   assert.equal(r.json.started, true, r.text);
   return r.json.ticket.id;
 };
-const waitsYou = (tbd, id, round = 0) => until(() => { const k = read(tbd, id); return k.waiting?.reason === 'you' && k.lease?.exit === 'result' && k.round > round; }, 30_000, `${id} waits for you`);
-const CFG_WORDS = 'your git config changed since the Task started (git remote add, git maintenance): look at it, then Resume';
 // store.save writes ticket.json before tbd's in-memory copy (store.js save): a state read from the file can be one beat
 // ahead of what approve sees, so ask again while tbd still says planning
+// the same beat for any state: wait until tbd's own answer (not the file) shows it; memory set ⇒ the file is too
+const tbdSees = (tbd, id, ok, what) => until(async () => ok((await tbd.api('GET', `/api/tickets/${id}`)).json?.ticket ?? {}), 30_000, `${id} ${what} in tbd`);
+const tbdState = (tbd, id, state) => tbdSees(tbd, id, (k) => k.state === state, state);
+const ranToYou = (k, round = 0) => k.waiting?.reason === 'you' && k.lease?.exit === 'result' && k.round > round;
+const waitsYou = (tbd, id, round = 0) => tbdSees(tbd, id, (k) => ranToYou(k, round), 'waits for you');
+const CFG_WORDS = 'your git config changed since the Task started (git remote add, git maintenance): look at it, then Resume';
 const approve = async (tbd, id) => {
   let r;
   await until(async () => { r = await tbd.api('POST', `/api/tickets/${id}/approve`, {}); return !String(r.json?.error ?? '').endsWith('can be approved, not planning'); }, 10_000, `${id} approve`);
@@ -415,6 +419,7 @@ test('Own Worktree config-pin Resume (design test 13, D-0235): git remote add �
   git(dir, 'remote', 'add', 'x', path.join(ROOT, 'x.git'));
   await approve(tbd, id);
   await until(() => read(tbd, id).state === 'blocked', 30_000, 'blocked');
+  await tbdState(tbd, id, 'blocked');
   assert.ok(read(tbd, id).lease.error.includes(CFG_WORDS), read(tbd, id).lease.error);
   assert.equal(tbd.dump(2), null, 'no working run');
   const ok = await tbd.api('POST', `/api/tickets/${id}/resume`, {});
@@ -429,6 +434,7 @@ test('Own Worktree config-pin Resume (design test 13, D-0235): git remote add �
   const blockNow = async () => {
     assert.equal((await tbd.api('POST', `/api/tickets/${id}/note`, { text: 'go on' })).status, 202);
     await until(() => read(tbd, id).state === 'blocked', 30_000, 'blocked again');
+    await tbdState(tbd, id, 'blocked');
   };
   const refused = async (re) => {
     const r = await tbd.api('POST', `/api/tickets/${id}/resume`, {});
