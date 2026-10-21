@@ -60,7 +60,7 @@ test('boot sweep: a dead live check\'s temp dir, clones (pinned or not) and base
   assert.equal(git(path.join(path.dirname(h), 'ok'), 'for-each-ref', '--format=%(refname)', 'refs/tb/'), 'refs/tb/t_keep01/base');
 });
 // the fake claude's dumps: one per start, {opts, prompt}; --help (the fixed checks) is one too
-const runs = () => fs.readdirSync(dumps).map((f) => JSON.parse(fs.readFileSync(path.join(dumps, f), 'utf8'))).filter((d) => d.opts['--max-turns']);
+const runs = () => fs.readdirSync(dumps).filter((f) => /^\d+\.json$/.test(f)).map((f) => JSON.parse(fs.readFileSync(path.join(dumps, f), 'utf8'))).filter((d) => d.opts['--max-turns']);
 
 test('fixed checks: tb-git ls-remote through the bridge profile ok where origin answers, fail with the fix hint where origin is a missing path', async () => {
   const r = await tbd.api('POST', '/api/doctor', { terminal: true });

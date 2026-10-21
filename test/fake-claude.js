@@ -71,11 +71,13 @@ if (FAKE_CLAUDE_SCENARIO_DIR) {
   if (dir && fs.existsSync(dir)) scenarioFile = path.join(dir, `${claim(dir, (i) => `.run-${i}`)}.json`);
 }
 if (FAKE_CLAUDE_DUMP_DIR) {
-  if (!n) n = claim(FAKE_CLAUDE_DUMP_DIR, (i) => `${i}.json`);
+  if (!n) n = claim(FAKE_CLAUDE_DUMP_DIR, (i) => `.dump-${i}`);
   const env = {};
   for (const [k, v] of Object.entries(process.env)) if (ENV_KEEP.test(k)) env[k] = ENV_SECRET.test(k) && v ? '<redacted>' : v; // an empty value is no secret (full access pins SSH_AUTH_SOCK "")
-  fs.writeFileSync(path.join(FAKE_CLAUDE_DUMP_DIR, `${n}.json`),
-    JSON.stringify({ argv, opts, env, cwd: process.cwd(), prompt }, null, 2));
+  // temp + rename: a test polling for <n>.json never reads it empty or half written
+  const tmp = path.join(FAKE_CLAUDE_DUMP_DIR, `.${n}.json.tmp`);
+  fs.writeFileSync(tmp, JSON.stringify({ argv, opts, env, cwd: process.cwd(), prompt }, null, 2));
+  fs.renameSync(tmp, path.join(FAKE_CLAUDE_DUMP_DIR, `${n}.json`));
 }
 
 /** @type {{ init?: boolean, steps: any[], resume_steps?: any[] }} */

@@ -651,7 +651,7 @@ test('K4 + lanes: T3 accepted before lane T2 merges (branch T1 T3 T2, plan T1 T2
   await until(() => w.k().state === 'clarify', 60_000, 'T4 asks, T2 merged after T3');
   assert.deepEqual(subjects(w), ['T1', 'T3', 'T2']);
   assert.equal((await w.rpc('answer', { replan: true })).ok, true);
-  const planner = () => fs.readdirSync(w.dumps).map((f) => json(path.join(w.dumps, f))).find((d) => d.env.TB_PLAN_CTX);
+  const planner = () => fs.readdirSync(w.dumps).filter((f) => /^\d+\.json$/.test(f)).map((f) => json(path.join(w.dumps, f))).find((d) => d.env.TB_PLAN_CTX);
   await until(() => planner(), 30_000, 'the planner run');
   assert.deepEqual(json(planner().env.TB_PLAN_CTX).keep_ok, ['T1']);
 });
