@@ -1,0 +1,148 @@
+#!/bin/sh
+# Auto deploy after a push of main (D-0242). Usage: auto-deploy <40-hex sha>; started detached by the
+# reference-transaction hook from the LIVE copy (~/taskboard-live/scripts). Log: ~/.taskboard/auto-deploy.log.
+# 1 belt: GitHub main, the dev repo's local main and <sha> are one commit (Irfan's push of his main, or his pull of it;
+#   a bare fetch of a commit made elsewhere does not), and <sha> is not live yet. Else one log line, exit 0. Checked
+#   again before each deploy try: main may have moved (force push, reset) during a long gate or guard wait.
+# 2 one run at a time: <sha> goes to auto-deploy.want, a lock (a symlink naming the holder's pid) keeps one run; a run
+#   that finds it held exits 0: the holder takes the newest want when it ends a step. Newest sha wins.
+# 3 free memory >= 25%, then lint + typecheck + full suite on an export of <sha> (git archive: no .git/worktrees entry,
+#   which an open Own Worktree Task's wall would not cover). Fail: no deploy, notify.
+# 4 the live scripts/deploy <sha> --yes; deploy-guard refusal: retry every 5 min, no cap (Irfan); other fail: notify.
+# Every failure path deploys nothing. The dev repo comes from the live worktree's git dir, never from env or args.
+# Test knobs: TB_RAM_CMD (prints free %), TB_NOTIFY_CMD (gets title, message), TB_RETRY_S (default 300).
+set -u
+# shellcheck source=live-lib.sh
+. "$(dirname "$0")/live-lib.sh"
+
+WANT=$TBHOME/auto-deploy.want
+LOCK=$TBHOME/auto-deploy.lock
+LOG=$TBHOME/auto-deploy.log
+MIN_FREE=25 # % free (D-0021); calibration knob
+
+log() { (umask 077; echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) $*" >> "$LOG"); }
+short() { printf %.7s "$1"; }
+# git without repo hooks, fsmonitor or refs/replace: nothing here runs code from the repo's config or swaps objects
+g() { git --no-replace-objects -c core.hooksPath=/dev/null -c core.fsmonitor=false "$@"; }
+notify() {
+  if [ -n "${TB_NOTIFY_CMD:-}" ]; then "$TB_NOTIFY_CMD" "$1" "$2"
+  else /usr/bin/osascript -e 'on run argv' -e 'display notification (item 2 of argv) with title (item 1 of argv) sound name "Glass"' -e 'end run' -- "$1" "$2"
+  fi > /dev/null 2>&1 || log "notify failed: $1"
+}
+want() { cat "$WANT" 2> /dev/null; }
+
+# → 0 when <sha> may deploy (GitHub main = local main = sha, not live); else logs why, 1
+belt() {
+  gh=$(g -C "$dev" -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=20 ls-remote origin refs/heads/main) || { log "$(short "$1"): ls-remote origin failed: no deploy"; return 1; }
+  [ "$gh" = "$(printf '%s\trefs/heads/main' "$1")" ] || { log "$(short "$1"): GitHub main is $(short "$gh"), not this sha: no deploy"; return 1; }
+  [ "$(g -C "$dev" rev-parse --verify -q refs/heads/main)" = "$1" ] || { log "$(short "$1"): local main is not this sha (a commit made elsewhere): no deploy"; return 1; }
+  [ "$(g -C "$LIVE" rev-parse HEAD 2> /dev/null)" != "$1" ] || { log "$(short "$1"): already live"; return 1; }
+}
+
+# The lock is a symlink to the holder's pid: made in one step, so its pid is never missing. Stale = holder gone, or its
+# pid now runs another program.
+lock() {
+  ln -s "$$" "$LOCK" 2> /dev/null && return 0
+  pid=$(readlink "$LOCK") || return 1
+  # alive and ps cannot say what it runs (a sandbox): held (fail closed)
+  if kill -0 "$pid" 2> /dev/null; then
+    cmd=$(ps -p "$pid" -o command= 2> /dev/null) || return 1
+    case $cmd in *auto-deploy*) return 1 ;; esac
+  fi
+  # ponytail: two runs that find one stale lock at once can both take it; the second deploy then stops at "already live"
+  rm -f "$LOCK" && ln -s "$$" "$LOCK" 2> /dev/null
+}
+unlock() { [ "$(readlink "$LOCK" 2> /dev/null)" = "$$" ] && rm -f "$LOCK"; }
+
+# lint + typecheck + test on an export of $1 in $gate → 0 green; 1 red (logged, notified)
+check() {
+  g -C "$dev" archive -o "$gate.tar" "$1" && tar -xf "$gate.tar" -C "$gate" && rm -f "$gate.tar" || { log "$(short "$1"): export failed: no deploy"; return 1; }
+  # hidden-chars (lint) lists files with git ls-files: an empty repo of its own, linked to nothing
+  g -C "$gate" init -q || { log "$(short "$1"): git init in the export failed: no deploy"; return 1; }
+  # PATH: npm and its #!/usr/bin/env node find D30's node, not one from the caller's PATH
+  if [ -d "$dev/node_modules" ] && cmp -s "$dev/package-lock.json" "$gate/package-lock.json"; then
+    ln -s "$dev/node_modules" "$gate/node_modules"
+  elif ! (cd "$gate" && PATH="$(dirname "$NODE"):$PATH" npm ci --ignore-scripts --no-audit --no-fund > "$gate.out" 2>&1); then
+    log "$(short "$1"): gate failed: npm ci; last lines:"; tail -n 20 "$gate.out" >> "$LOG"
+    notify "Auto deploy: gate failed" "$(short "$1") not deployed: npm ci failed"
+    return 1
+  fi
+  caf=''; [ -x /usr/bin/caffeinate ] && caf='/usr/bin/caffeinate -i'
+  for c in lint typecheck test; do
+    log "$(short "$1"): gate: npm run $c"
+    # shellcheck disable=SC2086 # $caf: empty or two words
+    if ! (cd "$gate" && PATH="$(dirname "$NODE"):$PATH" $caf npm run "$c" > "$gate.out" 2>&1); then
+      log "$(short "$1"): gate failed: npm run $c; last lines:"; tail -n 20 "$gate.out" >> "$LOG"
+      notify "Auto deploy: gate failed" "$(short "$1") not deployed: npm run $c failed"
+      return 1
+    fi
+  done
+}
+
+# One sha: memory, gate, deploy. → 0 done (deployed or stopped), 3 a newer want took over
+attempt() {
+  while :; do
+    pct=$(${TB_RAM_CMD:-/usr/sbin/sysctl -n kern.memorystatus_level}) # unquoted on purpose: command + args
+    case $pct in '' | *[!0-9]*) log "$(short "$1"): free memory check failed: no deploy"; return 0 ;; esac
+    [ "$pct" -ge "$MIN_FREE" ] && break
+    log "$(short "$1"): ${pct}% memory free, waiting for $MIN_FREE%"
+    sleep 60
+    [ "$(want)" = "$1" ] || return 3
+  done
+  gate=$(mktemp -d "$TBHOME/auto-deploy-gate.XXXXXX") || { log "$(short "$1"): mktemp failed: no deploy"; return 0; }
+  check "$1"; ok=$?
+  rm -rf "$gate" "$gate.tar" "$gate.out"; gate=''
+  [ "$ok" = 0 ] || return 0
+  log "$(short "$1"): gate green"
+  while :; do
+    [ "$(want)" = "$1" ] || { log "$(short "$1"): a newer sha is wanted: skipping this one"; return 3; }
+    belt "$1" || return 0
+    out=$(TB_DEV=$dev "$LIVE/scripts/deploy" "$1" --yes 2>&1); rc=$?
+    if [ "$rc" = 0 ]; then
+      rb=$(printf '%s\n' "$out" | sed -n 's/^rollback: //p')
+      log "$(short "$1"): deployed${rb:+, rollback: $rb}"
+      notify "Auto deploy: deployed $(short "$1")" "${rb:-rollback: none}"
+      return 0
+    fi
+    case $out in
+      # only "flows at work" waits; a guard that fails closed (tbd down, 401, crash) notifies like any failure
+      *'deploy-guard: flows at work'*) ;;
+      *) log "$(short "$1"): deploy failed (exit $rc); last lines:"; printf '%s\n' "$out" | tail -n 20 >> "$LOG"
+         notify "Auto deploy: deploy failed" "$(short "$1") not deployed: see $LOG"
+         return 0 ;;
+    esac
+    log "$(short "$1"): deploy-guard refused (flows at work): retry in ${TB_RETRY_S:-300} s"
+    sleep "${TB_RETRY_S:-300}"
+  done
+}
+
+main() {
+  sha=${1:-}
+  case $sha in *[!0-9a-f]* | '') sha=bad ;; esac
+  [ "${#sha}" = 40 ] || die "usage: auto-deploy <40-hex sha>"
+  # the hook's git exports GIT_DIR and friends: they would point every git below at the caller's repo
+  for v in $(env | sed -n 's/^\(GIT_[A-Za-z0-9_]*\)=.*/\1/p'); do unset "$v"; done
+  mkdir -p "$TBHOME" && touch "$LOG" && chmod 600 "$LOG" || die "cannot write $LOG"
+  common=$(g -C "$LIVE" rev-parse --path-format=absolute --git-common-dir 2> /dev/null) || { log "$(short "$sha"): no live worktree at $LIVE: no deploy"; exit 0; }
+  [ "$(basename "$common")" = .git ] || { log "$(short "$sha"): $common is no repo's .git: no deploy"; exit 0; }
+  dev=$(dirname "$common")
+  belt "$sha" || exit 0
+  (umask 077; echo "$sha" > "$WANT.$$" && mv "$WANT.$$" "$WANT") || { log "$(short "$sha"): cannot write $WANT: no deploy"; exit 0; }
+  lock || { log "$(short "$sha"): another auto-deploy runs: it takes this sha next"; exit 0; }
+  gate=''
+  trap 'unlock; [ -z "$gate" ] || rm -rf "$gate" "$gate.tar" "$gate.out"' EXIT
+  trap 'exit 1' HUP INT TERM
+  cur=$sha
+  log "$(short "$cur"): start"
+  while attempt "$cur"; [ $? = 3 ]; do
+    cur=$(want)
+    belt "$cur" || break
+  done
+  unlock
+  # a run that wrote a newer want while this one held the lock exited: start it now (the live copy: maybe just deployed)
+  w=$(want)
+  [ -z "$w" ] || [ "$w" = "$cur" ] || exec "$LIVE/scripts/auto-deploy" "$w"
+}
+
+# One line on purpose: a deploy replaces this file while it runs, and sh reads a script as it runs.
+main "$@"; exit

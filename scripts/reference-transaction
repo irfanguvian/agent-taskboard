@@ -1,0 +1,18 @@
+#!/bin/sh
+# Versioned reference-transaction body (D-0242), installed by scripts/install-git-hooks next to pre-push.
+# Git runs it on EVERY ref change in this repo and its worktrees (agents' too): stay fast, never fail (always exit 0).
+# $1: prepared | committed | aborted; stdin: "<old> <new> <ref>" per ref. Only a committed move of
+# refs/remotes/origin/main (a push of main, or a fetch) starts the LIVE auto-deploy with the new sha, detached; never
+# this branch's own copy (a branch must not change its deployer, like pre-push uses the live leak-check). auto-deploy
+# checks GitHub main + local main itself: this hook only wakes it.
+zero=0000000000000000000000000000000000000000
+run=$HOME/taskboard-live/scripts/auto-deploy
+sha=''
+while read -r _ new ref; do # read all of stdin: git writes every line
+  [ "$1" = committed ] && [ "$ref" = refs/remotes/origin/main ] && [ "$new" != "$zero" ] && sha=$new
+done
+[ -n "$sha" ] && [ -x "$run" ] || exit 0
+log=$HOME/.taskboard/auto-deploy.log
+# nohup + stdin /dev/null: a closed terminal or Ctrl-C (sh ignores INT in background jobs) never ends the gate
+(umask 077; mkdir -p "$HOME/.taskboard" && nohup "$run" "$sha" < /dev/null >> "$log" 2>&1 &) 2> /dev/null
+exit 0

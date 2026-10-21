@@ -27,6 +27,33 @@ Rollback: `tb doctor --pin --version <old>` (old copy still in `~/.taskboard/bin
 
 Default pin for new installs: `DEFAULT_PIN` in `lib/util.js` (now 2.1.302).
 
+## Auto deploy (push of main)
+
+Push `main` to GitHub → live board runs that exact commit, after the full gate. A git hook (`reference-transaction`) sees `origin/main` move and starts the LIVE copy of `scripts/auto-deploy <sha>` in the background. The push never waits.
+
+```mermaid
+flowchart LR
+  P[you push main] --> H[hook: origin/main moved]
+  H --> B{GitHub main = local main = this commit, not live yet?}
+  B -->|no| X[stop, one log line]
+  B -->|yes| L{another auto deploy running?}
+  L -->|yes| Q[it takes this commit next: newest wins]
+  L -->|no| M[wait for 25% free memory]
+  M --> G[lint + typecheck + full suite on an export of the commit]
+  G -->|red| N1[notify: gate failed, not deployed]
+  G -->|green| D[scripts/deploy sha]
+  D -->|flows in review, qa, final gate| W[wait 5 min, retry]
+  W --> D
+  D -->|done| N2[notify: deployed + rollback sha]
+```
+
+- Install (once per clone, also after editing a hook): `scripts/install-git-hooks` in the repo. Installs `pre-push` and `reference-transaction`.
+- First turn-on: deploy by hand once (`scripts/deploy <sha> --yes`), so the live copy holds `scripts/auto-deploy`. No live copy → the hook does nothing.
+- Turn off: `rm .git/hooks/reference-transaction`.
+- Log: `~/.taskboard/auto-deploy.log` (one line per step, mode 600). Mac notification on deployed, gate failed, deploy failed.
+- Only a commit that is GitHub `main` and your local `main` deploys: your push, or your `git pull` of it. A bare fetch of a commit made elsewhere (GitHub web, another Mac) stops at the belt, since local `main` differs. The belt runs again before each deploy try (main moved during the gate: no deploy). Board runs push with hooks off: no auto deploy.
+- The gate runs in `~/.taskboard/auto-deploy-gate.*` (a `git archive` export, removed after), never a `git worktree`: a new `.git/worktrees` entry would sit outside an open Own Worktree Task's wall.
+
 ## Parallel lanes (code tickets)
 
 Off by default (`max_concurrent: 1`). On: set `"max_concurrent": 2` in `~/.taskboard/config.json` (read at start only), restart tbd `launchctl kickstart -k gui/$(id -u)/local.taskboard`, check `tb doctor`. Note: `max_concurrent` also lets 2 tickets run at once. A plan task with no `blocked_by` and no file shared with the running task may run as a lane: own clone, own run, then tbd merges it back.

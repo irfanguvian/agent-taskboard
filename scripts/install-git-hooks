@@ -1,8 +1,11 @@
 #!/bin/sh
-# Copy scripts/pre-push into the hooks dir of the git repo in cwd. Re-run after editing pre-push.
+# Copy scripts/pre-push and scripts/reference-transaction (auto deploy, D-0242) into the hooks dir of the git repo in
+# cwd. Re-run after editing either.
 set -e
-src=$(cd "$(dirname "$0")" && pwd)/pre-push
+here=$(cd "$(dirname "$0")" && pwd)
 hooks=$(git rev-parse --git-path hooks)
 mkdir -p "$hooks"
-install -m 755 "$src" "$hooks/pre-push"
-echo "installed pre-push -> $hooks/pre-push"
+for h in pre-push reference-transaction; do
+  install -m 755 "$here/$h" "$hooks/$h"
+  echo "installed $h -> $hooks/$h"
+done
