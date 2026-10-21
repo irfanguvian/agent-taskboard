@@ -148,10 +148,10 @@ test('AC2 PATCH edits and clears fields; bad values are rejected; DELETE removes
   assert.equal((await tbd.api('DELETE', '/api/reminders/t_aaaaa3')).status, 404);
 });
 
-// Boots tbd (fresh temp TB_HOME unless given) with tbd.pid = pid (mtime optional). Resolves
+// Boots tbd (fresh temp TB_HOME unless given) with tbd.pid = pid (mtime optional, env: extra vars). Resolves
 // { started, err, pidLeft }: a started tbd is SIGTERMed at once; pidLeft = tbd.pid text after exit or null.
-/** @param {{ pid?: string, mtime?: Date, tbHome?: string, home?: string }} [opts] */
-function boot({ pid, mtime, tbHome, home } = {}) {
+/** @param {{ pid?: string, mtime?: Date, tbHome?: string, home?: string, env?: Record<string, string> }} [opts] */
+function boot({ pid, mtime, tbHome, home, env = {} } = {}) {
   const dir = tbHome ? null : fs.mkdtempSync(path.join(os.tmpdir(), 'tbd-pid-'));
   if (dir) {
     tbHome = path.join(dir, 'tbhome');
@@ -162,7 +162,7 @@ function boot({ pid, mtime, tbHome, home } = {}) {
   const pidFile = path.join(tbHome, 'tbd.pid');
   if (pid !== undefined) fs.writeFileSync(pidFile, pid);
   if (mtime) fs.utimesSync(pidFile, mtime, mtime);
-  const child = spawn(process.execPath, [TBD], { env: isolatedEnv({ home, tbHome, port: 0 }), stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(process.execPath, [TBD], { env: isolatedEnv({ home, tbHome, port: 0 }, env), stdio: ['ignore', 'pipe', 'pipe'] });
   let out = '';
   let err = '';
   child.stdout.on('data', (c) => { out += c; if (out.includes('tbd listening')) child.kill('SIGTERM'); });
@@ -201,6 +201,20 @@ test('A2 empty or garbage tbd.pid written since boot: refused after one re-read,
   }
   const beforeBoot = new Date(Date.now() - os.uptime() * 1000 - 3_600_000);
   assert.equal((await boot({ pid: '', mtime: beforeBoot })).started, true, 'empty but older than boot = stale');
+});
+
+// uv_uptime: os.uptime throws inside a board run's sandbox. No boot time = every tbd.pid gets the live-tbd check.
+test('A2b os.uptime throws: a live tbd\'s tbd.pid (even an old one) still refuses the start; a dead pid\'s is replaced', async (t) => {
+  const NO_UPTIME = { NODE_OPTIONS: `--require ${path.join(__dirname, 'helpers', 'no-uptime.js')}` };
+  const old = new Date('2000-01-01T00:00:00Z');
+  const live = await startTbd();
+  t.after(() => live.stop());
+  const livePid = readFile(live, 'tbd.pid');
+  fs.utimesSync(path.join(live.tbHome, 'tbd.pid'), old, old);
+  const same = await boot({ tbHome: live.tbHome, home: live.home, env: NO_UPTIME });
+  assert.deepEqual(same, { started: false, err: `error: tbd already running (pid ${livePid})\n`, pidLeft: livePid });
+  const dead = String(spawnSync(process.execPath, ['-e', '']).pid);
+  assert.equal((await boot({ pid: dead, mtime: old, env: NO_UPTIME })).started, true, 'dead pid = stale, replaced');
 });
 
 // A3 A4
