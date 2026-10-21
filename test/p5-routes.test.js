@@ -384,6 +384,30 @@ test('AC11 children: own pass → final_gate waiting children 0/2; a child done 
   assert.equal(alerts().length, 2, 'the boot scan told nothing again');
 });
 
+// gap 2026-10-20 (t_qwjn25, t_035vjf): a plan approve is Irfan's step-in like answer / rework / pass. Tag acme has no
+// path and the tickets no plan round, so each accepted approve's setup fails fast (setup_failed): no git runs here.
+test('approve is an intervention (cli | ui): one row each in today\'s format, tb interventions lists it, the count +1; a reject and a refused approve (409) write none', async (t) => {
+  const ids = ['t_apv001', 't_apv002', 't_apv003'];
+  const files = { 'tags.json': TAGS, 'tickets/t_apv004/ticket.json': ticket('t_apv004', { state: 'clarify', tag: 'acme', round: 2 }) };
+  for (const id of ids) files[`tickets/${id}/ticket.json`] = ticket(id, { state: 'plan_approval', tag: 'acme', round: 2 });
+  const tbd = await startTbd({ files, env: ENV });
+  t.after(() => tbd.stop());
+  const b = await browser(tbd);
+  assert.equal((await b.post('/api/tickets/t_apv001/approve', {})).status, 202);
+  assert.match((await runTb(['approve', 't_apv002'], tbd)).stdout, /^approve: accepted · t_apv002 · /);
+  for (const id of ['t_apv001', 't_apv002']) await until(() => read(tbd, id).waiting?.reason === 'setup_failed', 10_000, `${id} setup_failed`);
+  const row = lines(tk(tbd, 't_apv002', 'interventions.jsonl'));
+  assert.deepEqual(row.map((l) => Object.keys(l)), [['at', 'actor', 'verb', 'task', 'payload_sha256']]);
+  assert.deepEqual([ivs(tbd, 't_apv001'), ivs(tbd, 't_apv002')], [[['ui', 'approve', null]], [['cli', 'approve', null]]]);
+  assert.deepEqual([read(tbd, 't_apv001').interventions, read(tbd, 't_apv002').interventions], [1, 1]);
+  assert.match((await runTb(['interventions', 't_apv002'], tbd)).stdout, /^interventions\[1\]\{at,actor,verb,task\}:\n {2}\S+,cli,approve,""\n/);
+  // (−) a reject is no approve; an approve outside plan_approval is refused and writes nothing
+  assert.match((await runTb(['reject', 't_apv003', 'not this way'], tbd)).stdout, /^reject: ok · t_apv003 · planning/);
+  assert.equal((await tbd.api('POST', '/api/tickets/t_apv004/approve', {})).status, 409);
+  for (const id of ['t_apv003', 't_apv004']) assert.equal(fs.existsSync(tk(tbd, id, 'interventions.jsonl')), false, id);
+  assert.equal(read(tbd, 't_apv004').interventions, undefined);
+});
+
 test('SSE gate event: {id, task, check, ok} only, strings cut at 64, bad input → none (RAM bound)', () => {
   const home = fs.mkdtempSync(path.join(ROOT, 'sse-'));
   process.env.TB_HOME = home;

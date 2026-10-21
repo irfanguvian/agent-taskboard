@@ -79,6 +79,8 @@ test('Task whole path: plan → approve resumes run 1 session → waits for you 
   const s2 = tbd.dump(2);
   assert.equal(s2.opts['--resume'], session);
   assert.match(s2.prompt, /Irfan approved your plan/);
+  // gap 2026-10-20: a Task's approve is Irfan's step-in too (one row, same write as the move)
+  assert.deepEqual(lines(path.join(tbd.tbHome, 'tickets', id, 'interventions.jsonl')).map((l) => [l.actor, l.verb, l.task]), [['cli', 'approve', null]]);
   const k = read(tbd, id);
   assert.equal(k.state, 'working');
   assert.equal(k.task_result.summary, 'added the line');

@@ -419,6 +419,31 @@ test('list: a flow\'s waiting column is its reason (children done/total), empty 
   }
 });
 
+// gap 2026-10-20: a plan waiting for Irfan's approve says so in tb show / tb get, in the board's Needs You words
+// (ui/app.js NEED_PILL plan_approval 'Approve Plan'); a plan_approval wait of its own (setup_failed) keeps its line
+test('show / get: plan_approval with no wait of its own → waiting "Needs You · Approve Plan" + the approve and reject commands; setup_failed keeps its own line; clarify gets no Approve Plan', async () => {
+  const since = '2026-10-20T00:00:00.000Z';
+  const files = Object.fromEntries([
+    ticket('t_apl001', { state: 'plan_approval' }),
+    ticket('t_apl002', { state: 'plan_approval', waiting: { reason: 'setup_failed', error: 'boom', since } }),
+    ticket('t_apl003', { state: 'clarify' }),
+  ].map(k => [`tickets/${k.id}/ticket.json`, k]));
+  const t = await startTbd({ files });
+  try {
+    const want = '  waiting: "Needs You · Approve Plan: tb approve t_apl001, or tb reject t_apl001 <comment>"\n';
+    for (const verb of ['show', 'get']) {
+      const out = (await runTb([verb, 't_apl001'], t)).stdout;
+      assert.ok(out.includes(want), `${verb}\n${out}`);
+    }
+    const failed = (await runTb(['show', 't_apl002'], t)).stdout;
+    assert.ok(failed.includes('  waiting: "setup_failed · error: boom · since: ') && !failed.includes('Approve Plan'), failed);
+    const clarify = (await runTb(['show', 't_apl003'], t)).stdout;
+    assert.ok(!clarify.includes('Approve Plan') && !clarify.includes('  waiting:'), clarify);
+  } finally {
+    await t.stop();
+  }
+});
+
 // M5.3 C13 C20: tb close, tb rework at close, the final gate in tb show / list --flows. A final gate waiting close is
 // left alone by the runner (lib/final.js next), so these fixtures stay put without a worktree.
 test('M5.3 tb close: waiting close + squash → done (squash line); refused 409 → exit 1 with tbd\'s why (not squashed, already done); tb rework at close with a started dependent → "cancel children first"; show + list --flows name the wait; show has the push line + the tag ident (or the hint on a push tag without one)', async () => {

@@ -239,7 +239,7 @@ test('Phase 5 ask + resume (+): questions → clarify (origin review, round file
   assert.equal(d[2].prompt, prompt);
   assert.deepEqual(k().answers.map((x) => [x.id, x.answer]), [['R2Q1', { pick: 'drop' }]]);
   assert.equal(k().asks?.review, undefined, 'the Resume out of Blocked started a new review visit');
-  assert.deepEqual(lines(tk(tbd, id, 'interventions.jsonl')).map((l) => [l.actor, l.verb]), [['cli', 'answer'], ['cli', 'resume']]);
+  assert.deepEqual(lines(tk(tbd, id, 'interventions.jsonl')).map((l) => [l.actor, l.verb]), [['cli', 'approve'], ['cli', 'answer'], ['cli', 'resume']]); // gap 2026-10-20 contract change: + the approve row
 });
 
 // review of f1814d1 (contract change; was: asks seeded on the ticket): the count survives ask → answer → resume, so two

@@ -354,7 +354,7 @@ test('working-origin (+) a NEEDS_CONTEXT clarify opens a one-question text page 
   const file = path.join(tbd.tbHome, 'interview', `${id}-r05`, 'page.html'); // read while the round is open: leaving clarify removes it
   const page = (await until(() => fs.existsSync(file) && fs.readFileSync(file, 'utf8'), 15_000, 'page')).match(/<form[\s\S]*<\/form>/)?.[0] ?? '';
   await until(async () => (await view(tbd, id))?.state === 'working', 30_000, 'answered from the page');
-  assert.deepEqual(rows(tbd, id), [['lavish', 'answer']]);
+  assert.deepEqual(rows(tbd, id), [['cli', 'approve'], ['lavish', 'answer']]); // gap 2026-10-20 contract change: + workAsk's approve row
   assert.match(page, /Q1\. Page size 20 or 50\?/);
   assert.equal(/type="radio"/.test(page), false, 'free text only: no options, no You Decide');
   assert.equal(opened(tbd.tbHome).length, 1, 'tbd opened the page once');

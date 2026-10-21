@@ -239,8 +239,10 @@ test('N6 continue + M12: NEEDS_CONTEXT → clarify (why, class); tb answer → t
   assert.equal(fs.readFileSync(kept, 'utf8'), 'wip\n', 'continue: no reset, the uncommitted file was still there');
   assert.equal(fs.readFileSync(path.join(w.wt, '.env.test'), 'utf8'), 'SECRET=1\n', 'M1: env file copied again before the gate (it went green)');
   const iv = lines(tk(tbd, id, 'interventions.jsonl'));
-  assert.deepEqual(iv.map((l) => [l.actor, l.verb, l.task, l.payload_sha256]), [['cli', 'answer', 'T1', crypto.createHash('sha256').update(JSON.stringify({ text: '50' })).digest('hex')]]);
-  assert.equal(k().interventions, 1);
+  // gap 2026-10-20 contract change: the approve before is a row too (was: the answer only, count 1)
+  const sha = (v) => crypto.createHash('sha256').update(JSON.stringify(v)).digest('hex');
+  assert.deepEqual(iv.map((l) => [l.actor, l.verb, l.task, l.payload_sha256]), [['cli', 'approve', null, sha({ n: null })], ['cli', 'answer', 'T1', sha({ text: '50' })]]);
+  assert.equal(k().interventions, 2);
   assert.equal(k().clarify_origin, undefined);
 });
 
@@ -337,8 +339,9 @@ test('I5 K3 RO6: NEEDS_SCOPE → clarify; tb scope --allow (UI ok for scope) →
   await until(() => k().state === 'review', 30_000, 'review');
   assert.deepEqual(json(tk(tbd, id, 'scope.json')).allow.T1, [{ path: 'lib/extra.js' }, { path: 'package.json', blob: git(w.wt, 'rev-parse', 'HEAD:package.json') }]);
   assert.deepEqual(k().work.scope, { T1: 2 }, 'F5: ticket.json keeps the count only');
-  assert.deepEqual(lines(tk(tbd, id, 'interventions.jsonl')).map((l) => [l.actor, l.verb]), [['ui', 'scope-allow'], ['cli', 'scope-allow']]);
-  assert.equal(k().interventions, 2);
+  // gap 2026-10-20 contract change: + the approve row first (was: the two scope-allows, count 2)
+  assert.deepEqual(lines(tk(tbd, id, 'interventions.jsonl')).map((l) => [l.actor, l.verb]), [['cli', 'approve'], ['ui', 'scope-allow'], ['cli', 'scope-allow']]);
+  assert.equal(k().interventions, 3);
 
   const d = await approved(t, { id: 't_deny01', tasks: [task('T1')], sessions: [{ steps: [ask] }, { steps: [ask] }] });
   await until(() => d.k().state === 'clarify', 30_000, 'ask');
@@ -449,7 +452,8 @@ test('I10 K1: tb rework from review (unbuilt) → feedback-<n>.md, a fresh @rw<n
   assert.equal((await w.rpc('rework', { feedback: 'once more' })).ok, true);
   assert.deepEqual([k().state, k().blocked_from, k().rework, k().waiting.reason], ['blocked', 'review', 2, 'rework']);
   assert.equal(fs.existsSync(tk(tbd, id, 'feedback-3.md')), false);
-  assert.deepEqual(lines(tk(tbd, id, 'interventions.jsonl')).map((l) => [l.verb, l.task]), [['rework', '@rw1'], ['rework', '@rw2'], ['rework', null]]);
+  // gap 2026-10-20 contract change: the plan approve is a row too (was: the three reworks only)
+  assert.deepEqual(lines(tk(tbd, id, 'interventions.jsonl')).map((l) => [l.verb, l.task]), [['approve', null], ['rework', '@rw1'], ['rework', '@rw2'], ['rework', null]]);
   assert.equal((await tbd.api('POST', `/api/tickets/${id}/resume`, { phase: 'working' })).status, 202);
   await until(() => k().state === 'review', 30_000, 'resume → working gate → review');
   assert.equal(k().rework, 0);
@@ -510,7 +514,8 @@ test('I13 K4+C2: --replan → planning (seed ## Replan) → keep naming an undon
   assert.deepEqual([p.plan_hashes.length, p.plan_hashes[0], p.plan_hash === oldHash], [2, oldHash, false]);
   assert.deepEqual(p.work.tasks.map((x) => [x.id, x.status, x.pre]), [['T1', 'done', w.base], ['T2', 'done', t1]]);
   assert.equal(p.clarify_origin, undefined);
-  assert.deepEqual(lines(tk(tbd, id, 'interventions.jsonl')).map((l) => l.verb), ['replan']);
+  // gap 2026-10-20 contract change: both approves are rows (was: ['replan'])
+  assert.deepEqual(lines(tk(tbd, id, 'interventions.jsonl')).map((l) => l.verb), ['approve', 'replan', 'approve']);
 });
 
 const POLICY = { ok: false, class: 'policy', ask: { kind: 'policy', changes: ['drop User.nickname'], reason: 'a schema change the plan does not allow' }, schema: [{ op: 'drop', ref: 'User.nickname', allowed: false }], why: 'policy: drop User.nickname' };
@@ -533,7 +538,7 @@ test('M9 N8: a policy red of the working gate → clarify alone; --allow-change 
   assert.equal(crypto.createHash('sha256').update(canon(frozen)).digest('hex'), p.plan_hash);
   assert.deepEqual(json(tk(tbd, id, `plan-${before}.json`)).allowed_schema_changes, [], 'the old plan file is untouched');
   assert.equal(w.dumps().length, 1, 'no planner, no session');
-  assert.deepEqual(lines(tk(tbd, id, 'interventions.jsonl')).map((l) => l.verb), ['allow-change']);
+  assert.deepEqual(lines(tk(tbd, id, 'interventions.jsonl')).map((l) => l.verb), ['approve', 'allow-change']); // gap 2026-10-20: + the approve row
 });
 
 test('M9: --deny-change → an @fix session from HEAD (no reset) told to revert it; its gate is the working gate → review', async (t) => {
@@ -680,7 +685,7 @@ test('F3 RO2: a deps ask from the gate → tb scope --allow (CLI only) builds sa
   await until(() => k().state === 'review', 30_000, 'review');
   assert.equal(typeof k().config_baseline.tripwire.lock, 'string', 'the baseline was taken again after the build (else integrity red)');
   assert.equal(w.dumps()[1].opts['--resume'], w.dumps()[0].opts['--session-id']);
-  assert.deepEqual(lines(tk(tbd, id, 'interventions.jsonl')).map((l) => [l.actor, l.verb]), [['cli', 'scope-allow'], ['cli', 'scope-allow']]);
+  assert.deepEqual(lines(tk(tbd, id, 'interventions.jsonl')).map((l) => [l.actor, l.verb]), [['cli', 'approve'], ['cli', 'scope-allow'], ['cli', 'scope-allow']]); // gap 2026-10-20: + the approve row
 });
 
 test('RO2 deps build in flight: work.building holds the other verbs off (a 2nd tb scope → 409); the build\'s allow lands once → the same session goes on → review', async (t) => {
@@ -693,7 +698,7 @@ test('RO2 deps build in flight: work.building holds the other verbs off (a 2nd t
   assert.equal((await w.rpc('scope', { allow: false })).status, 409);
   assert.equal((await allow).ok, true);
   await until(() => k().state === 'review', 30_000, 'review');
-  assert.deepEqual([lines(tk(tbd, id, 'interventions.jsonl')).map((l) => l.verb), k().work.building], [['scope-allow'], undefined]);
+  assert.deepEqual([lines(tk(tbd, id, 'interventions.jsonl')).map((l) => l.verb), k().work.building], [['approve', 'scope-allow'], undefined]); // gap 2026-10-20: + the approve row
 });
 
 test('F2 RO2 replan: kept commits change the lockfile vs base_sha → the tag\'s plain setup does not run again; the sandboxed build (offline) needs the network → clarify deps; the CLI allow builds online → the next task runs → green', async (t) => {
@@ -714,7 +719,7 @@ test('F2 RO2 replan: kept commits change the lockfile vs base_sha → the tag\'s
   await until(() => k().state === 'review', 30_000, 'review');
   assert.deepEqual(k().work.tasks.map((x) => [x.id, x.status]), [['T1', 'done'], ['T2', 'done']]);
   assert.equal(typeof k().config_baseline.tripwire.lock, 'string');
-  assert.deepEqual(lines(tk(tbd, id, 'interventions.jsonl')).map((l) => l.verb), ['replan', 'scope-allow']);
+  assert.deepEqual(lines(tk(tbd, id, 'interventions.jsonl')).map((l) => l.verb), ['approve', 'replan', 'approve', 'scope-allow']); // gap 2026-10-20: both approves are rows
 });
 
 test('F5 RAM worst case: a 30-task cursor + a NEEDS_SCOPE of 50 × 290-char paths (4 KB reason) allowed + a 4 KB red why + a 4 KB question → ticket.json stays ≤ 16 KB (lists in scope.json, text in work.jsonl)', async (t) => {

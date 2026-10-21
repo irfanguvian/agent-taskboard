@@ -689,9 +689,10 @@ test('Phase 3 Run in Parallel Next (+/−): the pick beats the first ready task 
     { badge: 'one', why: 'it waits for task T2' }, { badge: 'one', why: 'it shares a file with task T1' }]);
   for (const x of ['T1', 'T4']) assert.equal((await lanePost(w, { task: x, op: 'next' })).status, 409, x);
   for (const bad of [{ task: 'T5' }, { task: 'T5', op: 'next', extra: 1 }, { task: 5, op: 'next' }, { task: 'T5', op: 'zap' }]) assert.equal((await lanePost(w, bad)).status, 400, JSON.stringify(bad));
-  assert.deepEqual([w.k().work.lane_pick, ivRows(w)], [undefined, []]);
+  // gap 2026-10-20 contract change: this parent is approved for real, so its approve row comes first (was: none)
+  assert.deepEqual([w.k().work.lane_pick, ivRows(w)], [undefined, [['approve', null]]]);
   assert.equal((await lanePost(w, { task: 'T5', op: 'next' })).status, 200);
-  assert.deepEqual([w.k().work.lane_pick, (await view(w)).tasks.T5, ivRows(w)], ['T5', { badge: 'can', next: true }, [['lane-next', 'T5']]]);
+  assert.deepEqual([w.k().work.lane_pick, (await view(w)).tasks.T5, ivRows(w)], ['T5', { badge: 'can', next: true }, [['approve', null], ['lane-next', 'T5']]]);
   w.pressure('normal');
   go('p3-next');
   await until(() => Object.keys(w.k().work.lanes ?? {}).length > 0, 45_000, 'a lane started');
@@ -735,9 +736,10 @@ test('Phase 3 Subagents for This Ticket (+/−): sets and clears ticket.subagent
   const w = await parent(t, { tasks: [task('T1')], sessions: T1Held('p3-sub') });
   const sub = (b) => w.tbd.api('POST', `/api/tickets/${w.id}/subagents`, b);
   assert.equal((await sub({ concurrent: 4 })).status, 200);
-  assert.deepEqual([w.k().subagents, ivRows(w)], [{ concurrent: 4 }, [['subagents', null]]]);
+  // gap 2026-10-20 contract change: + the real approve's row first (was: the subagents row only, length 1)
+  assert.deepEqual([w.k().subagents, ivRows(w)], [{ concurrent: 4 }, [['approve', null], ['subagents', null]]]);
   for (const bad of [{ concurrent: 5 }, { concurrent: 0 }, { concurrent: '2' }, { concurrent: 2, x: 1 }, {}]) assert.equal((await sub(bad)).status, 400, JSON.stringify(bad));
-  assert.deepEqual([w.k().subagents, ivRows(w).length], [{ concurrent: 4 }, 1]);
+  assert.deepEqual([w.k().subagents, ivRows(w).length], [{ concurrent: 4 }, 2]);
   assert.equal((await sub({ concurrent: null })).status, 200);
   assert.equal('subagents' in w.k(), false);
   go('p3-sub');
