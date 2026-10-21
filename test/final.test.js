@@ -172,7 +172,8 @@ test('F1 F3b F3c F3d D-0106: final checks green → the final review on another 
   for (const x of [`the whole change: git diff ${r.base}..${ba.head}`, '- TC-1 positive backend PASS [captured by tbd] A1: 200', '# QA\n\n**Verdict:** PASS',
     '## Final checks\n\n- e2e: pass — Tests: 3 passed', `verdict doc: docs/verdicts/`]) assert.ok(seed.includes(x), `seed: ${x}`);
   const sum = fs.readFileSync(tk(tbd, a, 'summary.md'), 'utf8');
-  assert.match(sum, /^\*\*Title:\*\* Users by id\n\n\*\*Description:\*\* GET \/users\/:id/);
+  // contract change: verdict first (was last), Irfan's handoff format
+  assert.match(sum, /^\*\*Verdict:\*\* shipped\n\n\*\*Title:\*\* Users by id\n\n\*\*Description:\*\* GET \/users\/:id/);
   assert.match(sum, /\*\*Need Review:\*\* none\nThe squash is authored as the tag ident Tag Owner <owner@example\.com>; the tested commits were by t <t@t>/);
   for (const x of ['- QA 1 need review: TC-2 screenshot only', '- review 1 R1 MED (medium) src/users.js:1: R1 problem', '- review 1 R2 LOW (high) src/users.js:1: R2 problem',
     '- final F9 HIGH (medium) src/users.js:1: F9 problem']) assert.ok(sum.includes(`\n${x}\n`), `M3 summary.md need review: ${x}`);

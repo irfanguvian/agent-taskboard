@@ -56,24 +56,24 @@
     },
     "summary": {
       "type": "string",
-      "maxLength": 4096
+      "maxLength": 800
     },
     "steps": {
       "type": "array",
       "minItems": 1,
-      "maxItems": 30,
+      "maxItems": 15,
       "items": {
         "type": "string",
-        "maxLength": 500
+        "maxLength": 200
       }
     },
     "done_when": {
       "type": "array",
       "minItems": 1,
-      "maxItems": 20,
+      "maxItems": 8,
       "items": {
         "type": "string",
-        "maxLength": 500
+        "maxLength": 200
       }
     },
     "facts": {

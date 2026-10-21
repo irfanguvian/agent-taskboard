@@ -73,3 +73,10 @@ Deterministic checks (compiler, type checker, linter, schema or DTO validation, 
 - No placeholders, stub tests, to-do notes or unbuilt branches left behind.
 - No `.skip`, `.only` or other focus markers.
 - Name every blocker plainly.
+
+## 10. Writing
+
+- What a human reads (summaries, notes, findings, questions, docs): the verdict or answer first, in one plain sentence. Commit messages keep the commit rules.
+- Then short bullets: at most 5 per group, 20 words or fewer each (summary prose only: never cut findings, questions, plan tasks or QA cases). No preamble, recap, closing line or side story.
+- Numbers over adjectives ("12 of 12 tests pass"); time in minutes or hours; errors as cause then fix.
+- No bare codes without plain words next to them. End with one next action.

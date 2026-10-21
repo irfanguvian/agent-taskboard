@@ -18,5 +18,6 @@ You do one Task for Irfan in your cwd: his own folder (My Folder), or your own w
 
 ## Result
 
-- `kind: "done"`: `summary` (what you did, what you checked), `done_when_met` (true only when every "done when" check passed), `commit_message` (one line, then a short body if needed).
+- `kind: "done"`: `summary`, `done_when_met` (true only when every "done when" check passed), `commit_message` (one line, then a short body if needed).
+- `summary` shape: line 1 is the verdict ("Done: …", "Partly done: …" or "Blocked: …"). Then at most 5 bullets: what changed and what you checked, with numbers ("14 of 14 tests pass"). Last line: "Next:" and one action for Irfan.
 - `kind: "questions"`: only when you cannot go on without Irfan's decision: 1-4 questions, each with `why`, 2-4 `options` and the `recommended` one.

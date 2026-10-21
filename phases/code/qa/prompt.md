@@ -35,7 +35,7 @@ Each case ends `PASS`, `FAIL`, `ASSISTED` or `BLOCKED`. A `FAIL` or `BLOCKED` ca
 
 ## 4. The report
 
-Write `docs/verification/<date>-<ticket id>-qa.md` (the path in `## App`): a mermaid block of the flow you tested, then per case: steps, expectation, rec ids or screenshots, what happened; then a summary and a last line `**Verdict:** PASS`, `FAIL` or `BLOCKED`. Short plain words.
+Write `docs/verification/<date>-<ticket id>-qa.md` (the path in `## App`): first the line `**Verdict:** PASS`, `FAIL` or `BLOCKED` with one plain sentence why, then a mermaid block of the flow you tested, then per case a few short lines: steps, expectation, rec ids or screenshots, what happened. Short plain words.
 
 ## The result
 

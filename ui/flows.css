@@ -91,7 +91,8 @@
   letter-spacing: 0; overflow-wrap: anywhere;
 }
 .ticket-text, .summary { line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; }
-.summary { white-space: normal; }
+.summary { white-space: pre-line; }
+.part.you:not(.plan) .summary::first-line { font-weight: 600; } /* a Task result's line 1 is its verdict (a plan summary is one paragraph) */
 
 /* facts: a two-column grouped list, label Footnote muted, value Body, hairlines between rows */
 /* the gap between label and value is the label's padding, and both cells start at the row top with the value's line

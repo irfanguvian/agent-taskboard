@@ -56,7 +56,7 @@
     },
     "summary": {
       "type": "string",
-      "maxLength": 4096
+      "maxLength": 1200
     },
     "done_when_met": {
       "type": "boolean"

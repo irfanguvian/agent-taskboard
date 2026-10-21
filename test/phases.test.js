@@ -151,10 +151,10 @@ test('M5 C2 rules missing or over 8 KB → every code phase misconfigured (never
     sha12: require('node:crypto').createHash('sha256').update(ok).digest('hex').slice(0, 12) });
 });
 
-test('M5 C2 phases/_rules.md (public repo): ≤ 8 KB, headings 1-9 in order, OWASP 2025 A01..A10, no home path, email, person or tool name', () => {
+test('M5 C2 phases/_rules.md (public repo): ≤ 8 KB, headings 1-10 in order, OWASP 2025 A01..A10, no home path, email, person or tool name', () => {
   const text = fs.readFileSync(path.join(__dirname, '..', 'phases', '_rules.md'), 'utf8');
   assert.ok(Buffer.byteLength(text) <= 8 * 1024, `${Buffer.byteLength(text)} bytes`);
-  assert.deepEqual(text.match(/^## \d\. \w+/gm), ['## 1. Precedence', '## 2. Security', '## 3. Gates', '## 4. Performance', '## 5. API', '## 6. Code', '## 7. Database', '## 8. Tests', '## 9. Honesty']);
+  assert.deepEqual(text.match(/^## \d+\. \w+/gm), ['## 1. Precedence', '## 2. Security', '## 3. Gates', '## 4. Performance', '## 5. API', '## 6. Code', '## 7. Database', '## 8. Tests', '## 9. Honesty', '## 10. Writing']);
   assert.match(text, new RegExp(['A01 Broken Access Control', 'A02 Security Misconfiguration', 'A03 Software Supply Chain Failures', 'A04 Cryptographic Failures',
     'A05 Injection', 'A06 Insecure Design', 'A07 Authentication Failures', 'A08 Software or Data Integrity Failures', 'A09 Security Logging and Alerting Failures',
     'A10 Mishandling of Exceptional Conditions'].join('[^]*')), 'the 2025 list, in its order (not 2021)');

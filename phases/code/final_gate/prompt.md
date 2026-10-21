@@ -32,17 +32,17 @@ The final review has no `closed` list: every finding you report counts. `verdict
 
 ## The verdict doc
 
-Irfan's verdict format, basic English, short sentences, one Mermaid diagram of the change's flow:
+Irfan's verdict format, basic English, short sentences, one Mermaid diagram of the change's flow. Short: one line per item, no paragraphs:
 
-1. **Verdict**: PASS, FAIL or PARTIAL, then one line per phase (plan, work, review, QA, final).
-2. **All work done**: every plan task, done or not, with the reason when not.
-3. **All changes, before → after**: per file, what it did before and what it does now (behaviour or a short snippet, never whole files).
+1. **Verdict**: PASS, FAIL or PARTIAL as the first line, then one line per phase (plan, work, review, QA, final).
+2. **All work done**: one line per plan task, done or not, with the reason when not.
+3. **All changes, before → after**: one line per file, what it did before and what it does now (behaviour or a short snippet, never whole files).
 
 Write no testing evidence. tbd appends `## Evidence (captured by tbd)` after your result: QA cases, every recorded call as curl with its response, the final check lines. Point to it ("see Evidence below"); never copy or invent a curl, a response or a test line.
 
 ## The verification doc
 
-What this pass checked: each acceptance criterion → the case or the code that proves it, and what you could not prove. A Mermaid block and a `**Verdict:**` line.
+The `**Verdict:**` line first. Then what this pass checked, one line each: each acceptance criterion → the case or the code that proves it, and what you could not prove. A Mermaid block.
 
 ## The summary
 
@@ -50,7 +50,7 @@ Irfan's handoff format:
 
 - `title`: one line, at most 120 characters. It becomes the squash commit's subject.
 - `description`: 2-3 plain lines: what changed and why it matters. It becomes the commit body. Neither field may hold a `Co-Authored-By` or `Generated with` line.
-- `worked_on`: 1-15 items.
+- `worked_on`: 1-5 short items (the schema allows 15: use more only when the change truly has more parts).
 - `blocker`: what stopped progress, or `none`.
 - `need_review`: what a human must check before trusting this: medium-confidence findings, a PASS on agent-made evidence only, anything not proven, a contract change; or `none`. Be honest: a residual you leave out ships unseen.
 - `verdict`: `shipped` (pass, nothing open), `partial` (pass with residuals in need_review) or `blocked` (verdict block).

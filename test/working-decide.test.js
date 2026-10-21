@@ -78,6 +78,18 @@ test('schema caps (working result): done passes; notes/question over 4 KB, more 
   assert.throws(() => compile({ type: 'string', maxLength: -1 }), /bad value for "maxLength"/);
 });
 
+test('short output caps (Task results): at the limit passes, one over is refused (plan summary 800, steps 15 x 200, done_when 8 x 200; done summary 1200)', () => {
+  const plan = compile(require('../phases/task/planning/result.schema.json'));
+  const ok = { kind: 'plan', summary: 's'.repeat(800), steps: Array(15).fill('x'.repeat(200)), done_when: Array(8).fill('d'.repeat(200)) };
+  assert.deepEqual(plan(ok), []);
+  assert.deepEqual(plan({ ...ok, summary: 's'.repeat(801), steps: Array(16).fill('x'), done_when: ['d'.repeat(201)] }),
+    ['/summary: must have at most 800 characters', '/steps: must have at most 15 items', '/done_when/0: must have at most 200 characters']);
+  const done = compile(require('../phases/task/working/result.schema.json'));
+  const fin = { kind: 'done', summary: 'Done: x'.padEnd(1200, '.'), done_when_met: true, commit_message: 'c' };
+  assert.deepEqual(done(fin), []);
+  assert.deepEqual(done({ ...fin, summary: `${fin.summary}.` }), ['/summary: must have at most 1200 characters']);
+});
+
 test('M12 handler: status → field (untrusted result): done needs a commit sha, NEEDS_SCOPE needs needs_scope (and only it), NEEDS_CONTEXT / TEST_DISPUTES_SPEC a question → {reject}; a good done → gate pending, no move', async () => {
   const t = { ...tk({ tasks: [T('T1', 'pending')] }), lease: { gen: 7, session: 's2' } };
   const base = { commit: null, tests_added: [], notes: '' };
